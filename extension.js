@@ -2322,7 +2322,7 @@ export function createChatPanel({
   transcriptHandle.setAttribute("role", "separator");
   transcriptHandle.setAttribute("aria-orientation", "horizontal");
   transcriptHandle.setAttribute("aria-label", "Resize the conversation area");
-  transcriptHandle.hidden = true;
+  transcriptHandle.hidden = false;
   body.appendChild(transcriptHandle);
 
   const progress = createPanelElement(doc, "div", "roam-codex-chat-progress");
@@ -2375,6 +2375,8 @@ export function createChatPanel({
     return Number.isFinite(value) ? clampTranscriptHeight(value) : null;
   };
   const applyTranscriptHeight = (height) => {
+    setElementStyle(transcriptWrap, "height", `${height}px`);
+    setElementStyle(transcriptWrap, "maxHeight", `${height}px`);
     setElementStyle(transcript, "height", `${height}px`);
     setElementStyle(transcript, "maxHeight", `${height}px`);
   };
@@ -2473,7 +2475,7 @@ export function createChatPanel({
     doc,
     "kbd",
     "roam-codex-chat-send-kbd",
-    sendShortcutIsMac ? "⌥⏎" : "Alt ⏎",
+    sendShortcutIsMac ? "⌥↵" : "Alt ↵",
   );
   sendShortcut.setAttribute("aria-hidden", "true");
   sendButton.appendChild(sendShortcut);
@@ -2652,7 +2654,7 @@ export function createChatPanel({
     disposeRenderedMessages();
     const renderVersion = messageRenderVersion;
     transcript.replaceChildren();
-    transcriptHandle.hidden = !messages.length;
+    transcriptHandle.hidden = false;
     if (!messages.length) {
       transcript.appendChild(progress);
       syncTranscriptStatus();
@@ -2780,17 +2782,17 @@ export function createChatPanel({
     const selected = currentModelEntry();
     const parts = [selected?.displayName || selected?.id || "Model"];
     if (pickerEffort) parts.push(effortLabel(pickerEffort));
-    const tier = modelTierChoices(selected).find(
-      (entry) => entry.id === pickerSpeed,
-    );
-    if (tier && tier.id !== defaultTierIdFor(selected)) {
-      parts.push(tier.name || tier.id);
-    }
     return parts.join(" · ");
   };
 
   const renderPickerButton = () => {
     if (!modelsReady) return;
+    const tier = modelTierChoices(currentModelEntry()).find(
+      (entry) => entry.id === pickerSpeed,
+    );
+    pickerButton.dataset.speed = tier?.id === "priority"
+      ? "fast"
+      : "standard";
     pickerButton.textContent = pickerLabel();
     pickerButton.setAttribute("aria-expanded", String(pickerOpen));
   };

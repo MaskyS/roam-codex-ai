@@ -862,7 +862,7 @@ export class AppServerClient extends EventEmitter {
               `Prompt block UID: ${promptBlockUid}`,
               "Read this block and useful descendants with Roam MCP before answering.",
               "Treat its page and block references as part of the user's instruction.",
-              "Format for Roam renderString: use **bold** and __italic__ (never single-asterisk emphasis), and use • instead of Markdown - bullets.",
+              "Format for Roam renderString: use **bold** and __italic__, never single-asterisk emphasis.",
             ].join("\n"),
           },
         },

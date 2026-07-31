@@ -2560,8 +2560,9 @@ test("Send yields its slot to Stop while a turn runs and names its shortcut", as
     (element) => element.className === "roam-codex-chat-actions",
   );
   assert.match(sendButton.title, /Option\+Enter/);
-  assert.equal(shortcut.textContent, "⌥⏎");
+  assert.equal(shortcut.textContent, "⌥↵");
   assert.equal(shortcut["aria-hidden"], "true");
+  assert.equal(shortcut.parentNode, sendButton);
   assert.equal(sendButton.hidden, false);
   assert.equal(stopButton.hidden, true);
   assert.equal(progressMeta.hidden, true);
@@ -2615,14 +2616,20 @@ test("the transcript resize handle drags, clamps, and persists its height", asyn
   const transcript = panelElements(controller).find(
     (element) => element.className === "roam-codex-chat-transcript",
   );
-  assert.equal(handle.hidden, true);
+  const transcriptWrap = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-transcript-wrap",
+  );
+  assert.equal(handle.hidden, false);
   assert.equal(handle.role, "separator");
+  assert.equal(transcriptWrap.style.height, "640px");
+  assert.equal(transcriptWrap.style.maxHeight, "640px");
   assert.equal(transcript.style.height, "640px");
   assert.equal(transcript.style.maxHeight, "640px");
 
   handle.listeners.pointerdown({ clientY: 100, preventDefault() {} });
   doc.listeners.pointermove({ clientY: -180, preventDefault() {} });
   doc.listeners.pointerup();
+  assert.equal(transcriptWrap.style.height, "360px");
   assert.equal(
     values.get("roam-codex-lab.chat-transcript-height.maskys"),
     "360",
@@ -2860,7 +2867,8 @@ test("the picker offers Speed from serviceTiers and sends the chosen tier", asyn
   pickerSubmenu.children[1].listeners.click();
   assert.equal(pickerMenu.hidden, true);
   assert.equal(pickerSubmenu.hidden, true);
-  assert.equal(pickerButton.textContent, "GPT-5.6-Sol · Low · Fast");
+  assert.equal(pickerButton.textContent, "GPT-5.6-Sol · Low");
+  assert.equal(pickerButton.dataset.speed, "fast");
 
   await controller.send();
   assert.deepEqual(sent, [
