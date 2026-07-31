@@ -580,6 +580,72 @@
   padding: 0 4px 4px;
 }
 
+.roam-codex-chat-approvals[hidden] {
+  display: none;
+}
+
+.roam-codex-chat-approval {
+  background: rgba(138, 155, 168, 0.08);
+  border: 1px solid rgba(92, 112, 128, 0.2);
+  border-radius: 8px;
+  margin: 8px 4px;
+  padding: 10px;
+}
+
+.roam-codex-chat-approval-title {
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.roam-codex-chat-approval-question {
+  color: #5c7080;
+  font-size: 11px;
+  line-height: 1.4;
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+}
+
+.roam-codex-chat-approval-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+.roam-codex-chat-approval-accept,
+.roam-codex-chat-approval-reject {
+  border: 0;
+  border-radius: 5px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  min-height: 26px;
+  padding: 4px 10px;
+}
+
+.roam-codex-chat-approval-accept {
+  background: #137cbd;
+  color: #fff;
+}
+
+.roam-codex-chat-approval-reject {
+  background: rgba(92, 112, 128, 0.12);
+  color: inherit;
+}
+
+.roam-codex-chat-approval-accept:disabled,
+.roam-codex-chat-approval-reject:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.bp3-dark .roam-codex-chat-approval,
+.bp4-dark .roam-codex-chat-approval {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
 .roam-codex-chat-scroll-latest {
   align-items: center;
   appearance: none;

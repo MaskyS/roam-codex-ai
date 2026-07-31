@@ -26,6 +26,7 @@ const CHAT_TRANSCRIPT_HEIGHT_KEY = `roam-codex-lab.chat-transcript-height.${GRAP
 const CHAT_TRANSCRIPT_MIN_HEIGHT = 140;
 const CHAT_TRANSCRIPT_MAX_HEIGHT = 640;
 const CHAT_SCROLL_BOTTOM_THRESHOLD = 24;
+const CHAT_ACCESS_MODES = new Set(["auto", "read-only", "manual"]);
 const NATIVE_WINDOW_HEADER_CLASS = "roam-codex-native-window-header";
 const NATIVE_COMPOSER_CLASS = "roam-codex-native-composer";
 let ACTIVE_CHAT_PANEL = null;
@@ -45,7 +46,12 @@ function emptyChatState() {
   return {
     version: CHAT_STATE_VERSION,
     activeThreadId: null,
-    newConversationPreferences: { model: null, effort: null, speed: null },
+    newConversationPreferences: {
+      model: null,
+      effort: null,
+      speed: null,
+      access: "auto",
+    },
     conversations: {},
   };
 }
@@ -83,6 +89,7 @@ export function readChatState({
       model: typeof record.model === "string" ? record.model : null,
       effort: typeof record.effort === "string" ? record.effort : null,
       speed: typeof record.speed === "string" ? record.speed : null,
+      access: CHAT_ACCESS_MODES.has(record.access) ? record.access : "auto",
       threadPageUid: typeof record.threadPageUid === "string"
         ? record.threadPageUid
         : null,
@@ -123,6 +130,9 @@ export function readChatState({
       speed: typeof value.newConversationPreferences?.speed === "string"
         ? value.newConversationPreferences.speed
         : null,
+      access: CHAT_ACCESS_MODES.has(value.newConversationPreferences?.access)
+        ? value.newConversationPreferences.access
+        : "auto",
     },
     conversations,
   };
@@ -206,6 +216,7 @@ export async function readProbeStream(
     onProgress = () => {},
     onStarted = () => {},
     onThread = () => {},
+    onApproval = () => {},
   } = {},
 ) {
   if (!response.body?.getReader) {
@@ -246,6 +257,19 @@ export async function readProbeStream(
         onProgress({ kind: event.kind || "activity", text: event.text });
       } catch {
         // A presentation problem must not cancel the underlying Codex turn.
+      }
+    } else if (
+      event.type === "approval" &&
+      typeof event.approvalId === "string" &&
+      Array.isArray(event.questions)
+    ) {
+      try {
+        onApproval({
+          approvalId: event.approvalId,
+          questions: event.questions,
+        });
+      } catch {
+        // The bridge keeps the approval pending so the turn can still be stopped.
       }
     } else if (event.type === "completed") {
       result = event.result;
@@ -407,9 +431,11 @@ export async function requestPanelChat(message, {
   model = null,
   effort = null,
   serviceTier,
+  accessMode = "auto",
   onProgress = () => {},
   onStarted = () => {},
   onThread = () => {},
+  onApproval = () => {},
 } = {}) {
   if (!token) {
     throw new Error(
@@ -429,6 +455,7 @@ export async function requestPanelChat(message, {
   if (model) body.model = model;
   if (effort) body.effort = effort;
   if (serviceTier !== undefined) body.serviceTier = serviceTier;
+  body.accessMode = CHAT_ACCESS_MODES.has(accessMode) ? accessMode : "auto";
 
   const response = await fetchImpl(`${BRIDGE_URL}/chat`, {
     method: "POST",
@@ -455,7 +482,46 @@ export async function requestPanelChat(message, {
     onProgress,
     onStarted,
     onThread,
+    onApproval,
   });
+}
+
+export async function requestRunApproval(runId, approvalId, decision, {
+  fetchImpl = window.fetch.bind(window),
+  token = getToken(),
+} = {}) {
+  if (!token) {
+    throw new Error(
+      'No bridge token. Run "Codex: Pair local bridge" first.',
+    );
+  }
+  if (!/^[0-9a-f-]{36}$/i.test(runId) || !/^[0-9a-f-]{36}$/i.test(approvalId)) {
+    throw new Error("A valid active approval is required.");
+  }
+  if (!["accept", "reject"].includes(decision)) {
+    throw new Error("A valid approval decision is required.");
+  }
+  const response = await fetchImpl(
+    `${BRIDGE_URL}/runs/${runId}/approvals/${approvalId}`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ decision }),
+    },
+  );
+  let result = {};
+  try {
+    result = await response.json();
+  } catch {
+    // A useful status error is emitted below.
+  }
+  if (!response.ok) {
+    throw new Error(result.error || `Bridge returned HTTP ${response.status}.`);
+  }
+  return result;
 }
 
 export async function requestRunCancellation(runId, {
@@ -2167,6 +2233,7 @@ export function createChatPanel({
       scratchPrompt,
     }),
   cancelRequest = requestRunCancellation,
+  approvalRequest = requestRunApproval,
   protectedPromptUids = null,
   scratchPrompt = false,
   now = Date.now,
@@ -2212,11 +2279,13 @@ export function createChatPanel({
   let pickerModel = "";
   let pickerEffort = "";
   let pickerSpeed = "";
+  let pickerAccess = "auto";
   let pickerOpen = false;
   let pickerLevel = null;
   let messageRenderVersion = 0;
   const renderedMessageNodes = new Set();
   const copyFeedbackTimers = new Map();
+  const approvalCards = new Map();
 
   const panel = createPanelElement(doc, "section", CHAT_PANEL_CLASS);
   panel.id = CHAT_PANEL_ID;
@@ -2347,11 +2416,19 @@ export function createChatPanel({
     "roam-codex-chat-progress-text",
   );
   progress.appendChild(progressText);
+  const approvalContainer = createPanelElement(
+    doc,
+    "div",
+    "roam-codex-chat-approvals",
+  );
+  approvalContainer.hidden = true;
+  transcript.appendChild(approvalContainer);
   transcript.appendChild(progress);
 
   const syncTranscriptStatus = ({ scroll = false } = {}) => {
     if (progress.parentNode !== transcript) transcript.appendChild(progress);
-    transcript.hidden = !messages.length && progress.hidden;
+    transcript.hidden = !messages.length && progress.hidden &&
+      approvalCards.size === 0;
     if (scroll && !progress.hidden) {
       transcript.scrollTop = transcript.scrollHeight;
       updateScrollLatestButton();
@@ -2426,9 +2503,9 @@ export function createChatPanel({
     doc,
     "roam-codex-chat-picker-button",
     "Loading models…",
-    "Choose the model, reasoning effort, and speed",
+    "Choose the model, reasoning effort, speed, and access",
   );
-  pickerButton.setAttribute("aria-label", "Model, effort, and speed");
+  pickerButton.setAttribute("aria-label", "Model, effort, speed, and access");
   pickerButton.setAttribute("aria-haspopup", "menu");
   pickerButton.setAttribute("aria-expanded", "false");
   pickerButton.disabled = true;
@@ -2439,7 +2516,7 @@ export function createChatPanel({
     "roam-codex-chat-picker-menu",
   );
   pickerMenu.setAttribute("role", "menu");
-  pickerMenu.setAttribute("aria-label", "Model, effort, and speed options");
+  pickerMenu.setAttribute("aria-label", "Model, effort, speed, and access options");
   pickerMenu.hidden = true;
   pickerWrap.appendChild(pickerMenu);
   const pickerSubmenu = createPanelElement(
@@ -2502,14 +2579,16 @@ export function createChatPanel({
     const model = pickerModel || null;
     const effort = pickerEffort || null;
     const speed = pickerSpeed || null;
+    const access = CHAT_ACCESS_MODES.has(pickerAccess) ? pickerAccess : "auto";
     const record = currentRecord();
     if (record) {
       record.model = model;
       record.effort = effort;
       record.speed = speed;
+      record.access = access;
       record.updatedAt = now();
     } else {
-      state.newConversationPreferences = { model, effort, speed };
+      state.newConversationPreferences = { model, effort, speed, access };
     }
     persist();
   };
@@ -2525,6 +2604,9 @@ export function createChatPanel({
       model: pickerModel || previous?.model || null,
       effort: pickerEffort || previous?.effort || null,
       speed: pickerSpeed || previous?.speed || null,
+      access: CHAT_ACCESS_MODES.has(pickerAccess)
+        ? pickerAccess
+        : previous?.access || "auto",
       threadPageUid: previous?.threadPageUid || null,
       threadPageTitle: previous?.threadPageTitle || null,
       originInstallationId: previous?.originInstallationId || null,
@@ -2535,7 +2617,12 @@ export function createChatPanel({
       pendingGraphIndex: previous?.pendingGraphIndex || false,
     };
     state.activeThreadId = threadId;
-    state.newConversationPreferences = { model: null, effort: null, speed: null };
+    state.newConversationPreferences = {
+      model: null,
+      effort: null,
+      speed: null,
+      access: "auto",
+    };
     persist();
   };
 
@@ -2553,6 +2640,7 @@ export function createChatPanel({
       model: previous.model || null,
       effort: previous.effort || null,
       speed: previous.speed || null,
+      access: CHAT_ACCESS_MODES.has(previous.access) ? previous.access : "auto",
       threadPageUid: graphRecord.threadPageUid,
       threadPageTitle: graphRecord.threadPageTitle,
       originInstallationId: graphRecord.originInstallationId || null,
@@ -2656,6 +2744,7 @@ export function createChatPanel({
     transcript.replaceChildren();
     transcriptHandle.hidden = false;
     if (!messages.length) {
+      transcript.appendChild(approvalContainer);
       transcript.appendChild(progress);
       syncTranscriptStatus();
       scrollLatestButton.hidden = true;
@@ -2732,6 +2821,7 @@ export function createChatPanel({
       article.appendChild(messageText);
       transcript.appendChild(article);
     }
+    transcript.appendChild(approvalContainer);
     transcript.appendChild(progress);
     syncTranscriptStatus();
     transcript.scrollTop = transcript.scrollHeight;
@@ -2743,6 +2833,85 @@ export function createChatPanel({
     progress.dataset.kind = kind;
     progress.hidden = !progressText.textContent && progressMeta.hidden;
     syncTranscriptStatus({ scroll: !progress.hidden });
+  };
+
+  const removeApprovalCard = (approvalId) => {
+    if (!approvalCards.has(approvalId)) return;
+    approvalCards.delete(approvalId);
+    approvalContainer.replaceChildren(...approvalCards.values());
+    approvalContainer.hidden = approvalCards.size === 0;
+  };
+
+  const clearApprovalCards = () => {
+    approvalCards.clear();
+    approvalContainer.replaceChildren();
+    approvalContainer.hidden = true;
+  };
+
+  const renderApproval = ({ approvalId, questions }) => {
+    if (approvalCards.has(approvalId)) return;
+    const card = createPanelElement(doc, "section", "roam-codex-chat-approval");
+    card.setAttribute("aria-label", "Roam change approval");
+    const title = createPanelElement(
+      doc,
+      "div",
+      "roam-codex-chat-approval-title",
+      questions.find((question) => question?.header)?.header || "Allow Roam change?",
+    );
+    card.appendChild(title);
+    for (const question of questions) {
+      if (!question?.question) continue;
+      card.appendChild(createPanelElement(
+        doc,
+        "div",
+        "roam-codex-chat-approval-question",
+        question.question,
+      ));
+    }
+    const approvalActions = createPanelElement(
+      doc,
+      "div",
+      "roam-codex-chat-approval-actions",
+    );
+    const rejectButton = panelButton(
+      doc,
+      "roam-codex-chat-approval-reject",
+      "Reject",
+      "Reject this Roam change",
+    );
+    const acceptButton = panelButton(
+      doc,
+      "roam-codex-chat-approval-accept",
+      "Allow",
+      "Allow this Roam change",
+    );
+    const decide = (decision) => {
+      if (!runId) return;
+      rejectButton.disabled = true;
+      acceptButton.disabled = true;
+      card.dataset.state = "submitting";
+      void approvalRequest(runId, approvalId, decision)
+        .then(() => {
+          removeApprovalCard(approvalId);
+          setProgress("Continuing", "activity");
+        })
+        .catch((error) => {
+          card.dataset.state = "error";
+          rejectButton.disabled = false;
+          acceptButton.disabled = false;
+          setProgress(error.message || "Could not answer the approval.", "error");
+        });
+    };
+    rejectButton.addEventListener("click", () => decide("reject"));
+    acceptButton.addEventListener("click", () => decide("accept"));
+    approvalActions.appendChild(rejectButton);
+    approvalActions.appendChild(acceptButton);
+    card.appendChild(approvalActions);
+    approvalCards.set(approvalId, card);
+    approvalContainer.appendChild(card);
+    approvalContainer.hidden = false;
+    transcript.hidden = false;
+    transcript.scrollTop = transcript.scrollHeight;
   };
 
   const currentModelEntry = () =>
@@ -2775,6 +2944,9 @@ export function createChatPanel({
     pickerSpeed = tiers.some((tier) => tier.id === preferred.speed)
       ? preferred.speed
       : defaultTierIdFor(selected);
+    pickerAccess = CHAT_ACCESS_MODES.has(preferred.access)
+      ? preferred.access
+      : "auto";
   };
 
   const pickerLabel = () => {
@@ -2937,6 +3109,27 @@ export function createChatPanel({
           tier.description || "",
         );
       }
+      return;
+    }
+
+    if (pickerLevel === "access") {
+      const choices = [
+        ["auto", "Auto", "Allow requested Roam changes without asking"],
+        ["read-only", "Read only", "Do not expose Roam write tools"],
+        ["manual", "Manual", "Ask before each Roam write"],
+      ];
+      for (const [id, label, description] of choices) {
+        addOption(
+          label,
+          id === pickerAccess,
+          () => {
+            if (id === pickerAccess) return;
+            pickerAccess = id;
+            savePreferences();
+          },
+          description,
+        );
+      }
     }
   };
 
@@ -2959,6 +3152,7 @@ export function createChatPanel({
     if (tiers.length) {
       rows.push(["Speed", currentTier?.name || currentTier?.id || "—", "speed"]);
     }
+    rows.push(["Access", effortLabel(pickerAccess), "access"]);
     for (const [label, value, level] of rows) {
       const row = panelButton(
         doc,
@@ -3032,10 +3226,14 @@ export function createChatPanel({
     const model = pickerModel || preferences.model || null;
     const effort = pickerEffort || preferences.effort || null;
     const speed = pickerSpeed || preferences.speed || null;
+    const access = CHAT_ACCESS_MODES.has(pickerAccess)
+      ? pickerAccess
+      : preferences.access || "auto";
     selectionLoadVersion += 1;
     state.activeThreadId = null;
-    state.newConversationPreferences = { model, effort, speed };
+    state.newConversationPreferences = { model, effort, speed, access };
     messages = [];
+    clearApprovalCards();
     modelChanged = Boolean(model);
     effortChanged = Boolean(effort);
     speedChanged = Boolean(speed);
@@ -3432,6 +3630,7 @@ export function createChatPanel({
         model: modelOverride,
         effort: effortOverride,
         serviceTier: speedOverride,
+        accessMode: pickerAccess,
         onStarted: ({ runId: startedRunId }) => {
           runId = startedRunId;
         },
@@ -3445,6 +3644,7 @@ export function createChatPanel({
         onProgress: ({ kind, text: progressText }) => {
           setProgress(progressText, kind);
         },
+        onApproval: renderApproval,
       });
 
       const completedAt = now();
@@ -3521,6 +3721,7 @@ export function createChatPanel({
       );
       return null;
     } finally {
+      clearApprovalCards();
       runId = null;
       setRunning(false);
     }

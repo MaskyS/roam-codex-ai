@@ -46,6 +46,7 @@ const {
   requestPanelThreadSummaries,
   requestPanelThreadName,
   requestProbe,
+  requestRunApproval,
   requestRunCancellation,
   renderRoamMarkdown,
   restoreClearedChatPromptBlock,
@@ -339,6 +340,7 @@ test("chat state keeps versioned conversation records without a parallel draft",
         model: "model-from-list",
         effort: "medium",
         speed: null,
+        access: "auto",
         threadPageUid: null,
         threadPageTitle: null,
         originInstallationId: null,
@@ -630,6 +632,7 @@ test("panel chat streams a thread id, progress, and a panel-only reply", async (
     model: "model-from-list",
     effort: "medium",
     serviceTier: null,
+    accessMode: "auto",
     onStarted: (event) => starts.push(event),
     onThread: (event) => threads.push(event),
     onProgress: (event) => progress.push(event),
@@ -651,6 +654,7 @@ test("panel chat streams a thread id, progress, and a panel-only reply", async (
     model: "model-from-list",
     effort: "medium",
     serviceTier: null,
+    accessMode: "auto",
   });
   assert.deepEqual(starts, [{ runId: "run-1" }]);
   assert.deepEqual(threads, [{ threadId: "thread_12345678" }]);
@@ -2095,16 +2099,16 @@ test("chat clears a scratch composer before requesting a reply", async () => {
   assert.equal(pickerMenu.hidden, false);
   assert.deepEqual(
     pickerMenu.children.map((row) => row.children?.[0]?.textContent),
-    ["Model", "Effort"],
+    ["Model", "Effort", "Access"],
   );
   assert.deepEqual(
     pickerMenu.children.map((row) => row.children?.[1]?.textContent),
-    ["GPT-5.6-Sol", "Low"],
+    ["GPT-5.6-Sol", "Low", "Auto"],
   );
   pickerMenu.children[1].listeners.mouseenter();
   assert.deepEqual(
     pickerMenu.children.map((row) => row.children?.[0]?.textContent),
-    ["Model", "Effort"],
+    ["Model", "Effort", "Access"],
   );
   assert.equal(pickerSubmenu.hidden, false);
   assert.deepEqual(
@@ -2155,6 +2159,7 @@ test("chat clears a scratch composer before requesting a reply", async () => {
     model: "gpt-5.6-sol",
     effort: "low",
     speed: null,
+    access: "auto",
   });
   assert.equal(chatRequests, 1);
   assert.equal(
@@ -2813,6 +2818,7 @@ test("the picker offers Speed from serviceTiers and sends the chosen tier", asyn
         model: options.model,
         effort: options.effort,
         serviceTier: options.serviceTier,
+        accessMode: options.accessMode,
       });
       return { threadId: "thread_speed_123", turnId: "turn-1", reply: "ok" };
     },
@@ -2852,13 +2858,13 @@ test("the picker offers Speed from serviceTiers and sends the chosen tier", asyn
   pickerButton.listeners.click();
   assert.deepEqual(
     pickerMenu.children.map((row) => row.children?.[0]?.textContent),
-    ["Model", "Effort", "Speed"],
+    ["Model", "Effort", "Speed", "Access"],
   );
   assert.equal(pickerMenu.children[2].children[1].textContent, "Standard");
   pickerMenu.children[2].listeners.mouseenter();
   assert.deepEqual(
     pickerMenu.children.map((row) => row.children?.[0]?.textContent),
-    ["Model", "Effort", "Speed"],
+    ["Model", "Effort", "Speed", "Access"],
   );
   assert.deepEqual(
     pickerSubmenu.children.map((option) => option.children?.[0]?.textContent),
@@ -2872,8 +2878,123 @@ test("the picker offers Speed from serviceTiers and sends the chosen tier", asyn
 
   await controller.send();
   assert.deepEqual(sent, [
-    { model: null, effort: null, serviceTier: "priority" },
+    {
+      model: null,
+      effort: null,
+      serviceTier: "priority",
+      accessMode: "auto",
+    },
   ]);
+  await controller.close();
+});
+
+test("Manual access shows Allow and Reject before a Roam write continues", async () => {
+  const doc = createFakePanelDocument();
+  const storage = {
+    getItem: () => null,
+    setItem: () => {},
+  };
+  const approvalCalls = [];
+  let releaseApproval;
+  const approvalAnswered = new Promise((resolve) => {
+    releaseApproval = resolve;
+  });
+  let sentAccessMode = null;
+  const controller = createChatPanel({
+    doc,
+    storage,
+    api: {
+      ui: {
+        rightSidebar: { getWindows: () => [] },
+      },
+    },
+    rootBlockUid: "root123",
+    readPromptImpl: async () => ({ uid: "root123", text: "Rename the page" }),
+    requestChatImpl: async (_message, options) => {
+      sentAccessMode = options.accessMode;
+      options.onStarted({
+        runId: "12345678-1234-1234-1234-123456789abc",
+      });
+      options.onApproval({
+        approvalId: "abcdefab-1234-1234-1234-abcdefabcdef",
+        questions: [{
+          header: "Update page",
+          question: "Allow update_page to rename this page?",
+        }],
+      });
+      await approvalAnswered;
+      return {
+        threadId: "thread_manual_123",
+        turnId: "turn-manual",
+        reply: "Renamed",
+      };
+    },
+    approvalRequest: async (...args) => {
+      approvalCalls.push(args);
+      releaseApproval();
+      return { ok: true };
+    },
+    requestModelsImpl: async () => [{
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6-Sol",
+      isDefault: true,
+      defaultReasoningEffort: "low",
+      supportedReasoningEfforts: [{ reasoningEffort: "low" }],
+    }],
+    requestMessagesImpl: async () => [],
+    requestHistoryImpl: async () => ({
+      threads: [],
+      missingThreadIds: [],
+      unavailableThreadIds: [],
+    }),
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+
+  let elements = panelElements(controller);
+  const pickerButton = elements.find(
+    (element) => element.className === "roam-codex-chat-picker-button",
+  );
+  const pickerMenu = elements.find(
+    (element) => element.className === "roam-codex-chat-picker-menu",
+  );
+  const pickerSubmenu = elements.find(
+    (element) => element.className === "roam-codex-chat-picker-submenu",
+  );
+  pickerButton.listeners.click();
+  const accessRow = pickerMenu.children.at(-1);
+  assert.equal(accessRow.children[0].textContent, "Access");
+  accessRow.listeners.mouseenter();
+  assert.deepEqual(
+    pickerSubmenu.children.map((option) => option.children[0].textContent),
+    ["Auto", "Read only", "Manual"],
+  );
+  pickerSubmenu.children[2].listeners.click();
+
+  const sendPromise = controller.send();
+  await Promise.resolve();
+  await Promise.resolve();
+  elements = panelElements(controller);
+  const approvalCard = elements.find(
+    (element) => element.className === "roam-codex-chat-approval",
+  );
+  const allowButton = elements.find(
+    (element) => element.className === "roam-codex-chat-approval-accept",
+  );
+  const rejectButton = elements.find(
+    (element) => element.className === "roam-codex-chat-approval-reject",
+  );
+  assert.equal(approvalCard.children[0].textContent, "Update page");
+  assert.equal(allowButton.textContent, "Allow");
+  assert.equal(rejectButton.textContent, "Reject");
+  allowButton.listeners.click();
+  await sendPromise;
+  assert.equal(sentAccessMode, "manual");
+  assert.deepEqual(approvalCalls, [[
+    "12345678-1234-1234-1234-123456789abc",
+    "abcdefab-1234-1234-1234-abcdefabcdef",
+    "accept",
+  ]]);
   await controller.close();
 });
 
@@ -3236,6 +3357,33 @@ test("requestRunCancellation calls the authenticated run endpoint", async () => 
   assert.equal(captured.init.method, "POST");
   assert.equal(captured.init.headers.authorization, "Bearer local-token");
   assert.equal(result.status, "interrupting");
+});
+
+test("requestRunApproval answers the authenticated pending approval endpoint", async () => {
+  let captured;
+  const result = await requestRunApproval(
+    "12345678-1234-1234-1234-123456789abc",
+    "abcdefab-1234-1234-1234-abcdefabcdef",
+    "reject",
+    {
+      token: "local-token",
+      fetchImpl: async (url, init) => {
+        captured = { url, init };
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    },
+  );
+  assert.equal(
+    captured.url,
+    "http://127.0.0.1:47321/runs/12345678-1234-1234-1234-123456789abc/" +
+      "approvals/abcdefab-1234-1234-1234-abcdefabcdef",
+  );
+  assert.deepEqual(JSON.parse(captured.init.body), { decision: "reject" });
+  assert.equal(captured.init.headers.authorization, "Bearer local-token");
+  assert.deepEqual(result, { ok: true });
 });
 
 test("applyRunPlan appends edits and puts linked sources in targeted comments", async () => {

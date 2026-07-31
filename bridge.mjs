@@ -31,12 +31,12 @@ const RUNTIME_WORK_INSTRUCTIONS = readFileSync(
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 47321;
 const DEFAULT_GRAPH = "maskys";
-const DEFAULT_TIMEOUT_MS = 180_000;
 const MAX_BODY_BYTES = 16 * 1024;
 const MAX_PROGRESS_TEXT_LENGTH = 240;
 const MAX_CHAT_MESSAGE_LENGTH = 8_000;
 const MAX_THREAD_SUMMARY_IDS = 100;
 const THREAD_ID_PATTERN = /^[A-Za-z0-9_-]{8,128}$/;
+const CHAT_ACCESS_MODES = new Set(["auto", "read-only", "manual"]);
 const RUNTIME_READ_ROAM_TOOLS = [
   "get_graph_guidelines",
   "get_block",
@@ -149,6 +149,48 @@ export function runtimeThreadConfig(enabledTools) {
   };
 }
 
+function approvalOption(question, decision) {
+  const options = Array.isArray(question?.options) ? question.options : [];
+  const patterns = decision === "accept"
+    ? [/^accept$/i, /^allow$/i, /^approve$/i]
+    : [/^decline$/i, /^reject$/i, /^deny$/i, /^cancel$/i];
+  return options.find((option) =>
+    typeof option?.label === "string" &&
+    patterns.some((pattern) => pattern.test(option.label.trim()))
+  ) || null;
+}
+
+export function toolApprovalResponse(questions, decision) {
+  if (!Array.isArray(questions) || questions.length === 0) {
+    throw rpcError(
+      "App-server sent an approval request without questions.",
+      "APPROVAL_INVALID",
+    );
+  }
+  if (!["accept", "reject"].includes(decision)) {
+    throw rpcError("Invalid approval decision.", "APPROVAL_INVALID");
+  }
+
+  const answers = {};
+  for (const question of questions) {
+    if (typeof question?.id !== "string" || !question.id) {
+      throw rpcError(
+        "App-server sent an approval question without an id.",
+        "APPROVAL_INVALID",
+      );
+    }
+    const option = approvalOption(question, decision);
+    if (!option) {
+      throw rpcError(
+        "App-server requested unsupported interactive tool input.",
+        "APPROVAL_UNSUPPORTED",
+      );
+    }
+    answers[question.id] = { answers: [option.label] };
+  }
+  return { answers };
+}
+
 function isWithin(root, candidate) {
   const pathFromRoot = relative(resolve(root), resolve(candidate));
   return (
@@ -187,6 +229,16 @@ function runtimeInstructions(source, graph) {
     "",
     `Active Roam graph nickname: ${JSON.stringify(graph)}.`,
   ].join("\n");
+}
+
+function chatAccessInstruction(accessMode) {
+  if (accessMode === "read-only") {
+    return "Access mode: Read only. Do not attempt Roam writes; explain that the user can change Access if they request a graph change.";
+  }
+  if (accessMode === "manual") {
+    return "Access mode: Manual. Requested Roam writes require the user's approval before they run.";
+  }
+  return "Access mode: Auto. Carry out explicitly requested Roam changes with the available tools without asking for a separate confirmation.";
 }
 
 export const PLAN_SCHEMA = {
@@ -445,6 +497,7 @@ export class AppServerClient extends EventEmitter {
     this.child = null;
     this.startPromise = null;
     this.pending = new Map();
+    this.serverRequestHandlers = new Map();
     this.nextId = 1;
     this.ready = false;
     this.modelsCache = null;
@@ -539,7 +592,9 @@ export class AppServerClient extends EventEmitter {
     }
 
     if (Object.hasOwn(message, "id") && message.method) {
-      this.#rejectServerRequest(message);
+      const handler = this.serverRequestHandlers.get(message.params?.threadId);
+      if (handler) handler(message);
+      else this.rejectServerRequest(message);
       return;
     }
 
@@ -551,14 +606,17 @@ export class AppServerClient extends EventEmitter {
     }
   }
 
-  #rejectServerRequest(message) {
+  respondServerRequest(id, result) {
+    this.#send({ id, result });
+  }
+
+  rejectServerRequest(message, error = null) {
     this.#send({
       id: message.id,
       error: {
-        code: -32601,
-        message:
-          `Interactive app-server request "${message.method}" is not ` +
-          "supported by this read-only prototype.",
+        code: error?.code || -32601,
+        message: error?.message ||
+          `Interactive app-server request "${message.method}" is not supported.`,
       },
     });
   }
@@ -732,10 +790,11 @@ export class AppServerClient extends EventEmitter {
     model = null,
     effort = null,
     serviceTier,
-    timeoutMs = DEFAULT_TIMEOUT_MS,
+    accessMode = "auto",
     onProgress = () => {},
     onThread = () => {},
     onStarted = () => {},
+    onApproval = async () => "reject",
   }) {
     await this.start();
     if (!/^[A-Za-z0-9_-]{6,64}$/.test(promptBlockUid || "")) {
@@ -743,6 +802,9 @@ export class AppServerClient extends EventEmitter {
         "A valid Roam prompt block UID is required.",
         "PROMPT_BLOCK_INVALID",
       );
+    }
+    if (!CHAT_ACCESS_MODES.has(accessMode)) {
+      throw rpcError("Invalid chat access mode.", "ACCESS_MODE_INVALID");
     }
 
     if (model || effort || serviceTier != null) {
@@ -779,13 +841,17 @@ export class AppServerClient extends EventEmitter {
       }
     }
 
+    const enabledRoamTools = accessMode === "read-only"
+      ? RUNTIME_READ_ROAM_TOOLS
+      : RUNTIME_CHAT_ROAM_TOOLS;
+    const approvalPolicy = accessMode === "read-only" ? "never" : "on-request";
     const threadOptions = {
       cwd: this.runtimeCwd,
-      approvalPolicy: "never",
+      approvalPolicy,
       sandbox: "read-only",
-      config: runtimeThreadConfig(RUNTIME_CHAT_ROAM_TOOLS),
+      config: runtimeThreadConfig(enabledRoamTools),
       developerInstructions: runtimeInstructions(
-        RUNTIME_CHAT_INSTRUCTIONS,
+        `${RUNTIME_CHAT_INSTRUCTIONS}\n\n${chatAccessInstruction(accessMode)}`,
         graph,
       ),
     };
@@ -820,11 +886,35 @@ export class AppServerClient extends EventEmitter {
       resolveCompletion = resolveTurn;
       rejectCompletion = rejectTurn;
     });
-    const timer = setTimeout(() => {
-      rejectCompletion(
-        rpcError("Timed out waiting for the Codex turn.", "TURN_TIMEOUT"),
-      );
-    }, timeoutMs);
+    const rejectOnClientFailure = (error) => rejectCompletion(error);
+
+    const processServerRequest = (serverRequest) => {
+      void (async () => {
+        try {
+          if (serverRequest.method !== "item/tool/requestUserInput") {
+            this.rejectServerRequest(serverRequest);
+            return;
+          }
+          const questions = serverRequest.params?.questions;
+          const decision = accessMode === "auto"
+            ? "accept"
+            : accessMode === "manual"
+              ? await onApproval({
+                  requestId: serverRequest.id,
+                  itemId: serverRequest.params?.itemId || null,
+                  questions,
+                })
+              : "reject";
+          this.respondServerRequest(
+            serverRequest.id,
+            toolApprovalResponse(questions, decision),
+          );
+        } catch (error) {
+          this.rejectServerRequest(serverRequest, error);
+        }
+      })();
+    };
+    this.serverRequestHandlers.set(threadId, processServerRequest);
 
     const processNotification = ({ method, params }) => {
       if (!turnId) {
@@ -849,6 +939,8 @@ export class AppServerClient extends EventEmitter {
       }
     };
     this.on("notification", processNotification);
+    this.once("exit", rejectOnClientFailure);
+    this.once("protocolError", rejectOnClientFailure);
 
     try {
       const turnParams = {
@@ -862,11 +954,12 @@ export class AppServerClient extends EventEmitter {
               `Prompt block UID: ${promptBlockUid}`,
               "Read this block and useful descendants with Roam MCP before answering.",
               "Treat its page and block references as part of the user's instruction.",
+              chatAccessInstruction(accessMode),
               "Format for Roam renderString: use **bold** and __italic__, never single-asterisk emphasis.",
             ].join("\n"),
           },
         },
-        approvalPolicy: "never",
+        approvalPolicy,
         sandboxPolicy: { type: "readOnly", networkAccess: false },
         summary: "concise",
       };
@@ -912,8 +1005,12 @@ export class AppServerClient extends EventEmitter {
         reply: finalMessage.text.trim(),
       };
     } finally {
-      clearTimeout(timer);
       this.off("notification", processNotification);
+      this.off("exit", rejectOnClientFailure);
+      this.off("protocolError", rejectOnClientFailure);
+      if (this.serverRequestHandlers.get(threadId) === processServerRequest) {
+        this.serverRequestHandlers.delete(threadId);
+      }
       try {
         await this.request("thread/unsubscribe", { threadId }, 5_000);
       } catch {
@@ -935,7 +1032,6 @@ export class AppServerClient extends EventEmitter {
   async runProbe({
     graph = DEFAULT_GRAPH,
     blockUid,
-    timeoutMs = DEFAULT_TIMEOUT_MS,
     onProgress = () => {},
     onStarted = () => {},
   }) {
@@ -977,12 +1073,7 @@ export class AppServerClient extends EventEmitter {
       resolveCompletion = resolveTurn;
       rejectCompletion = rejectTurn;
     });
-
-    const timer = setTimeout(() => {
-      rejectCompletion(
-        rpcError("Timed out waiting for the Codex turn.", "TURN_TIMEOUT"),
-      );
-    }, timeoutMs);
+    const rejectOnClientFailure = (error) => rejectCompletion(error);
 
     const processNotification = ({ method, params }) => {
       if (!turnId) {
@@ -1010,6 +1101,8 @@ export class AppServerClient extends EventEmitter {
     };
 
     this.on("notification", processNotification);
+    this.once("exit", rejectOnClientFailure);
+    this.once("protocolError", rejectOnClientFailure);
 
     try {
       const turnResult = await this.request("turn/start", {
@@ -1061,8 +1154,9 @@ export class AppServerClient extends EventEmitter {
         plan: parseAndValidatePlan(finalMessage.text),
       };
     } finally {
-      clearTimeout(timer);
       this.off("notification", processNotification);
+      this.off("exit", rejectOnClientFailure);
+      this.off("protocolError", rejectOnClientFailure);
       try {
         await this.request("thread/unsubscribe", { threadId }, 5_000);
       } catch {
@@ -1689,6 +1783,11 @@ export function createBridgeServer({
           return;
         }
       }
+      const accessMode = body.accessMode || "auto";
+      if (!CHAT_ACCESS_MODES.has(accessMode)) {
+        sendJson(response, 400, { error: "Invalid accessMode." }, origin);
+        return;
+      }
       if (
         requestedThreadId &&
         activeRunsByThreadId.has(requestedThreadId)
@@ -1712,6 +1811,7 @@ export function createBridgeServer({
         turnId: null,
         cancelRequested: false,
         interruptPromise: null,
+        pendingApprovals: new Map(),
       };
       activeRunsById.set(runId, activeRun);
       if (requestedThreadId) {
@@ -1739,6 +1839,7 @@ export function createBridgeServer({
           serviceTier: Object.hasOwn(body, "serviceTier")
             ? body.serviceTier
             : undefined,
+          accessMode,
           onProgress: (progress) => {
             writeNdjson(response, { type: "progress", ...progress });
           },
@@ -1752,6 +1853,31 @@ export function createBridgeServer({
             activeRun.turnId = turnId;
             if (activeRun.cancelRequested) await interruptRun(activeRun);
           },
+          onApproval: ({ itemId, questions }) => new Promise((resolveDecision) => {
+            if (response.destroyed || response.writableEnded) {
+              resolveDecision("reject");
+              return;
+            }
+            const approvalId = randomUUID();
+            activeRun.pendingApprovals.set(approvalId, {
+              resolve: resolveDecision,
+              itemId,
+            });
+            writeNdjson(response, {
+              type: "approval",
+              approvalId,
+              questions: Array.isArray(questions)
+                ? questions.map((question) => ({
+                    header: typeof question?.header === "string"
+                      ? question.header
+                      : "Roam change",
+                    question: typeof question?.question === "string"
+                      ? question.question
+                      : "Allow this Roam change?",
+                  }))
+                : [],
+            });
+          }),
         });
         const payload = {
           runId,
@@ -1787,12 +1913,55 @@ export function createBridgeServer({
           code: error.code,
         });
       } finally {
+        for (const pendingApproval of activeRun.pendingApprovals.values()) {
+          pendingApproval.resolve("reject");
+        }
+        activeRun.pendingApprovals.clear();
         if (activeRun.threadId) {
           activeRunsByThreadId.delete(activeRun.threadId);
         }
         activeRunsById.delete(runId);
         response.end();
       }
+      return;
+    }
+
+    const approvalMatch = request.url?.match(
+      /^\/runs\/([0-9a-f-]{36})\/approvals\/([0-9a-f-]{36})$/i,
+    );
+    if (request.method === "POST" && approvalMatch) {
+      if (!bearerMatches(request.headers.authorization, token)) {
+        sendJson(response, 401, { error: "Invalid bridge token." }, origin);
+        return;
+      }
+      const run = activeRunsById.get(approvalMatch[1]);
+      const pendingApproval = run?.pendingApprovals?.get(approvalMatch[2]);
+      if (!run || run.kind !== "chat" || !pendingApproval) {
+        sendJson(response, 404, { error: "That approval is no longer pending." }, origin);
+        return;
+      }
+      let approvalBody;
+      try {
+        approvalBody = await readJsonBody(request);
+      } catch (error) {
+        const status = error.code === "BODY_TOO_LARGE" ? 413 : 400;
+        sendJson(response, status, { error: error.message }, origin);
+        return;
+      }
+      if (!["accept", "reject"].includes(approvalBody?.decision)) {
+        sendJson(response, 400, { error: "Invalid approval decision." }, origin);
+        return;
+      }
+      run.pendingApprovals.delete(approvalMatch[2]);
+      pendingApproval.resolve(approvalBody.decision);
+      await trace({
+        runId: run.runId,
+        event: `chat.approval.${approvalBody.decision}ed`,
+        graph,
+        threadId: run.threadId,
+        itemId: pendingApproval.itemId,
+      });
+      sendJson(response, 200, { ok: true }, origin);
       return;
     }
 

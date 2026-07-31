@@ -12,6 +12,7 @@ import {
   parseAndValidatePlan,
   runtimeAppServerArgs,
   runtimeThreadConfig,
+  toolApprovalResponse,
   validateRuntimeInstructionSources,
 } from "../bridge.mjs";
 
@@ -96,6 +97,27 @@ test("every runtime thread repeats the MCP and plugin restrictions", () => {
   assert.deepEqual(
     config.mcp_servers.roam.enabled_tools,
     ["get_graph_guidelines", "get_block"],
+  );
+});
+
+test("tool approvals answer every question with the exact offered label", () => {
+  const questions = [{
+    id: "approve_roam_write",
+    options: [
+      { label: "Accept", description: "Run it" },
+      { label: "Decline", description: "Do not run it" },
+      { label: "Cancel", description: "Stop" },
+    ],
+  }];
+  assert.deepEqual(toolApprovalResponse(questions, "accept"), {
+    answers: { approve_roam_write: { answers: ["Accept"] } },
+  });
+  assert.deepEqual(toolApprovalResponse(questions, "reject"), {
+    answers: { approve_roam_write: { answers: ["Decline"] } },
+  });
+  assert.throws(
+    () => toolApprovalResponse([{ id: "freeform", options: null }], "accept"),
+    (error) => error.code === "APPROVAL_UNSUPPORTED",
   );
 });
 
@@ -388,6 +410,7 @@ test("app-server probe requests concise summaries and forwards only its turn", a
   const turnStart = requests.find((request) => request.method === "turn/start");
   const threadStart = requests.find((request) => request.method === "thread/start");
   assert.equal(threadStart.params.cwd, "/runtime/agent");
+  assert.equal(threadStart.params.approvalPolicy, "never");
   assert.equal(turnStart.params.summary, "concise");
   assert.ok(
     threadStart.params.config.mcp_servers.roam.enabled_tools.includes(
@@ -473,12 +496,14 @@ test("app-server chat starts and resumes a persistent panel conversation", async
   const turnStarts = requests.filter((entry) => entry.method === "turn/start");
   assert.equal(Object.hasOwn(threadStart.params, "ephemeral"), false);
   assert.equal(threadStart.params.cwd, "/runtime/agent");
+  assert.equal(threadStart.params.approvalPolicy, "on-request");
   assert.equal(threadResume.params.cwd, "/runtime/agent");
   assert.equal(threadResume.params.threadId, "thread-chat");
   assert.equal(threadResume.params.excludeTurns, true);
   assert.equal(turnStarts[0].params.model, "model-from-list");
   assert.equal(turnStarts[0].params.effort, "medium");
   assert.equal(turnStarts[0].params.serviceTier, null);
+  assert.equal(turnStarts[0].params.approvalPolicy, "on-request");
   assert.equal(Object.hasOwn(turnStarts[1].params, "serviceTier"), false);
   assert.deepEqual(turnStarts[0].params.additionalContext, {
     roamPrompt: {
@@ -488,6 +513,7 @@ test("app-server chat starts and resumes a persistent panel conversation", async
         "Prompt block UID: prompt123",
         "Read this block and useful descendants with Roam MCP before answering.",
         "Treat its page and block references as part of the user's instruction.",
+        "Access mode: Auto. Carry out explicitly requested Roam changes with the available tools without asking for a separate confirmation.",
         "Format for Roam renderString: use **bold** and __italic__, never single-asterisk emphasis.",
       ].join("\n"),
     },
@@ -532,6 +558,237 @@ test("app-server chat starts and resumes a persistent panel conversation", async
     { threadId: "thread-chat", turnId: "turn-1" },
     { threadId: "thread-chat", turnId: "turn-2" },
   ]);
+});
+
+test("chat access modes enforce tool visibility and answer write approvals", async () => {
+  const makeClient = () => {
+    const client = new AppServerClient({ runtimeCwd: "/runtime/agent" });
+    const requests = [];
+    const responses = [];
+    client.start = async () => {};
+    client.respondServerRequest = (id, result) => {
+      responses.push({ id, result });
+      queueMicrotask(() => {
+        client.emit("notification", {
+          method: "item/completed",
+          params: {
+            threadId: "thread-access",
+            turnId: "turn-access",
+            item: {
+              type: "agentMessage",
+              phase: "final_answer",
+              text: "Done",
+            },
+          },
+        });
+        client.emit("notification", {
+          method: "turn/completed",
+          params: {
+            threadId: "thread-access",
+            turn: {
+              id: "turn-access",
+              status: "completed",
+              items: [],
+            },
+          },
+        });
+      });
+    };
+    client.request = async (method, params) => {
+      requests.push({ method, params });
+      if (method === "thread/start") {
+        return { thread: { id: "thread-access" }, instructionSources: [] };
+      }
+      if (method === "turn/start") {
+        queueMicrotask(() => client.serverRequestHandlers.get("thread-access")?.({
+          id: 91,
+          method: "item/tool/requestUserInput",
+          params: {
+            threadId: "thread-access",
+            turnId: "turn-access",
+            itemId: "item-write",
+            questions: [{
+              id: "approval",
+              header: "Update page",
+              question: "Allow update_page?",
+              options: [
+                { label: "Accept", description: "Run it" },
+                { label: "Decline", description: "Do not run it" },
+              ],
+            }],
+          },
+        }));
+        return { turn: { id: "turn-access" } };
+      }
+      return {};
+    };
+    return { client, requests, responses };
+  };
+
+  const manual = makeClient();
+  const approvals = [];
+  await manual.client.runChat({
+    message: "Rename the page",
+    graph: "maskys",
+    promptBlockUid: "prompt123",
+    accessMode: "manual",
+    onApproval: async (approval) => {
+      approvals.push(approval);
+      return "accept";
+    },
+  });
+  assert.equal(approvals[0].itemId, "item-write");
+  assert.deepEqual(manual.responses, [{
+    id: 91,
+    result: { answers: { approval: { answers: ["Accept"] } } },
+  }]);
+  const manualThread = manual.requests.find(({ method }) => method === "thread/start");
+  assert.equal(manualThread.params.approvalPolicy, "on-request");
+  assert.ok(manualThread.params.config.mcp_servers.roam.enabled_tools.includes(
+    "update_page",
+  ));
+
+  const automatic = makeClient();
+  await automatic.client.runChat({
+    message: "Rename the page",
+    graph: "maskys",
+    promptBlockUid: "prompt123",
+    accessMode: "auto",
+    onApproval: async () => {
+      throw new Error("Auto must not wait for the UI");
+    },
+  });
+  assert.deepEqual(automatic.responses[0].result, {
+    answers: { approval: { answers: ["Accept"] } },
+  });
+});
+
+test("read-only chat hides Roam write tools and never requests approval", async () => {
+  const client = new AppServerClient({ runtimeCwd: "/runtime/agent" });
+  const requests = [];
+  client.start = async () => {};
+  client.request = async (method, params) => {
+    requests.push({ method, params });
+    if (method === "thread/start") {
+      return { thread: { id: "thread-readonly" }, instructionSources: [] };
+    }
+    if (method === "turn/start") {
+      queueMicrotask(() => {
+        client.emit("notification", {
+          method: "item/completed",
+          params: {
+            threadId: "thread-readonly",
+            turnId: "turn-readonly",
+            item: {
+              type: "agentMessage",
+              phase: "final_answer",
+              text: "Read only",
+            },
+          },
+        });
+        client.emit("notification", {
+          method: "turn/completed",
+          params: {
+            threadId: "thread-readonly",
+            turn: { id: "turn-readonly", status: "completed", items: [] },
+          },
+        });
+      });
+      return { turn: { id: "turn-readonly" } };
+    }
+    return {};
+  };
+  await client.runChat({
+    message: "Inspect the page",
+    graph: "maskys",
+    promptBlockUid: "prompt123",
+    accessMode: "read-only",
+  });
+  const threadStart = requests.find(({ method }) => method === "thread/start");
+  const turnStart = requests.find(({ method }) => method === "turn/start");
+  assert.equal(threadStart.params.approvalPolicy, "never");
+  assert.equal(turnStart.params.approvalPolicy, "never");
+  assert.equal(
+    threadStart.params.config.mcp_servers.roam.enabled_tools.includes(
+      "update_page",
+    ),
+    false,
+  );
+});
+
+test("app-server chat waits for turn completion without an elapsed timeout", async () => {
+  const client = new AppServerClient({ runtimeCwd: "/runtime/agent" });
+  client.start = async () => {};
+  client.request = async (method) => {
+    if (method === "thread/start") {
+      return { thread: { id: "thread-long" }, instructionSources: [] };
+    }
+    if (method === "turn/start") {
+      setTimeout(() => {
+        client.emit("notification", {
+          method: "item/completed",
+          params: {
+            threadId: "thread-long",
+            turnId: "turn-long",
+            item: {
+              type: "agentMessage",
+              phase: "final_answer",
+              text: "Finished after the former deadline",
+            },
+          },
+        });
+        client.emit("notification", {
+          method: "turn/completed",
+          params: {
+            threadId: "thread-long",
+            turn: { id: "turn-long", status: "completed", items: [] },
+          },
+        });
+      }, 20);
+      return { turn: { id: "turn-long" } };
+    }
+    return {};
+  };
+
+  const result = await client.runChat({
+    message: "Take as long as needed",
+    graph: "maskys",
+    promptBlockUid: "prompt123",
+    // Legacy callers may still pass the old option. It must not impose a cap.
+    timeoutMs: 1,
+  });
+
+  assert.equal(result.reply, "Finished after the former deadline");
+  assert.equal(client.listenerCount("notification"), 0);
+  assert.equal(client.listenerCount("exit"), 0);
+  assert.equal(client.listenerCount("protocolError"), 0);
+});
+
+test("app-server chat still fails promptly when its client process exits", async () => {
+  const client = new AppServerClient({ runtimeCwd: "/runtime/agent" });
+  client.start = async () => {};
+  client.request = async (method) => {
+    if (method === "thread/start") {
+      return { thread: { id: "thread-exit" }, instructionSources: [] };
+    }
+    if (method === "turn/start") {
+      queueMicrotask(() => client.emit("exit", new Error("app-server exited")));
+      return { turn: { id: "turn-exit" } };
+    }
+    return {};
+  };
+
+  await assert.rejects(
+    client.runChat({
+      message: "Keep working",
+      graph: "maskys",
+      promptBlockUid: "prompt123",
+    }),
+    /app-server exited/,
+  );
+  assert.equal(client.listenerCount("notification"), 0);
+  assert.equal(client.listenerCount("exit"), 0);
+  assert.equal(client.listenerCount("protocolError"), 0);
 });
 
 test("app-server loads only user messages and final replies for the panel", async () => {
@@ -689,7 +946,8 @@ test("bridge exposes models, recent messages, and panel-only chat", async (t) =>
       assert.equal(name, "Readable graph title");
       return { threadId, name };
     },
-    async runChat({ onProgress, onThread, onStarted, ...input }) {
+    async runChat({ onProgress, onThread, onStarted, onApproval, ...input }) {
+      assert.equal(typeof onApproval, "function");
       assert.deepEqual(input, {
         message: "Hello panel",
         graph: "maskys",
@@ -698,6 +956,7 @@ test("bridge exposes models, recent messages, and panel-only chat", async (t) =>
         model: "model-from-list",
         effort: "medium",
         serviceTier: undefined,
+        accessMode: "auto",
       });
       onProgress({ kind: "summary", text: "Thinking" });
       onThread({ threadId: "thread_12345678" });
@@ -800,6 +1059,104 @@ test("bridge exposes models, recent messages, and panel-only chat", async (t) =>
     "completed",
   ]);
   assert.equal(events.at(-1).result.reply, "Hello from Codex");
+});
+
+test("manual chat streams an approval and resumes after the authenticated answer", async (t) => {
+  let receivedDecision = null;
+  const client = {
+    ready: false,
+    async runChat({ onThread, onStarted, onApproval }) {
+      onThread({ threadId: "thread_manual_123" });
+      await onStarted({
+        threadId: "thread_manual_123",
+        turnId: "turn-manual",
+      });
+      receivedDecision = await onApproval({
+        itemId: "item-update-page",
+        questions: [{
+          header: "Update page",
+          question: "Allow update_page to rename this page?",
+        }],
+      });
+      return {
+        threadId: "thread_manual_123",
+        turnId: "turn-manual",
+        reply: "Renamed",
+      };
+    },
+  };
+  const server = createBridgeServer({
+    token: "secret-token",
+    graph: "maskys",
+    client,
+    trace: async () => {},
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const headers = {
+    origin: "https://roamresearch.com",
+    authorization: "Bearer secret-token",
+    "content-type": "application/json",
+  };
+
+  const chatResponse = await fetch(`${base}/chat`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      graph: "maskys",
+      message: "Rename it",
+      promptBlockUid: "prompt123",
+      accessMode: "manual",
+    }),
+  });
+  const reader = chatResponse.body.getReader();
+  const decoder = new TextDecoder();
+  let pending = "";
+  const events = [];
+  let approval;
+  while (!approval) {
+    const { value, done } = await reader.read();
+    assert.equal(done, false);
+    pending += decoder.decode(value, { stream: true });
+    const lines = pending.split("\n");
+    pending = lines.pop() || "";
+    events.push(...lines.filter(Boolean).map((line) => JSON.parse(line)));
+    approval = events.find((event) => event.type === "approval");
+  }
+  assert.equal(approval.questions[0].header, "Update page");
+  const runId = events.find((event) => event.type === "started")?.runId;
+  assert.match(runId, /^[0-9a-f-]{36}$/i);
+
+  const approvalResponse = await fetch(
+    `${base}/runs/${runId}/approvals/${approval.approvalId}`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ decision: "accept" }),
+    },
+  );
+  assert.equal(approvalResponse.status, 200);
+  assert.deepEqual(await approvalResponse.json(), { ok: true });
+
+  while (true) {
+    const { value, done } = await reader.read();
+    pending += decoder.decode(value || new Uint8Array(), { stream: !done });
+    const lines = pending.split("\n");
+    pending = lines.pop() || "";
+    events.push(...lines.filter(Boolean).map((line) => JSON.parse(line)));
+    if (done) break;
+  }
+  if (pending.trim()) events.push(JSON.parse(pending));
+  assert.equal(receivedDecision, "accept");
+  assert.deepEqual(events.map((event) => event.type), [
+    "started",
+    "conversation",
+    "approval",
+    "completed",
+  ]);
+  assert.equal(events.at(-1).result.reply, "Renamed");
 });
 
 test("bridge enforces bearer auth and graph restriction", async (t) => {

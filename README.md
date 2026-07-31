@@ -99,6 +99,14 @@ result in chat. There is no separate Apply stage. The structured `Do this
 block` command remains a different workflow: it asks for a bounded plan and the
 extension applies that plan through the browser API.
 
+The model picker also controls graph access per conversation. `Auto` is the
+default and answers App Server approvals for explicitly requested Roam changes.
+`Read only` exposes only graph-reading tools. `Manual` exposes the write tools
+but pauses each approval-requiring tool call in the transcript until the user
+chooses Allow or Reject. The bridge answers App Server with the exact option
+labels supplied by `item/tool/requestUserInput`; it does not treat the picker as
+presentation-only state.
+
 The runtime agent reads the graph and prior comments, then returns a bounded,
 flat edit plan. The extension appends that plan beneath the invoked block.
 Questions, caveats, and explanations use Roam's supported comment API on the
