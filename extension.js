@@ -1,12 +1,1061 @@
-// src/react-globals.js
-var host = typeof window !== "undefined" ? window : globalThis;
-var React = host.React;
-var ReactDOM = host.ReactDOM;
-function assertReactAvailable() {
-  if (!React?.createElement || !ReactDOM?.render) {
-    throw new Error("Roam's bundled React is unavailable.");
+var __create = Object.create;
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __commonJS = (cb, mod) => function __require() {
+  try {
+    return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
+  } catch (e) {
+    throw mod = 0, e;
   }
-}
+};
+var __copyProps = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(to, key) && key !== except)
+        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+  }
+  return to;
+};
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
+
+// src/react-shim.cjs
+var require_react_shim = __commonJS({
+  "src/react-shim.cjs"(exports, module) {
+    module.exports = new Proxy({}, {
+      get: (_, key) => (globalThis.window?.React ?? globalThis.React)?.[key]
+    });
+  }
+});
+
+// src/react-dom-shim.cjs
+var require_react_dom_shim = __commonJS({
+  "src/react-dom-shim.cjs"(exports, module) {
+    module.exports = new Proxy({}, {
+      get: (_, key) => (globalThis.window?.ReactDOM ?? globalThis.ReactDOM)?.[key]
+    });
+  }
+});
+
+// node_modules/use-sync-external-store/cjs/use-sync-external-store-shim.development.js
+var require_use_sync_external_store_shim_development = __commonJS({
+  "node_modules/use-sync-external-store/cjs/use-sync-external-store-shim.development.js"(exports) {
+    "use strict";
+    (function() {
+      function is(x, y) {
+        return x === y && (0 !== x || 1 / x === 1 / y) || x !== x && y !== y;
+      }
+      function useSyncExternalStore$2(subscribe, getSnapshot) {
+        didWarnOld18Alpha || void 0 === React.startTransition || (didWarnOld18Alpha = true, console.error(
+          "You are using an outdated, pre-release alpha of React 18 that does not support useSyncExternalStore. The use-sync-external-store shim will not work correctly. Upgrade to a newer pre-release."
+        ));
+        var value = getSnapshot();
+        if (!didWarnUncachedGetSnapshot) {
+          var cachedValue = getSnapshot();
+          objectIs(value, cachedValue) || (console.error(
+            "The result of getSnapshot should be cached to avoid an infinite loop"
+          ), didWarnUncachedGetSnapshot = true);
+        }
+        cachedValue = useState2({
+          inst: { value, getSnapshot }
+        });
+        var inst = cachedValue[0].inst, forceUpdate = cachedValue[1];
+        useLayoutEffect(
+          function() {
+            inst.value = value;
+            inst.getSnapshot = getSnapshot;
+            checkIfSnapshotChanged(inst) && forceUpdate({ inst });
+          },
+          [subscribe, value, getSnapshot]
+        );
+        useEffect2(
+          function() {
+            checkIfSnapshotChanged(inst) && forceUpdate({ inst });
+            return subscribe(function() {
+              checkIfSnapshotChanged(inst) && forceUpdate({ inst });
+            });
+          },
+          [subscribe]
+        );
+        useDebugValue(value);
+        return value;
+      }
+      function checkIfSnapshotChanged(inst) {
+        var latestGetSnapshot = inst.getSnapshot;
+        inst = inst.value;
+        try {
+          var nextValue = latestGetSnapshot();
+          return !objectIs(inst, nextValue);
+        } catch (error) {
+          return true;
+        }
+      }
+      function useSyncExternalStore$1(subscribe, getSnapshot) {
+        return getSnapshot();
+      }
+      "undefined" !== typeof __REACT_DEVTOOLS_GLOBAL_HOOK__ && "function" === typeof __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStart && __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStart(Error());
+      var React = require_react_shim(), objectIs = "function" === typeof Object.is ? Object.is : is, useState2 = React.useState, useEffect2 = React.useEffect, useLayoutEffect = React.useLayoutEffect, useDebugValue = React.useDebugValue, didWarnOld18Alpha = false, didWarnUncachedGetSnapshot = false, shim = "undefined" === typeof window || "undefined" === typeof window.document || "undefined" === typeof window.document.createElement ? useSyncExternalStore$1 : useSyncExternalStore$2;
+      exports.useSyncExternalStore = void 0 !== React.useSyncExternalStore ? React.useSyncExternalStore : shim;
+      "undefined" !== typeof __REACT_DEVTOOLS_GLOBAL_HOOK__ && "function" === typeof __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStop && __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStop(Error());
+    })();
+  }
+});
+
+// node_modules/use-sync-external-store/shim/index.js
+var require_shim = __commonJS({
+  "node_modules/use-sync-external-store/shim/index.js"(exports, module) {
+    "use strict";
+    if (false) {
+      module.exports = null;
+    } else {
+      module.exports = require_use_sync_external_store_shim_development();
+    }
+  }
+});
+
+// node_modules/object-assign/index.js
+var require_object_assign = __commonJS({
+  "node_modules/object-assign/index.js"(exports, module) {
+    "use strict";
+    var getOwnPropertySymbols = Object.getOwnPropertySymbols;
+    var hasOwnProperty = Object.prototype.hasOwnProperty;
+    var propIsEnumerable = Object.prototype.propertyIsEnumerable;
+    function toObject(val) {
+      if (val === null || val === void 0) {
+        throw new TypeError("Object.assign cannot be called with null or undefined");
+      }
+      return Object(val);
+    }
+    function shouldUseNative() {
+      try {
+        if (!Object.assign) {
+          return false;
+        }
+        var test1 = new String("abc");
+        test1[5] = "de";
+        if (Object.getOwnPropertyNames(test1)[0] === "5") {
+          return false;
+        }
+        var test2 = {};
+        for (var i = 0; i < 10; i++) {
+          test2["_" + String.fromCharCode(i)] = i;
+        }
+        var order2 = Object.getOwnPropertyNames(test2).map(function(n) {
+          return test2[n];
+        });
+        if (order2.join("") !== "0123456789") {
+          return false;
+        }
+        var test3 = {};
+        "abcdefghijklmnopqrst".split("").forEach(function(letter) {
+          test3[letter] = letter;
+        });
+        if (Object.keys(Object.assign({}, test3)).join("") !== "abcdefghijklmnopqrst") {
+          return false;
+        }
+        return true;
+      } catch (err) {
+        return false;
+      }
+    }
+    module.exports = shouldUseNative() ? Object.assign : function(target, source) {
+      var from;
+      var to = toObject(target);
+      var symbols;
+      for (var s = 1; s < arguments.length; s++) {
+        from = Object(arguments[s]);
+        for (var key in from) {
+          if (hasOwnProperty.call(from, key)) {
+            to[key] = from[key];
+          }
+        }
+        if (getOwnPropertySymbols) {
+          symbols = getOwnPropertySymbols(from);
+          for (var i = 0; i < symbols.length; i++) {
+            if (propIsEnumerable.call(from, symbols[i])) {
+              to[symbols[i]] = from[symbols[i]];
+            }
+          }
+        }
+      }
+      return to;
+    };
+  }
+});
+
+// node_modules/react/cjs/react-jsx-runtime.development.js
+var require_react_jsx_runtime_development = __commonJS({
+  "node_modules/react/cjs/react-jsx-runtime.development.js"(exports) {
+    "use strict";
+    if (true) {
+      (function() {
+        "use strict";
+        var React = require_react_shim();
+        var _assign = require_object_assign();
+        var REACT_ELEMENT_TYPE = 60103;
+        var REACT_PORTAL_TYPE = 60106;
+        exports.Fragment = 60107;
+        var REACT_STRICT_MODE_TYPE = 60108;
+        var REACT_PROFILER_TYPE = 60114;
+        var REACT_PROVIDER_TYPE = 60109;
+        var REACT_CONTEXT_TYPE = 60110;
+        var REACT_FORWARD_REF_TYPE = 60112;
+        var REACT_SUSPENSE_TYPE = 60113;
+        var REACT_SUSPENSE_LIST_TYPE = 60120;
+        var REACT_MEMO_TYPE = 60115;
+        var REACT_LAZY_TYPE = 60116;
+        var REACT_BLOCK_TYPE = 60121;
+        var REACT_SERVER_BLOCK_TYPE = 60122;
+        var REACT_FUNDAMENTAL_TYPE = 60117;
+        var REACT_SCOPE_TYPE = 60119;
+        var REACT_OPAQUE_ID_TYPE = 60128;
+        var REACT_DEBUG_TRACING_MODE_TYPE = 60129;
+        var REACT_OFFSCREEN_TYPE = 60130;
+        var REACT_LEGACY_HIDDEN_TYPE = 60131;
+        if (typeof Symbol === "function" && Symbol.for) {
+          var symbolFor = Symbol.for;
+          REACT_ELEMENT_TYPE = symbolFor("react.element");
+          REACT_PORTAL_TYPE = symbolFor("react.portal");
+          exports.Fragment = symbolFor("react.fragment");
+          REACT_STRICT_MODE_TYPE = symbolFor("react.strict_mode");
+          REACT_PROFILER_TYPE = symbolFor("react.profiler");
+          REACT_PROVIDER_TYPE = symbolFor("react.provider");
+          REACT_CONTEXT_TYPE = symbolFor("react.context");
+          REACT_FORWARD_REF_TYPE = symbolFor("react.forward_ref");
+          REACT_SUSPENSE_TYPE = symbolFor("react.suspense");
+          REACT_SUSPENSE_LIST_TYPE = symbolFor("react.suspense_list");
+          REACT_MEMO_TYPE = symbolFor("react.memo");
+          REACT_LAZY_TYPE = symbolFor("react.lazy");
+          REACT_BLOCK_TYPE = symbolFor("react.block");
+          REACT_SERVER_BLOCK_TYPE = symbolFor("react.server.block");
+          REACT_FUNDAMENTAL_TYPE = symbolFor("react.fundamental");
+          REACT_SCOPE_TYPE = symbolFor("react.scope");
+          REACT_OPAQUE_ID_TYPE = symbolFor("react.opaque.id");
+          REACT_DEBUG_TRACING_MODE_TYPE = symbolFor("react.debug_trace_mode");
+          REACT_OFFSCREEN_TYPE = symbolFor("react.offscreen");
+          REACT_LEGACY_HIDDEN_TYPE = symbolFor("react.legacy_hidden");
+        }
+        var MAYBE_ITERATOR_SYMBOL = typeof Symbol === "function" && Symbol.iterator;
+        var FAUX_ITERATOR_SYMBOL = "@@iterator";
+        function getIteratorFn(maybeIterable) {
+          if (maybeIterable === null || typeof maybeIterable !== "object") {
+            return null;
+          }
+          var maybeIterator = MAYBE_ITERATOR_SYMBOL && maybeIterable[MAYBE_ITERATOR_SYMBOL] || maybeIterable[FAUX_ITERATOR_SYMBOL];
+          if (typeof maybeIterator === "function") {
+            return maybeIterator;
+          }
+          return null;
+        }
+        var ReactSharedInternals = React.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED;
+        function error(format) {
+          {
+            for (var _len2 = arguments.length, args = new Array(_len2 > 1 ? _len2 - 1 : 0), _key2 = 1; _key2 < _len2; _key2++) {
+              args[_key2 - 1] = arguments[_key2];
+            }
+            printWarning("error", format, args);
+          }
+        }
+        function printWarning(level, format, args) {
+          {
+            var ReactDebugCurrentFrame2 = ReactSharedInternals.ReactDebugCurrentFrame;
+            var stack = ReactDebugCurrentFrame2.getStackAddendum();
+            if (stack !== "") {
+              format += "%s";
+              args = args.concat([stack]);
+            }
+            var argsWithFormat = args.map(function(item) {
+              return "" + item;
+            });
+            argsWithFormat.unshift("Warning: " + format);
+            Function.prototype.apply.call(console[level], console, argsWithFormat);
+          }
+        }
+        var enableScopeAPI = false;
+        function isValidElementType(type) {
+          if (typeof type === "string" || typeof type === "function") {
+            return true;
+          }
+          if (type === exports.Fragment || type === REACT_PROFILER_TYPE || type === REACT_DEBUG_TRACING_MODE_TYPE || type === REACT_STRICT_MODE_TYPE || type === REACT_SUSPENSE_TYPE || type === REACT_SUSPENSE_LIST_TYPE || type === REACT_LEGACY_HIDDEN_TYPE || enableScopeAPI) {
+            return true;
+          }
+          if (typeof type === "object" && type !== null) {
+            if (type.$$typeof === REACT_LAZY_TYPE || type.$$typeof === REACT_MEMO_TYPE || type.$$typeof === REACT_PROVIDER_TYPE || type.$$typeof === REACT_CONTEXT_TYPE || type.$$typeof === REACT_FORWARD_REF_TYPE || type.$$typeof === REACT_FUNDAMENTAL_TYPE || type.$$typeof === REACT_BLOCK_TYPE || type[0] === REACT_SERVER_BLOCK_TYPE) {
+              return true;
+            }
+          }
+          return false;
+        }
+        function getWrappedName(outerType, innerType, wrapperName) {
+          var functionName = innerType.displayName || innerType.name || "";
+          return outerType.displayName || (functionName !== "" ? wrapperName + "(" + functionName + ")" : wrapperName);
+        }
+        function getContextName(type) {
+          return type.displayName || "Context";
+        }
+        function getComponentName(type) {
+          if (type == null) {
+            return null;
+          }
+          {
+            if (typeof type.tag === "number") {
+              error("Received an unexpected object in getComponentName(). This is likely a bug in React. Please file an issue.");
+            }
+          }
+          if (typeof type === "function") {
+            return type.displayName || type.name || null;
+          }
+          if (typeof type === "string") {
+            return type;
+          }
+          switch (type) {
+            case exports.Fragment:
+              return "Fragment";
+            case REACT_PORTAL_TYPE:
+              return "Portal";
+            case REACT_PROFILER_TYPE:
+              return "Profiler";
+            case REACT_STRICT_MODE_TYPE:
+              return "StrictMode";
+            case REACT_SUSPENSE_TYPE:
+              return "Suspense";
+            case REACT_SUSPENSE_LIST_TYPE:
+              return "SuspenseList";
+          }
+          if (typeof type === "object") {
+            switch (type.$$typeof) {
+              case REACT_CONTEXT_TYPE:
+                var context = type;
+                return getContextName(context) + ".Consumer";
+              case REACT_PROVIDER_TYPE:
+                var provider = type;
+                return getContextName(provider._context) + ".Provider";
+              case REACT_FORWARD_REF_TYPE:
+                return getWrappedName(type, type.render, "ForwardRef");
+              case REACT_MEMO_TYPE:
+                return getComponentName(type.type);
+              case REACT_BLOCK_TYPE:
+                return getComponentName(type._render);
+              case REACT_LAZY_TYPE: {
+                var lazyComponent = type;
+                var payload = lazyComponent._payload;
+                var init = lazyComponent._init;
+                try {
+                  return getComponentName(init(payload));
+                } catch (x) {
+                  return null;
+                }
+              }
+            }
+          }
+          return null;
+        }
+        var disabledDepth = 0;
+        var prevLog;
+        var prevInfo;
+        var prevWarn;
+        var prevError;
+        var prevGroup;
+        var prevGroupCollapsed;
+        var prevGroupEnd;
+        function disabledLog() {
+        }
+        disabledLog.__reactDisabledLog = true;
+        function disableLogs() {
+          {
+            if (disabledDepth === 0) {
+              prevLog = console.log;
+              prevInfo = console.info;
+              prevWarn = console.warn;
+              prevError = console.error;
+              prevGroup = console.group;
+              prevGroupCollapsed = console.groupCollapsed;
+              prevGroupEnd = console.groupEnd;
+              var props = {
+                configurable: true,
+                enumerable: true,
+                value: disabledLog,
+                writable: true
+              };
+              Object.defineProperties(console, {
+                info: props,
+                log: props,
+                warn: props,
+                error: props,
+                group: props,
+                groupCollapsed: props,
+                groupEnd: props
+              });
+            }
+            disabledDepth++;
+          }
+        }
+        function reenableLogs() {
+          {
+            disabledDepth--;
+            if (disabledDepth === 0) {
+              var props = {
+                configurable: true,
+                enumerable: true,
+                writable: true
+              };
+              Object.defineProperties(console, {
+                log: _assign({}, props, {
+                  value: prevLog
+                }),
+                info: _assign({}, props, {
+                  value: prevInfo
+                }),
+                warn: _assign({}, props, {
+                  value: prevWarn
+                }),
+                error: _assign({}, props, {
+                  value: prevError
+                }),
+                group: _assign({}, props, {
+                  value: prevGroup
+                }),
+                groupCollapsed: _assign({}, props, {
+                  value: prevGroupCollapsed
+                }),
+                groupEnd: _assign({}, props, {
+                  value: prevGroupEnd
+                })
+              });
+            }
+            if (disabledDepth < 0) {
+              error("disabledDepth fell below zero. This is a bug in React. Please file an issue.");
+            }
+          }
+        }
+        var ReactCurrentDispatcher = ReactSharedInternals.ReactCurrentDispatcher;
+        var prefix;
+        function describeBuiltInComponentFrame(name, source, ownerFn) {
+          {
+            if (prefix === void 0) {
+              try {
+                throw Error();
+              } catch (x) {
+                var match = x.stack.trim().match(/\n( *(at )?)/);
+                prefix = match && match[1] || "";
+              }
+            }
+            return "\n" + prefix + name;
+          }
+        }
+        var reentry = false;
+        var componentFrameCache;
+        {
+          var PossiblyWeakMap = typeof WeakMap === "function" ? WeakMap : Map;
+          componentFrameCache = new PossiblyWeakMap();
+        }
+        function describeNativeComponentFrame(fn, construct) {
+          if (!fn || reentry) {
+            return "";
+          }
+          {
+            var frame = componentFrameCache.get(fn);
+            if (frame !== void 0) {
+              return frame;
+            }
+          }
+          var control;
+          reentry = true;
+          var previousPrepareStackTrace = Error.prepareStackTrace;
+          Error.prepareStackTrace = void 0;
+          var previousDispatcher;
+          {
+            previousDispatcher = ReactCurrentDispatcher.current;
+            ReactCurrentDispatcher.current = null;
+            disableLogs();
+          }
+          try {
+            if (construct) {
+              var Fake = function() {
+                throw Error();
+              };
+              Object.defineProperty(Fake.prototype, "props", {
+                set: function() {
+                  throw Error();
+                }
+              });
+              if (typeof Reflect === "object" && Reflect.construct) {
+                try {
+                  Reflect.construct(Fake, []);
+                } catch (x) {
+                  control = x;
+                }
+                Reflect.construct(fn, [], Fake);
+              } else {
+                try {
+                  Fake.call();
+                } catch (x) {
+                  control = x;
+                }
+                fn.call(Fake.prototype);
+              }
+            } else {
+              try {
+                throw Error();
+              } catch (x) {
+                control = x;
+              }
+              fn();
+            }
+          } catch (sample) {
+            if (sample && control && typeof sample.stack === "string") {
+              var sampleLines = sample.stack.split("\n");
+              var controlLines = control.stack.split("\n");
+              var s = sampleLines.length - 1;
+              var c = controlLines.length - 1;
+              while (s >= 1 && c >= 0 && sampleLines[s] !== controlLines[c]) {
+                c--;
+              }
+              for (; s >= 1 && c >= 0; s--, c--) {
+                if (sampleLines[s] !== controlLines[c]) {
+                  if (s !== 1 || c !== 1) {
+                    do {
+                      s--;
+                      c--;
+                      if (c < 0 || sampleLines[s] !== controlLines[c]) {
+                        var _frame = "\n" + sampleLines[s].replace(" at new ", " at ");
+                        {
+                          if (typeof fn === "function") {
+                            componentFrameCache.set(fn, _frame);
+                          }
+                        }
+                        return _frame;
+                      }
+                    } while (s >= 1 && c >= 0);
+                  }
+                  break;
+                }
+              }
+            }
+          } finally {
+            reentry = false;
+            {
+              ReactCurrentDispatcher.current = previousDispatcher;
+              reenableLogs();
+            }
+            Error.prepareStackTrace = previousPrepareStackTrace;
+          }
+          var name = fn ? fn.displayName || fn.name : "";
+          var syntheticFrame = name ? describeBuiltInComponentFrame(name) : "";
+          {
+            if (typeof fn === "function") {
+              componentFrameCache.set(fn, syntheticFrame);
+            }
+          }
+          return syntheticFrame;
+        }
+        function describeFunctionComponentFrame(fn, source, ownerFn) {
+          {
+            return describeNativeComponentFrame(fn, false);
+          }
+        }
+        function shouldConstruct(Component) {
+          var prototype = Component.prototype;
+          return !!(prototype && prototype.isReactComponent);
+        }
+        function describeUnknownElementTypeFrameInDEV(type, source, ownerFn) {
+          if (type == null) {
+            return "";
+          }
+          if (typeof type === "function") {
+            {
+              return describeNativeComponentFrame(type, shouldConstruct(type));
+            }
+          }
+          if (typeof type === "string") {
+            return describeBuiltInComponentFrame(type);
+          }
+          switch (type) {
+            case REACT_SUSPENSE_TYPE:
+              return describeBuiltInComponentFrame("Suspense");
+            case REACT_SUSPENSE_LIST_TYPE:
+              return describeBuiltInComponentFrame("SuspenseList");
+          }
+          if (typeof type === "object") {
+            switch (type.$$typeof) {
+              case REACT_FORWARD_REF_TYPE:
+                return describeFunctionComponentFrame(type.render);
+              case REACT_MEMO_TYPE:
+                return describeUnknownElementTypeFrameInDEV(type.type, source, ownerFn);
+              case REACT_BLOCK_TYPE:
+                return describeFunctionComponentFrame(type._render);
+              case REACT_LAZY_TYPE: {
+                var lazyComponent = type;
+                var payload = lazyComponent._payload;
+                var init = lazyComponent._init;
+                try {
+                  return describeUnknownElementTypeFrameInDEV(init(payload), source, ownerFn);
+                } catch (x) {
+                }
+              }
+            }
+          }
+          return "";
+        }
+        var loggedTypeFailures = {};
+        var ReactDebugCurrentFrame = ReactSharedInternals.ReactDebugCurrentFrame;
+        function setCurrentlyValidatingElement(element) {
+          {
+            if (element) {
+              var owner = element._owner;
+              var stack = describeUnknownElementTypeFrameInDEV(element.type, element._source, owner ? owner.type : null);
+              ReactDebugCurrentFrame.setExtraStackFrame(stack);
+            } else {
+              ReactDebugCurrentFrame.setExtraStackFrame(null);
+            }
+          }
+        }
+        function checkPropTypes(typeSpecs, values, location, componentName, element) {
+          {
+            var has = Function.call.bind(Object.prototype.hasOwnProperty);
+            for (var typeSpecName in typeSpecs) {
+              if (has(typeSpecs, typeSpecName)) {
+                var error$1 = void 0;
+                try {
+                  if (typeof typeSpecs[typeSpecName] !== "function") {
+                    var err = Error((componentName || "React class") + ": " + location + " type `" + typeSpecName + "` is invalid; it must be a function, usually from the `prop-types` package, but received `" + typeof typeSpecs[typeSpecName] + "`.This often happens because of typos such as `PropTypes.function` instead of `PropTypes.func`.");
+                    err.name = "Invariant Violation";
+                    throw err;
+                  }
+                  error$1 = typeSpecs[typeSpecName](values, typeSpecName, componentName, location, null, "SECRET_DO_NOT_PASS_THIS_OR_YOU_WILL_BE_FIRED");
+                } catch (ex) {
+                  error$1 = ex;
+                }
+                if (error$1 && !(error$1 instanceof Error)) {
+                  setCurrentlyValidatingElement(element);
+                  error("%s: type specification of %s `%s` is invalid; the type checker function must return `null` or an `Error` but returned a %s. You may have forgotten to pass an argument to the type checker creator (arrayOf, instanceOf, objectOf, oneOf, oneOfType, and shape all require an argument).", componentName || "React class", location, typeSpecName, typeof error$1);
+                  setCurrentlyValidatingElement(null);
+                }
+                if (error$1 instanceof Error && !(error$1.message in loggedTypeFailures)) {
+                  loggedTypeFailures[error$1.message] = true;
+                  setCurrentlyValidatingElement(element);
+                  error("Failed %s type: %s", location, error$1.message);
+                  setCurrentlyValidatingElement(null);
+                }
+              }
+            }
+          }
+        }
+        var ReactCurrentOwner = ReactSharedInternals.ReactCurrentOwner;
+        var hasOwnProperty = Object.prototype.hasOwnProperty;
+        var RESERVED_PROPS = {
+          key: true,
+          ref: true,
+          __self: true,
+          __source: true
+        };
+        var specialPropKeyWarningShown;
+        var specialPropRefWarningShown;
+        var didWarnAboutStringRefs;
+        {
+          didWarnAboutStringRefs = {};
+        }
+        function hasValidRef(config) {
+          {
+            if (hasOwnProperty.call(config, "ref")) {
+              var getter = Object.getOwnPropertyDescriptor(config, "ref").get;
+              if (getter && getter.isReactWarning) {
+                return false;
+              }
+            }
+          }
+          return config.ref !== void 0;
+        }
+        function hasValidKey(config) {
+          {
+            if (hasOwnProperty.call(config, "key")) {
+              var getter = Object.getOwnPropertyDescriptor(config, "key").get;
+              if (getter && getter.isReactWarning) {
+                return false;
+              }
+            }
+          }
+          return config.key !== void 0;
+        }
+        function warnIfStringRefCannotBeAutoConverted(config, self) {
+          {
+            if (typeof config.ref === "string" && ReactCurrentOwner.current && self && ReactCurrentOwner.current.stateNode !== self) {
+              var componentName = getComponentName(ReactCurrentOwner.current.type);
+              if (!didWarnAboutStringRefs[componentName]) {
+                error('Component "%s" contains the string ref "%s". Support for string refs will be removed in a future major release. This case cannot be automatically converted to an arrow function. We ask you to manually fix this case by using useRef() or createRef() instead. Learn more about using refs safely here: https://reactjs.org/link/strict-mode-string-ref', getComponentName(ReactCurrentOwner.current.type), config.ref);
+                didWarnAboutStringRefs[componentName] = true;
+              }
+            }
+          }
+        }
+        function defineKeyPropWarningGetter(props, displayName) {
+          {
+            var warnAboutAccessingKey = function() {
+              if (!specialPropKeyWarningShown) {
+                specialPropKeyWarningShown = true;
+                error("%s: `key` is not a prop. Trying to access it will result in `undefined` being returned. If you need to access the same value within the child component, you should pass it as a different prop. (https://reactjs.org/link/special-props)", displayName);
+              }
+            };
+            warnAboutAccessingKey.isReactWarning = true;
+            Object.defineProperty(props, "key", {
+              get: warnAboutAccessingKey,
+              configurable: true
+            });
+          }
+        }
+        function defineRefPropWarningGetter(props, displayName) {
+          {
+            var warnAboutAccessingRef = function() {
+              if (!specialPropRefWarningShown) {
+                specialPropRefWarningShown = true;
+                error("%s: `ref` is not a prop. Trying to access it will result in `undefined` being returned. If you need to access the same value within the child component, you should pass it as a different prop. (https://reactjs.org/link/special-props)", displayName);
+              }
+            };
+            warnAboutAccessingRef.isReactWarning = true;
+            Object.defineProperty(props, "ref", {
+              get: warnAboutAccessingRef,
+              configurable: true
+            });
+          }
+        }
+        var ReactElement = function(type, key, ref, self, source, owner, props) {
+          var element = {
+            // This tag allows us to uniquely identify this as a React Element
+            $$typeof: REACT_ELEMENT_TYPE,
+            // Built-in properties that belong on the element
+            type,
+            key,
+            ref,
+            props,
+            // Record the component responsible for creating this element.
+            _owner: owner
+          };
+          {
+            element._store = {};
+            Object.defineProperty(element._store, "validated", {
+              configurable: false,
+              enumerable: false,
+              writable: true,
+              value: false
+            });
+            Object.defineProperty(element, "_self", {
+              configurable: false,
+              enumerable: false,
+              writable: false,
+              value: self
+            });
+            Object.defineProperty(element, "_source", {
+              configurable: false,
+              enumerable: false,
+              writable: false,
+              value: source
+            });
+            if (Object.freeze) {
+              Object.freeze(element.props);
+              Object.freeze(element);
+            }
+          }
+          return element;
+        };
+        function jsxDEV(type, config, maybeKey, source, self) {
+          {
+            var propName;
+            var props = {};
+            var key = null;
+            var ref = null;
+            if (maybeKey !== void 0) {
+              key = "" + maybeKey;
+            }
+            if (hasValidKey(config)) {
+              key = "" + config.key;
+            }
+            if (hasValidRef(config)) {
+              ref = config.ref;
+              warnIfStringRefCannotBeAutoConverted(config, self);
+            }
+            for (propName in config) {
+              if (hasOwnProperty.call(config, propName) && !RESERVED_PROPS.hasOwnProperty(propName)) {
+                props[propName] = config[propName];
+              }
+            }
+            if (type && type.defaultProps) {
+              var defaultProps = type.defaultProps;
+              for (propName in defaultProps) {
+                if (props[propName] === void 0) {
+                  props[propName] = defaultProps[propName];
+                }
+              }
+            }
+            if (key || ref) {
+              var displayName = typeof type === "function" ? type.displayName || type.name || "Unknown" : type;
+              if (key) {
+                defineKeyPropWarningGetter(props, displayName);
+              }
+              if (ref) {
+                defineRefPropWarningGetter(props, displayName);
+              }
+            }
+            return ReactElement(type, key, ref, self, source, ReactCurrentOwner.current, props);
+          }
+        }
+        var ReactCurrentOwner$1 = ReactSharedInternals.ReactCurrentOwner;
+        var ReactDebugCurrentFrame$1 = ReactSharedInternals.ReactDebugCurrentFrame;
+        function setCurrentlyValidatingElement$1(element) {
+          {
+            if (element) {
+              var owner = element._owner;
+              var stack = describeUnknownElementTypeFrameInDEV(element.type, element._source, owner ? owner.type : null);
+              ReactDebugCurrentFrame$1.setExtraStackFrame(stack);
+            } else {
+              ReactDebugCurrentFrame$1.setExtraStackFrame(null);
+            }
+          }
+        }
+        var propTypesMisspellWarningShown;
+        {
+          propTypesMisspellWarningShown = false;
+        }
+        function isValidElement(object) {
+          {
+            return typeof object === "object" && object !== null && object.$$typeof === REACT_ELEMENT_TYPE;
+          }
+        }
+        function getDeclarationErrorAddendum() {
+          {
+            if (ReactCurrentOwner$1.current) {
+              var name = getComponentName(ReactCurrentOwner$1.current.type);
+              if (name) {
+                return "\n\nCheck the render method of `" + name + "`.";
+              }
+            }
+            return "";
+          }
+        }
+        function getSourceInfoErrorAddendum(source) {
+          {
+            if (source !== void 0) {
+              var fileName = source.fileName.replace(/^.*[\\\/]/, "");
+              var lineNumber = source.lineNumber;
+              return "\n\nCheck your code at " + fileName + ":" + lineNumber + ".";
+            }
+            return "";
+          }
+        }
+        var ownerHasKeyUseWarning = {};
+        function getCurrentComponentErrorInfo(parentType) {
+          {
+            var info = getDeclarationErrorAddendum();
+            if (!info) {
+              var parentName = typeof parentType === "string" ? parentType : parentType.displayName || parentType.name;
+              if (parentName) {
+                info = "\n\nCheck the top-level render call using <" + parentName + ">.";
+              }
+            }
+            return info;
+          }
+        }
+        function validateExplicitKey(element, parentType) {
+          {
+            if (!element._store || element._store.validated || element.key != null) {
+              return;
+            }
+            element._store.validated = true;
+            var currentComponentErrorInfo = getCurrentComponentErrorInfo(parentType);
+            if (ownerHasKeyUseWarning[currentComponentErrorInfo]) {
+              return;
+            }
+            ownerHasKeyUseWarning[currentComponentErrorInfo] = true;
+            var childOwner = "";
+            if (element && element._owner && element._owner !== ReactCurrentOwner$1.current) {
+              childOwner = " It was passed a child from " + getComponentName(element._owner.type) + ".";
+            }
+            setCurrentlyValidatingElement$1(element);
+            error('Each child in a list should have a unique "key" prop.%s%s See https://reactjs.org/link/warning-keys for more information.', currentComponentErrorInfo, childOwner);
+            setCurrentlyValidatingElement$1(null);
+          }
+        }
+        function validateChildKeys(node, parentType) {
+          {
+            if (typeof node !== "object") {
+              return;
+            }
+            if (Array.isArray(node)) {
+              for (var i = 0; i < node.length; i++) {
+                var child = node[i];
+                if (isValidElement(child)) {
+                  validateExplicitKey(child, parentType);
+                }
+              }
+            } else if (isValidElement(node)) {
+              if (node._store) {
+                node._store.validated = true;
+              }
+            } else if (node) {
+              var iteratorFn = getIteratorFn(node);
+              if (typeof iteratorFn === "function") {
+                if (iteratorFn !== node.entries) {
+                  var iterator = iteratorFn.call(node);
+                  var step;
+                  while (!(step = iterator.next()).done) {
+                    if (isValidElement(step.value)) {
+                      validateExplicitKey(step.value, parentType);
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        function validatePropTypes(element) {
+          {
+            var type = element.type;
+            if (type === null || type === void 0 || typeof type === "string") {
+              return;
+            }
+            var propTypes;
+            if (typeof type === "function") {
+              propTypes = type.propTypes;
+            } else if (typeof type === "object" && (type.$$typeof === REACT_FORWARD_REF_TYPE || // Note: Memo only checks outer props here.
+            // Inner props are checked in the reconciler.
+            type.$$typeof === REACT_MEMO_TYPE)) {
+              propTypes = type.propTypes;
+            } else {
+              return;
+            }
+            if (propTypes) {
+              var name = getComponentName(type);
+              checkPropTypes(propTypes, element.props, "prop", name, element);
+            } else if (type.PropTypes !== void 0 && !propTypesMisspellWarningShown) {
+              propTypesMisspellWarningShown = true;
+              var _name = getComponentName(type);
+              error("Component %s declared `PropTypes` instead of `propTypes`. Did you misspell the property assignment?", _name || "Unknown");
+            }
+            if (typeof type.getDefaultProps === "function" && !type.getDefaultProps.isReactClassApproved) {
+              error("getDefaultProps is only used on classic React.createClass definitions. Use a static property named `defaultProps` instead.");
+            }
+          }
+        }
+        function validateFragmentProps(fragment) {
+          {
+            var keys = Object.keys(fragment.props);
+            for (var i = 0; i < keys.length; i++) {
+              var key = keys[i];
+              if (key !== "children" && key !== "key") {
+                setCurrentlyValidatingElement$1(fragment);
+                error("Invalid prop `%s` supplied to `React.Fragment`. React.Fragment can only have `key` and `children` props.", key);
+                setCurrentlyValidatingElement$1(null);
+                break;
+              }
+            }
+            if (fragment.ref !== null) {
+              setCurrentlyValidatingElement$1(fragment);
+              error("Invalid attribute `ref` supplied to `React.Fragment`.");
+              setCurrentlyValidatingElement$1(null);
+            }
+          }
+        }
+        function jsxWithValidation(type, props, key, isStaticChildren, source, self) {
+          {
+            var validType = isValidElementType(type);
+            if (!validType) {
+              var info = "";
+              if (type === void 0 || typeof type === "object" && type !== null && Object.keys(type).length === 0) {
+                info += " You likely forgot to export your component from the file it's defined in, or you might have mixed up default and named imports.";
+              }
+              var sourceInfo = getSourceInfoErrorAddendum(source);
+              if (sourceInfo) {
+                info += sourceInfo;
+              } else {
+                info += getDeclarationErrorAddendum();
+              }
+              var typeString;
+              if (type === null) {
+                typeString = "null";
+              } else if (Array.isArray(type)) {
+                typeString = "array";
+              } else if (type !== void 0 && type.$$typeof === REACT_ELEMENT_TYPE) {
+                typeString = "<" + (getComponentName(type.type) || "Unknown") + " />";
+                info = " Did you accidentally export a JSX literal instead of a component?";
+              } else {
+                typeString = typeof type;
+              }
+              error("React.jsx: type is invalid -- expected a string (for built-in components) or a class/function (for composite components) but got: %s.%s", typeString, info);
+            }
+            var element = jsxDEV(type, props, key, source, self);
+            if (element == null) {
+              return element;
+            }
+            if (validType) {
+              var children = props.children;
+              if (children !== void 0) {
+                if (isStaticChildren) {
+                  if (Array.isArray(children)) {
+                    for (var i = 0; i < children.length; i++) {
+                      validateChildKeys(children[i], type);
+                    }
+                    if (Object.freeze) {
+                      Object.freeze(children);
+                    }
+                  } else {
+                    error("React.jsx: Static children should always be an array. You are likely explicitly calling React.jsxs or React.jsxDEV. Use the Babel transform instead.");
+                  }
+                } else {
+                  validateChildKeys(children, type);
+                }
+              }
+            }
+            if (type === exports.Fragment) {
+              validateFragmentProps(element);
+            } else {
+              validatePropTypes(element);
+            }
+            return element;
+          }
+        }
+        function jsxWithValidationStatic(type, props, key) {
+          {
+            return jsxWithValidation(type, props, key, true);
+          }
+        }
+        function jsxWithValidationDynamic(type, props, key) {
+          {
+            return jsxWithValidation(type, props, key, false);
+          }
+        }
+        var jsx2 = jsxWithValidationDynamic;
+        var jsxs2 = jsxWithValidationStatic;
+        exports.jsx = jsx2;
+        exports.jsxs = jsxs2;
+      })();
+    }
+  }
+});
+
+// node_modules/react/jsx-runtime.js
+var require_jsx_runtime = __commonJS({
+  "node_modules/react/jsx-runtime.js"(exports, module) {
+    "use strict";
+    if (false) {
+      module.exports = null;
+    } else {
+      module.exports = require_react_jsx_runtime_development();
+    }
+  }
+});
+
+// src/chat-panel.jsx
+var import_react = __toESM(require_react_shim(), 1);
+var import_react_dom = __toESM(require_react_dom_shim(), 1);
+var import_shim = __toESM(require_shim(), 1);
 
 // src/chat-panel-store.js
 function createChatPanelStore({
@@ -813,16 +1862,14 @@ ${name}`);
 }
 
 // src/chat-panel.jsx
-var useState = (...args) => React.useState(...args);
-var useEffect = (...args) => React.useEffect(...args);
-var useRef = (...args) => React.useRef(...args);
-var useContext = (...args) => React.useContext(...args);
-var PanelContext = React ? React.createContext(null) : null;
-var usePanel = () => useContext(PanelContext);
+var import_jsx_runtime = __toESM(require_jsx_runtime(), 1);
+var PanelContext = null;
+var getPanelContext = () => PanelContext ??= (0, import_react.createContext)(null);
+var usePanel = () => (0, import_react.useContext)(getPanelContext());
 function RoamString({ text, className }) {
   const { api } = usePanel();
-  const ref = useRef(null);
-  useEffect(() => {
+  const ref = (0, import_react.useRef)(null);
+  (0, import_react.useEffect)(() => {
     const el = ref.current;
     if (!el) return void 0;
     let cancelled = false;
@@ -836,14 +1883,14 @@ function RoamString({ text, className }) {
       if (mounted) void unmountRoamMarkdown(el, { api });
     };
   }, [api, text]);
-  return /* @__PURE__ */ React.createElement("div", { className, ref });
+  return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className, ref });
 }
 function CopyButton({ roleLabel, text }) {
   const { store } = usePanel();
-  const [copyState, setCopyState] = useState("idle");
-  const timerRef = useRef(null);
-  const mountedRef = useRef(true);
-  useEffect(() => () => {
+  const [copyState, setCopyState] = (0, import_react.useState)("idle");
+  const timerRef = (0, import_react.useRef)(null);
+  const mountedRef = (0, import_react.useRef)(true);
+  (0, import_react.useEffect)(() => () => {
     mountedRef.current = false;
     if (timerRef.current !== null) clearTimeout(timerRef.current);
   }, []);
@@ -869,7 +1916,7 @@ function CopyButton({ roleLabel, text }) {
       if (mountedRef.current) setCopyState("idle");
     }, 1400);
   };
-  return /* @__PURE__ */ React.createElement(
+  return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
     "button",
     {
       type: "button",
@@ -884,8 +1931,8 @@ function CopyButton({ roleLabel, text }) {
 function ProgressRow() {
   const { store, snapshot } = usePanel();
   const { running, runStartedAt, progress } = snapshot;
-  const [elapsedMs, setElapsedMs] = useState(0);
-  useEffect(() => {
+  const [elapsedMs, setElapsedMs] = (0, import_react.useState)(0);
+  (0, import_react.useEffect)(() => {
     if (!running) return void 0;
     setElapsedMs(0);
     const intervalId = setInterval(() => {
@@ -893,22 +1940,24 @@ function ProgressRow() {
     }, 1e3);
     return () => clearInterval(intervalId);
   }, [running, runStartedAt, store]);
-  return /* @__PURE__ */ React.createElement(
+  return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
     "div",
     {
       className: "roam-codex-chat-progress",
       "aria-live": "polite",
       "data-kind": progress.kind,
-      hidden: !progress.text && !running
-    },
-    /* @__PURE__ */ React.createElement("span", { className: "roam-codex-chat-progress-meta", hidden: !running }, /* @__PURE__ */ React.createElement("span", { className: "roam-codex-chat-progress-timer" }, formatRunningElapsed(running ? elapsedMs : 0))),
-    /* @__PURE__ */ React.createElement("span", { className: "roam-codex-chat-progress-text" }, progress.text)
+      hidden: !progress.text && !running,
+      children: [
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "roam-codex-chat-progress-meta", hidden: !running, children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "roam-codex-chat-progress-timer", children: formatRunningElapsed(running ? elapsedMs : 0) }) }),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "roam-codex-chat-progress-text", children: progress.text })
+      ]
+    }
   );
 }
 function Transcript({ transcriptRef }) {
   const { store, snapshot } = usePanel();
   const { messages, transcriptHeight, running, progress } = snapshot;
-  const [showLatest, setShowLatest] = useState(false);
+  const [showLatest, setShowLatest] = (0, import_react.useState)(false);
   const progressVisible = Boolean(progress.text) || running;
   const measureLatest = () => {
     const el = transcriptRef.current;
@@ -922,7 +1971,7 @@ function Transcript({ transcriptRef }) {
       messages.length > 0 && overflowing && fromBottom > CHAT_SCROLL_BOTTOM_THRESHOLD
     );
   };
-  useEffect(() => {
+  (0, import_react.useEffect)(() => {
     const el = transcriptRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
@@ -946,56 +1995,63 @@ function Transcript({ transcriptRef }) {
     height: `${transcriptHeight}px`,
     maxHeight: `${transcriptHeight}px`
   };
-  return /* @__PURE__ */ React.createElement("div", { className: "roam-codex-chat-transcript-wrap", style: heightStyle }, /* @__PURE__ */ React.createElement(
-    "div",
-    {
-      className: "roam-codex-chat-transcript",
-      role: "log",
-      "aria-live": "polite",
-      ref: transcriptRef,
-      hidden: !messages.length && !progressVisible,
-      style: heightStyle,
-      onScroll: measureLatest
-    },
-    messages.map((message, index) => {
-      if (!message || !["user", "assistant"].includes(message.role)) {
-        return null;
+  return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "roam-codex-chat-transcript-wrap", style: heightStyle, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
+      "div",
+      {
+        className: "roam-codex-chat-transcript",
+        role: "log",
+        "aria-live": "polite",
+        ref: transcriptRef,
+        hidden: !messages.length && !progressVisible,
+        style: heightStyle,
+        onScroll: measureLatest,
+        children: [
+          messages.map((message, index) => {
+            if (!message || !["user", "assistant"].includes(message.role)) {
+              return null;
+            }
+            const roleLabel = message.role === "user" ? "You" : "Codex";
+            return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
+              "article",
+              {
+                className: `roam-codex-chat-message roam-codex-chat-message-${message.role}`,
+                children: [
+                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)(CopyButton, { roleLabel, text: message.text }),
+                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+                    RoamString,
+                    {
+                      text: message.text,
+                      className: "roam-codex-chat-message-text"
+                    }
+                  )
+                ]
+              },
+              `${index}-${message.role}`
+            );
+          }),
+          /* @__PURE__ */ (0, import_jsx_runtime.jsx)(ProgressRow, {})
+        ]
       }
-      const roleLabel = message.role === "user" ? "You" : "Codex";
-      return /* @__PURE__ */ React.createElement(
-        "article",
-        {
-          key: `${index}-${message.role}`,
-          className: `roam-codex-chat-message roam-codex-chat-message-${message.role}`
-        },
-        /* @__PURE__ */ React.createElement(CopyButton, { roleLabel, text: message.text }),
-        /* @__PURE__ */ React.createElement(
-          RoamString,
-          {
-            text: message.text,
-            className: "roam-codex-chat-message-text"
-          }
-        )
-      );
-    }),
-    /* @__PURE__ */ React.createElement(ProgressRow, null)
-  ), /* @__PURE__ */ React.createElement(
-    "button",
-    {
-      type: "button",
-      className: "roam-codex-chat-scroll-latest",
-      title: "Scroll to latest message",
-      "aria-label": "Scroll to latest message",
-      hidden: !showLatest,
-      onClick: scrollToLatest
-    },
-    /* @__PURE__ */ React.createElement("span", { className: "roam-codex-chat-scroll-latest-icon", "aria-hidden": "true" }, "\u2193")
-  ));
+    ),
+    /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+      "button",
+      {
+        type: "button",
+        className: "roam-codex-chat-scroll-latest",
+        title: "Scroll to latest message",
+        "aria-label": "Scroll to latest message",
+        hidden: !showLatest,
+        onClick: scrollToLatest,
+        children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "roam-codex-chat-scroll-latest-icon", "aria-hidden": "true", children: "\u2193" })
+      }
+    )
+  ] });
 }
 function ResizeHandle({ transcriptRef }) {
   const { store, snapshot, doc } = usePanel();
-  const dragRef = useRef(null);
-  useEffect(() => () => dragRef.current?.stop(), []);
+  const dragRef = (0, import_react.useRef)(null);
+  (0, import_react.useEffect)(() => () => dragRef.current?.stop(), []);
   const onPointerDown = (event) => {
     if (!Number.isFinite(event?.clientY)) return;
     const transcript = transcriptRef.current;
@@ -1028,7 +2084,7 @@ function ResizeHandle({ transcriptRef }) {
     doc.addEventListener?.("pointerup", stop, true);
     event.preventDefault?.();
   };
-  return /* @__PURE__ */ React.createElement(
+  return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
     "div",
     {
       className: "roam-codex-chat-resize",
@@ -1041,7 +2097,7 @@ function ResizeHandle({ transcriptRef }) {
 }
 function PickerOption({ label, active, level, id, description }) {
   const { store } = usePanel();
-  return /* @__PURE__ */ React.createElement(
+  return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
     "button",
     {
       type: "button",
@@ -1049,10 +2105,12 @@ function PickerOption({ label, active, level, id, description }) {
       role: "menuitemradio",
       "aria-checked": active,
       title: description,
-      onClick: () => store.pick(level, id)
-    },
-    /* @__PURE__ */ React.createElement("span", { className: "roam-codex-chat-picker-option-label" }, label),
-    description ? /* @__PURE__ */ React.createElement("span", { className: "roam-codex-chat-picker-option-description" }, description) : null
+      onClick: () => store.pick(level, id),
+      children: [
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "roam-codex-chat-picker-option-label", children: label }),
+        description ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "roam-codex-chat-picker-option-description", children: description }) : null
+      ]
+    }
   );
 }
 function pickerModelView(snapshot) {
@@ -1093,23 +2151,22 @@ function PickerMenu({ view }) {
   if (pickerLevel === "model") {
     options = models.filter((model) => model && typeof model.id === "string").map((model) => {
       const displayName = model.displayName || model.id;
-      return /* @__PURE__ */ React.createElement(
+      return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
         PickerOption,
         {
-          key: model.id,
           label: model.isDefault ? `${displayName} (Default)` : displayName,
           active: model.id === view.modelId,
           level: "model",
           id: model.id,
           description: model.description || ""
-        }
+        },
+        model.id
       );
     });
   } else if (pickerLevel === "effort") {
-    options = view.efforts.map((effort) => /* @__PURE__ */ React.createElement(
+    options = view.efforts.map((effort) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
       PickerOption,
       {
-        key: effort,
         label: effort === view.defaultEffort ? `${effortLabel(effort)} (Default)` : effortLabel(effort),
         active: effort === view.effortId,
         level: "effort",
@@ -1117,203 +2174,225 @@ function PickerMenu({ view }) {
         description: view.selected?.supportedReasoningEfforts?.find(
           (entry) => entry?.reasoningEffort === effort
         )?.description || ""
-      }
+      },
+      effort
     ));
   } else if (pickerLevel === "speed") {
-    options = view.tiers.map((tier) => /* @__PURE__ */ React.createElement(
+    options = view.tiers.map((tier) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
       PickerOption,
       {
-        key: tier.id,
         label: tier.id === view.defaultTierId ? `${tier.name || tier.id} (Default)` : tier.name || tier.id,
         active: tier.id === view.speedId,
         level: "speed",
         id: tier.id,
         description: tier.description || ""
-      }
+      },
+      tier.id
     ));
   }
-  return /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement(
-    "div",
-    {
-      className: "roam-codex-chat-picker-menu",
-      role: "menu",
-      "aria-label": "Model, effort, and speed options",
-      hidden: !pickerOpen
-    },
-    rows.map(([label, value, level]) => {
-      const open = pickerLevel === level;
-      const openLevel = () => store.openPickerLevel(level);
-      return /* @__PURE__ */ React.createElement(
-        "button",
-        {
-          key: level,
-          type: "button",
-          className: `roam-codex-chat-picker-item${open ? " is-open" : ""}`,
-          role: "menuitem",
-          "aria-haspopup": "menu",
-          "aria-expanded": open,
-          "data-level": level,
-          title: `Choose ${label.toLowerCase()}`,
-          onMouseEnter: openLevel,
-          onFocus: openLevel,
-          onClick: openLevel,
-          onKeyDown: (event) => {
-            if (!["ArrowRight", "Enter", " "].includes(event.key)) return;
-            event.preventDefault?.();
-            openLevel();
-          }
-        },
-        /* @__PURE__ */ React.createElement("span", { className: "roam-codex-chat-picker-item-label" }, label),
-        /* @__PURE__ */ React.createElement("span", { className: "roam-codex-chat-picker-item-value" }, value),
-        /* @__PURE__ */ React.createElement(
-          "span",
-          {
-            className: "roam-codex-chat-picker-item-chevron",
-            "aria-hidden": "true"
-          },
-          "\u203A"
-        )
-      );
-    })
-  ), /* @__PURE__ */ React.createElement(
-    "div",
-    {
-      className: "roam-codex-chat-picker-submenu",
-      role: "menu",
-      "aria-label": pickerLevel ? `${effortLabel(pickerLevel)} options` : "",
-      hidden: !pickerOpen || !pickerLevel
-    },
-    options
-  ));
+  return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
+    /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+      "div",
+      {
+        className: "roam-codex-chat-picker-menu",
+        role: "menu",
+        "aria-label": "Model, effort, and speed options",
+        hidden: !pickerOpen,
+        children: rows.map(([label, value, level]) => {
+          const open = pickerLevel === level;
+          const openLevel = () => store.openPickerLevel(level);
+          return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
+            "button",
+            {
+              type: "button",
+              className: `roam-codex-chat-picker-item${open ? " is-open" : ""}`,
+              role: "menuitem",
+              "aria-haspopup": "menu",
+              "aria-expanded": open,
+              "data-level": level,
+              title: `Choose ${label.toLowerCase()}`,
+              onMouseEnter: openLevel,
+              onFocus: openLevel,
+              onClick: openLevel,
+              onKeyDown: (event) => {
+                if (!["ArrowRight", "Enter", " "].includes(event.key)) return;
+                event.preventDefault?.();
+                openLevel();
+              },
+              children: [
+                /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "roam-codex-chat-picker-item-label", children: label }),
+                /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "roam-codex-chat-picker-item-value", children: value }),
+                /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+                  "span",
+                  {
+                    className: "roam-codex-chat-picker-item-chevron",
+                    "aria-hidden": "true",
+                    children: "\u203A"
+                  }
+                )
+              ]
+            },
+            level
+          );
+        })
+      }
+    ),
+    /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+      "div",
+      {
+        className: "roam-codex-chat-picker-submenu",
+        role: "menu",
+        "aria-label": pickerLevel ? `${effortLabel(pickerLevel)} options` : "",
+        hidden: !pickerOpen || !pickerLevel,
+        children: options
+      }
+    )
+  ] });
 }
 function ControlsBar({ pickerWrapRef }) {
   const { store, snapshot } = usePanel();
   const { running, modelsReady, stopping, pickerOpen, pickerLabel } = snapshot;
   const view = pickerModelView(snapshot);
   const shortcutIsMac = snapshot.sendShortcutIsMac;
-  return /* @__PURE__ */ React.createElement("div", { className: "roam-codex-chat-model-row" }, /* @__PURE__ */ React.createElement("div", { className: "roam-codex-chat-picker", ref: pickerWrapRef }, /* @__PURE__ */ React.createElement(
-    "button",
-    {
-      type: "button",
-      className: "roam-codex-chat-picker-button",
-      title: "Choose the model, reasoning effort, and speed",
-      "aria-label": "Model, effort, and speed",
-      "aria-haspopup": "menu",
-      "aria-expanded": pickerOpen,
-      "data-speed": modelsReady ? view.currentTier?.id === "priority" ? "fast" : "standard" : void 0,
-      disabled: running || !modelsReady,
-      onClick: () => store.togglePicker()
-    },
-    pickerLabel
-  ), /* @__PURE__ */ React.createElement(PickerMenu, { view })), /* @__PURE__ */ React.createElement("div", { className: "roam-codex-chat-actions" }, /* @__PURE__ */ React.createElement(
-    "button",
-    {
-      type: "button",
-      className: "roam-codex-chat-stop",
-      title: "Stop the current Codex turn",
-      hidden: !running,
-      disabled: stopping,
-      onClick: () => {
-        void store.stop().catch(() => {
-        });
-      }
-    },
-    "Stop"
-  ), /* @__PURE__ */ React.createElement(
-    "button",
-    {
-      type: "button",
-      className: "roam-codex-chat-send",
-      title: `Send the focused block in this chat's Block Outline (${shortcutIsMac ? "Option" : "Alt"}+Enter, rebindable in Settings \u2192 Hotkeys)`,
-      hidden: running,
-      disabled: running || !modelsReady,
-      onMouseDown: (event) => {
-        event.preventDefault?.();
-      },
-      onClick: () => void store.send()
-    },
-    "Send",
-    /* @__PURE__ */ React.createElement("kbd", { className: "roam-codex-chat-send-kbd", "aria-hidden": "true" }, shortcutIsMac ? "\u2325\u21B5" : "Alt \u21B5")
-  )));
+  return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "roam-codex-chat-model-row", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "roam-codex-chat-picker", ref: pickerWrapRef, children: [
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+        "button",
+        {
+          type: "button",
+          className: "roam-codex-chat-picker-button",
+          title: "Choose the model, reasoning effort, and speed",
+          "aria-label": "Model, effort, and speed",
+          "aria-haspopup": "menu",
+          "aria-expanded": pickerOpen,
+          "data-speed": modelsReady ? view.currentTier?.id === "priority" ? "fast" : "standard" : void 0,
+          disabled: running || !modelsReady,
+          onClick: () => store.togglePicker(),
+          children: pickerLabel
+        }
+      ),
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)(PickerMenu, { view })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "roam-codex-chat-actions", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+        "button",
+        {
+          type: "button",
+          className: "roam-codex-chat-stop",
+          title: "Stop the current Codex turn",
+          hidden: !running,
+          disabled: stopping,
+          onClick: () => {
+            void store.stop().catch(() => {
+            });
+          },
+          children: "Stop"
+        }
+      ),
+      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
+        "button",
+        {
+          type: "button",
+          className: "roam-codex-chat-send",
+          title: `Send the focused block in this chat's Block Outline (${shortcutIsMac ? "Option" : "Alt"}+Enter, rebindable in Settings \u2192 Hotkeys)`,
+          hidden: running,
+          disabled: running || !modelsReady,
+          onMouseDown: (event) => {
+            event.preventDefault?.();
+          },
+          onClick: () => void store.send(),
+          children: [
+            "Send",
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("kbd", { className: "roam-codex-chat-send-kbd", "aria-hidden": "true", children: shortcutIsMac ? "\u2325\u21B5" : "Alt \u21B5" })
+          ]
+        }
+      )
+    ] })
+  ] });
 }
 function HeaderContent({ onCloseRequested }) {
   const { store, snapshot } = usePanel();
   const { running, history, conversationLabel } = snapshot;
-  return /* @__PURE__ */ React.createElement("div", { className: "roam-codex-chat-heading" }, /* @__PURE__ */ React.createElement(
-    "button",
-    {
-      type: "button",
-      className: "roam-codex-chat-conversation",
-      "aria-haspopup": "menu",
-      "aria-expanded": history.open,
-      disabled: running,
-      title: history.activeThreadId ? `Current conversation: ${conversationLabel}` : "Start a new conversation or open history",
-      onClick: () => history.open ? store.closeHistory() : store.openHistory()
-    },
-    conversationLabel
-  ), /* @__PURE__ */ React.createElement(
-    "div",
-    {
-      className: "roam-codex-chat-history",
-      role: "menu",
-      "aria-label": "Conversation history",
-      hidden: !history.open
-    },
-    /* @__PURE__ */ React.createElement(
+  return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "roam-codex-chat-heading", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
       "button",
       {
         type: "button",
-        role: "menuitem",
-        className: `roam-codex-chat-history-item roam-codex-chat-history-new${history.activeThreadId ? "" : " is-active"}`,
-        "aria-current": history.activeThreadId ? void 0 : "true",
-        title: "Start a new conversation",
+        className: "roam-codex-chat-conversation",
+        "aria-haspopup": "menu",
+        "aria-expanded": history.open,
         disabled: running,
-        onClick: () => store.beginNewConversation()
-      },
-      "+ New chat"
+        title: history.activeThreadId ? `Current conversation: ${conversationLabel}` : "Start a new conversation or open history",
+        onClick: () => history.open ? store.closeHistory() : store.openHistory(),
+        children: conversationLabel
+      }
     ),
-    history.items.length ? history.items.map((item) => /* @__PURE__ */ React.createElement(
+    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
+      "div",
+      {
+        className: "roam-codex-chat-history",
+        role: "menu",
+        "aria-label": "Conversation history",
+        hidden: !history.open,
+        children: [
+          /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+            "button",
+            {
+              type: "button",
+              role: "menuitem",
+              className: `roam-codex-chat-history-item roam-codex-chat-history-new${history.activeThreadId ? "" : " is-active"}`,
+              "aria-current": history.activeThreadId ? void 0 : "true",
+              title: "Start a new conversation",
+              disabled: running,
+              onClick: () => store.beginNewConversation(),
+              children: "+ New chat"
+            }
+          ),
+          history.items.length ? history.items.map((item) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
+            "button",
+            {
+              type: "button",
+              role: "menuitem",
+              className: `roam-codex-chat-history-item${item.active ? " is-active" : ""}`,
+              "aria-current": item.active ? "true" : void 0,
+              "data-thread-id": item.threadId,
+              "data-availability": item.availability,
+              title: `Resume ${item.title}`,
+              disabled: running,
+              onClick: () => store.selectConversation(item.threadId),
+              children: [
+                /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "roam-codex-chat-history-title", children: item.title }),
+                /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "roam-codex-chat-history-date", children: ["missing", "unavailable"].includes(item.availability) ? "Unavailable" : conversationDateLabel(item.updatedAt) })
+              ]
+            },
+            item.threadId
+          )) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "roam-codex-chat-history-empty", children: history.error || "No previous chats yet." }),
+          history.items.length && history.error ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "roam-codex-chat-history-error", children: history.error }) : null
+        ]
+      }
+    ),
+    /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
       "button",
       {
-        key: item.threadId,
         type: "button",
-        role: "menuitem",
-        className: `roam-codex-chat-history-item${item.active ? " is-active" : ""}`,
-        "aria-current": item.active ? "true" : void 0,
-        "data-thread-id": item.threadId,
-        "data-availability": item.availability,
-        title: `Resume ${item.title}`,
-        disabled: running,
-        onClick: () => store.selectConversation(item.threadId)
-      },
-      /* @__PURE__ */ React.createElement("span", { className: "roam-codex-chat-history-title" }, item.title),
-      /* @__PURE__ */ React.createElement("span", { className: "roam-codex-chat-history-date" }, ["missing", "unavailable"].includes(item.availability) ? "Unavailable" : conversationDateLabel(item.updatedAt))
-    )) : /* @__PURE__ */ React.createElement("div", { className: "roam-codex-chat-history-empty" }, history.error || "No previous chats yet."),
-    history.items.length && history.error ? /* @__PURE__ */ React.createElement("div", { className: "roam-codex-chat-history-error" }, history.error) : null
-  ), /* @__PURE__ */ React.createElement(
-    "button",
-    {
-      type: "button",
-      className: "roam-codex-chat-close",
-      title: "Close Codex chat",
-      "aria-label": "Close Codex chat",
-      onClick: onCloseRequested
-    },
-    "\u2715"
-  ));
+        className: "roam-codex-chat-close",
+        title: "Close Codex chat",
+        "aria-label": "Close Codex chat",
+        onClick: onCloseRequested,
+        children: "\u2715"
+      }
+    )
+  ] });
 }
 function ChatPanelRoot({ store, doc, api, headerEl, controlsEl, onCloseRequested }) {
-  const [snapshot, setSnapshot] = useState(store.getSnapshot);
-  const transcriptRef = useRef(null);
-  const pickerWrapRef = useRef(null);
-  useEffect(() => {
-    const unsubscribe = store.subscribe(() => setSnapshot(store.getSnapshot()));
-    setSnapshot(store.getSnapshot());
+  const snapshot = (0, import_shim.useSyncExternalStore)(store.subscribe, store.getSnapshot);
+  const transcriptRef = (0, import_react.useRef)(null);
+  const pickerWrapRef = (0, import_react.useRef)(null);
+  (0, import_react.useEffect)(() => {
     void store.loadModels();
     void store.loadInitialConversation();
-    return unsubscribe;
   }, [store]);
-  useEffect(() => {
+  (0, import_react.useEffect)(() => {
     const handleKeydown = (event) => {
       const current = store.getSnapshot();
       if (!event.defaultPrevented && event.key === "Escape" && (current.history.open || current.pickerOpen)) {
@@ -1359,13 +2438,21 @@ function ChatPanelRoot({ store, doc, api, headerEl, controlsEl, onCloseRequested
       doc.defaultView?.removeEventListener?.("focus", handleWindowFocus);
     };
   }, [store, doc, headerEl]);
-  return /* @__PURE__ */ React.createElement(PanelContext.Provider, { value: { store, snapshot, api, doc } }, ReactDOM.createPortal(
-    /* @__PURE__ */ React.createElement(HeaderContent, { onCloseRequested }),
-    headerEl
-  ), /* @__PURE__ */ React.createElement("div", { className: "roam-codex-chat-body" }, /* @__PURE__ */ React.createElement(Transcript, { transcriptRef }), /* @__PURE__ */ React.createElement(ResizeHandle, { transcriptRef })), ReactDOM.createPortal(
-    /* @__PURE__ */ React.createElement(ControlsBar, { pickerWrapRef }),
-    controlsEl
-  ));
+  const Context = getPanelContext();
+  return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(Context.Provider, { value: { store, snapshot, api, doc }, children: [
+    (0, import_react_dom.createPortal)(
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)(HeaderContent, { onCloseRequested }),
+      headerEl
+    ),
+    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "roam-codex-chat-body", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Transcript, { transcriptRef }),
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)(ResizeHandle, { transcriptRef })
+    ] }),
+    (0, import_react_dom.createPortal)(
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)(ControlsBar, { pickerWrapRef }),
+      controlsEl
+    )
+  ] });
 }
 function createChatPanel(options = {}) {
   const {
@@ -1376,7 +2463,10 @@ function createChatPanel(options = {}) {
   if (!doc?.createElement) {
     throw new Error("A document is required to create the Codex chat panel.");
   }
-  assertReactAvailable();
+  const host = globalThis.window ?? globalThis;
+  if (!host.React?.createElement || !host.ReactDOM?.render) {
+    throw new Error("Roam's bundled React is unavailable.");
+  }
   const store = createChatPanelStore({ ...storeOptions, api });
   const panel = doc.createElement("section");
   panel.className = CHAT_PANEL_CLASS;
@@ -1392,7 +2482,7 @@ function createChatPanel(options = {}) {
     const result = store.close();
     if (!unmounted) {
       unmounted = true;
-      ReactDOM.unmountComponentAtNode(panel);
+      (0, import_react_dom.unmountComponentAtNode)(panel);
     }
     header.remove();
     panel.remove();
@@ -1407,8 +2497,8 @@ function createChatPanel(options = {}) {
     }) : Promise.resolve();
     void removal.then(() => close());
   };
-  ReactDOM.render(
-    /* @__PURE__ */ React.createElement(
+  (0, import_react_dom.render)(
+    /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
       ChatPanelRoot,
       {
         store,
@@ -2316,8 +3406,8 @@ function startRunningPresentation(statusUid, {
         const summary2 = doc.createElement("span");
         summary2.className = RUNNING_SUMMARY_CLASS;
         badge.appendChild(summary2);
-        const host2 = container.querySelector?.(".rm-block-main") || container;
-        host2.appendChild(badge);
+        const host = container.querySelector?.(".rm-block-main") || container;
+        host.appendChild(badge);
       }
       const meta = badge.querySelector?.(`.${RUNNING_META_CLASS}`);
       const timer = meta?.querySelector?.(`.${RUNNING_TIMER_CLASS}`);
@@ -2550,8 +3640,8 @@ async function waitForChatPanelHost(doc, sidebarWindow, {
   waitImpl = (resolveWait) => setTimeout(resolveWait, 50)
 } = {}) {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const host2 = findChatPanelHost(doc, sidebarWindow);
-    if (host2) return host2;
+    const host = findChatPanelHost(doc, sidebarWindow);
+    if (host) return host;
     await new Promise(waitImpl);
   }
   throw new Error("Roam's native prompt window did not become available.");
@@ -3158,7 +4248,7 @@ async function openChatPanelInternal({
   let controller;
   let nativeWindowObserver = null;
   let disconnectedHostTimer = null;
-  let host2 = null;
+  let host = null;
   let nativeHeader = null;
   let nativeComposer = null;
   let composerShell = null;
@@ -3169,7 +4259,7 @@ async function openChatPanelInternal({
       composerShell.parentNode.insertBefore?.(nativeComposer, composerShell);
     }
     composerShell?.remove?.();
-    host2?.classList?.remove?.("roam-codex-chat-window");
+    host?.classList?.remove?.("roam-codex-chat-window");
     nativeHeader = null;
     nativeComposer = null;
     composerShell = null;
@@ -3177,10 +4267,10 @@ async function openChatPanelInternal({
   const mountControllerInHost = (nextHost) => {
     if (!nextHost || !controller) return false;
     releaseMountedHost();
-    host2 = nextHost;
-    host2.classList?.add?.("roam-codex-chat-window");
-    nativeHeader = host2.firstElementChild || null;
-    host2.insertBefore(
+    host = nextHost;
+    host.classList?.add?.("roam-codex-chat-window");
+    nativeHeader = host.firstElementChild || null;
+    host.insertBefore(
       controller.element,
       nativeHeader?.nextSibling || null
     );
@@ -3190,11 +4280,11 @@ async function openChatPanelInternal({
     if (nativeComposer && typeof doc.createElement === "function") {
       composerShell = doc.createElement("div");
       composerShell.className = "roam-codex-chat-composer-shell";
-      host2.insertBefore(composerShell, nativeComposer);
+      host.insertBefore(composerShell, nativeComposer);
       composerShell.appendChild(nativeComposer);
       composerShell.appendChild(controller.controlsElement);
     } else {
-      host2.appendChild(controller.controlsElement);
+      host.appendChild(controller.controlsElement);
     }
     if (controller.headerElement) {
       const launcherPlacement = findSidebarChatLauncherPlacement(doc);
@@ -3205,7 +4295,7 @@ async function openChatPanelInternal({
           launcher.nextSibling || null
         );
       } else {
-        host2.insertBefore(controller.headerElement, controller.element);
+        host.insertBefore(controller.headerElement, controller.element);
       }
     }
     return true;
@@ -3215,7 +4305,7 @@ async function openChatPanelInternal({
       promptBlockUid,
       { api, waitOptions }
     );
-    host2 = await waitForChatPanelHost(doc, sidebarWindow, waitOptions);
+    host = await waitForChatPanelHost(doc, sidebarWindow, waitOptions);
     doc.getElementById?.(CHAT_PANEL_ID)?.remove?.();
     doc.getElementById?.(CHAT_CONTROLS_ID)?.remove?.();
     controller = createPanel({
@@ -3241,17 +4331,17 @@ async function openChatPanelInternal({
         });
       }
     });
-    mountControllerInHost(host2);
+    mountControllerInHost(host);
     ACTIVE_CHAT_PANEL = controller;
     const MutationObserverImpl = doc.defaultView?.MutationObserver || globalThis.MutationObserver;
-    const observationRoot = doc.body || doc.documentElement || host2.parentNode;
+    const observationRoot = doc.body || doc.documentElement || host.parentNode;
     if (MutationObserverImpl && observationRoot) {
       nativeWindowObserver = new MutationObserverImpl(() => {
-        if (host2?.isConnected && controller.element?.isConnected) return;
+        if (host?.isConnected && controller.element?.isConnected) return;
         if (disconnectedHostTimer !== null) return;
         disconnectedHostTimer = globalThis.setTimeout(() => {
           disconnectedHostTimer = null;
-          if (host2?.isConnected && controller.element?.isConnected) return;
+          if (host?.isConnected && controller.element?.isConnected) return;
           const liveWindow = findSidebarBlockWindow(promptBlockUid, { api });
           if (!liveWindow) {
             void controller.close();
@@ -3560,3 +4650,33 @@ export {
   workOnBlock,
   writeChatState
 };
+/*! Bundled license information:
+
+use-sync-external-store/cjs/use-sync-external-store-shim.development.js:
+  (**
+   * @license React
+   * use-sync-external-store-shim.development.js
+   *
+   * Copyright (c) Meta Platforms, Inc. and affiliates.
+   *
+   * This source code is licensed under the MIT license found in the
+   * LICENSE file in the root directory of this source tree.
+   *)
+
+object-assign/index.js:
+  (*
+  object-assign
+  (c) Sindre Sorhus
+  @license MIT
+  *)
+
+react/cjs/react-jsx-runtime.development.js:
+  (** @license React v17.0.2
+   * react-jsx-runtime.development.js
+   *
+   * Copyright (c) Facebook, Inc. and its affiliates.
+   *
+   * This source code is licensed under the MIT license found in the
+   * LICENSE file in the root directory of this source tree.
+   *)
+*/

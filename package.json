@@ -8,7 +8,7 @@
     "dev": "node --watch bridge.mjs",
     "start": "node bridge.mjs",
     "show-token": "node bridge.mjs --show-token",
-    "build": "esbuild src/extension.js --bundle --format=esm --outfile=extension.js --jsx-factory=React.createElement --jsx-fragment=React.Fragment --log-level=warning",
+    "build": "esbuild src/extension.js --bundle --format=esm --outfile=extension.js --jsx=automatic --alias:react/jsx-runtime=./node_modules/react/jsx-runtime.js --alias:react=./src/react-shim.cjs --alias:react-dom=./src/react-dom-shim.cjs --log-level=warning",
     "watch": "npm run build -- --watch=forever",
     "test": "node --test",
     "check": "npm run build && node --check bridge.mjs && node --check extension.js && node --test"
@@ -20,6 +20,7 @@
     "esbuild": "^0.28.1",
     "jsdom": "^29.1.1",
     "react": "^17.0.2",
-    "react-dom": "^17.0.2"
+    "react-dom": "^17.0.2",
+    "use-sync-external-store": "^1.6.0"
   }
 }

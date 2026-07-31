@@ -1,4 +1,6 @@
-import { React, ReactDOM, assertReactAvailable } from "./react-globals.js";
+import { createContext, useContext, useEffect, useRef, useState } from "react";
+import { createPortal, render, unmountComponentAtNode } from "react-dom";
+import { useSyncExternalStore } from "use-sync-external-store/shim/index.js";
 import { createChatPanelStore } from "./chat-panel-store.js";
 import {
   getRoamApi,
@@ -15,17 +17,12 @@ import {
   CHAT_SCROLL_BOTTOM_THRESHOLD,
 } from "./core.js";
 
-// Lazy delegates so importing this module never touches window.React; the
-// shell asserts availability before any component renders.
-const useState = (...args) => React.useState(...args);
-const useEffect = (...args) => React.useEffect(...args);
-const useRef = (...args) => React.useRef(...args);
-const useContext = (...args) => React.useContext(...args);
-
 // One context carries the store and per-panel environment; one subscription
-// at the root threads the current snapshot through the same object.
-const PanelContext = React ? React.createContext(null) : null;
-const usePanel = () => useContext(PanelContext);
+// at the root threads the current snapshot through the same object. Created
+// lazily so importing the bundle never requires React to be present.
+let PanelContext = null;
+const getPanelContext = () => (PanelContext ??= createContext(null));
+const usePanel = () => useContext(getPanelContext());
 
 // Owns Roam's renderString/unmountNode lifecycle for one immutable string.
 function RoamString({ text, className }) {
@@ -598,16 +595,12 @@ function HeaderContent({ onCloseRequested }) {
 }
 
 function ChatPanelRoot({ store, doc, api, headerEl, controlsEl, onCloseRequested }) {
-  const [snapshot, setSnapshot] = useState(store.getSnapshot);
+  const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const transcriptRef = useRef(null);
   const pickerWrapRef = useRef(null);
   useEffect(() => {
-    const unsubscribe = store.subscribe(() => setSnapshot(store.getSnapshot()));
-    // Catch emissions that happened between first render and subscription.
-    setSnapshot(store.getSnapshot());
     void store.loadModels();
     void store.loadInitialConversation();
-    return unsubscribe;
   }, [store]);
 
   useEffect(() => {
@@ -670,9 +663,10 @@ function ChatPanelRoot({ store, doc, api, headerEl, controlsEl, onCloseRequested
     };
   }, [store, doc, headerEl]);
 
+  const Context = getPanelContext();
   return (
-    <PanelContext.Provider value={{ store, snapshot, api, doc }}>
-      {ReactDOM.createPortal(
+    <Context.Provider value={{ store, snapshot, api, doc }}>
+      {createPortal(
         <HeaderContent onCloseRequested={onCloseRequested} />,
         headerEl,
       )}
@@ -680,11 +674,11 @@ function ChatPanelRoot({ store, doc, api, headerEl, controlsEl, onCloseRequested
         <Transcript transcriptRef={transcriptRef} />
         <ResizeHandle transcriptRef={transcriptRef} />
       </div>
-      {ReactDOM.createPortal(
+      {createPortal(
         <ControlsBar pickerWrapRef={pickerWrapRef} />,
         controlsEl,
       )}
-    </PanelContext.Provider>
+    </Context.Provider>
   );
 }
 
@@ -697,7 +691,10 @@ export function createChatPanel(options = {}) {
   if (!doc?.createElement) {
     throw new Error("A document is required to create the Codex chat panel.");
   }
-  assertReactAvailable();
+  const host = globalThis.window ?? globalThis;
+  if (!host.React?.createElement || !host.ReactDOM?.render) {
+    throw new Error("Roam's bundled React is unavailable.");
+  }
   const store = createChatPanelStore({ ...storeOptions, api });
 
   const panel = doc.createElement("section");
@@ -715,7 +712,7 @@ export function createChatPanel(options = {}) {
     const result = store.close();
     if (!unmounted) {
       unmounted = true;
-      ReactDOM.unmountComponentAtNode(panel);
+      unmountComponentAtNode(panel);
     }
     header.remove();
     panel.remove();
@@ -733,7 +730,7 @@ export function createChatPanel(options = {}) {
     void removal.then(() => close());
   };
 
-  ReactDOM.render(
+  render(
     <ChatPanelRoot
       store={store}
       doc={doc}
