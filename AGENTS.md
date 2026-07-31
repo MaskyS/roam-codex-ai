@@ -29,11 +29,46 @@ comments, and other native comments.
 
 1. Read `[[Codex Roam Lab]]` in the `maskys` graph when the task concerns
    recorded friction or the last experiment.
-2. Make the smallest change that tests the current hypothesis.
-3. Run `npm run check`.
-4. Reload developer extensions with the Roam CLI or `Ctrl-D Ctrl-R`.
-5. Exercise the changed behavior in Roam and inspect `.dev/last-run.jsonl`.
-6. Record observed behavior and the next experiment in `[[Codex Roam Lab]]`.
+2. Read the relevant current primary documentation when the change touches a
+   Roam or Codex protocol surface.
+3. Make the smallest change that tests the current hypothesis.
+4. Run `npm run check`.
+5. Reload developer extensions with the Roam CLI or `Ctrl-D Ctrl-R`.
+6. Exercise the changed behavior in Roam and inspect `.dev/last-run.jsonl`.
+7. Record observed behavior and the next experiment in `[[Codex Roam Lab]]`.
+
+## Documentation and research
+
+- Be proactive about research. When behavior may depend on a current API,
+  recent product change, known bug, or unfamiliar integration detail, look it
+  up before designing or editing. Do not wait for the user to suggest the
+  relevant documentation.
+- For Roam extension work, start with the applicable pages on
+  `https://roamdocs.fyi`, especially the Roam Depot Extension API and Roam Alpha
+  API documentation. Read the specific command, focused-block, pull-watch,
+  comments, sidebar, or developer-extension guidance relevant to the change;
+  do not infer supported behavior from DOM appearance alone.
+- Also use the official `roam-tools` / Roam MCP and Roam CLI documentation when
+  the task concerns graph tools, comments, permissions, or extension reloads.
+  Prefer the supported API or CLI over DOM automation. Verify reloads from the
+  explicit command result or changed live behavior; a silent keyboard shortcut
+  is not proof that new code loaded.
+- For Codex runtime work, consult the current official Codex App Server API
+  documentation at `https://learn.chatgpt.com/docs/app-server`. For exact
+  request fields, notification payloads, and enums, also generate bindings from
+  the installed CLI with `codex app-server generate-ts`; the installed protocol
+  and current official documentation take precedence over memory.
+- Prefer official and primary sources for technical claims. If the available
+  sources conflict, state the conflict and verify the behavior against the
+  installed version or a bounded live experiment before committing to a
+  design.
+- Research should be proportional. Do not browse merely to rewrite local text
+  or perform a graph-only transformation whose behavior is already established
+  by the code and tests. Do research whenever recency or external behavior can
+  materially affect correctness.
+- Before declaring a fix complete, inspect the relevant code path, run the
+  focused tests plus `npm run check`, and verify the live seam involved: Roam
+  UI/API behavior, bridge trace, app-server event stream, or extension reload.
 
 ## Safety
 
