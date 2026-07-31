@@ -5,7 +5,6 @@ import {
   singleLine,
   threadPageLabel,
   serverTimestampMs,
-  conversationDateLabel,
   modelEfforts,
   modelTierChoices,
   effortLabel,
@@ -49,7 +48,6 @@ export function createChatPanelStore({
   updateGraphActivityImpl = (record, timestamp) =>
     updateGraphThreadActivity(record, timestamp, { api }),
   copyTextImpl = copyRoamText,
-  navigatorImpl = globalThis.navigator,
   readPromptImpl,
   clearScratchPromptImpl,
   restorePromptImpl,
@@ -154,7 +152,7 @@ export function createChatPanelStore({
     currentRecord() || state.newConversationPreferences;
 
   const sendShortcutIsMac = /Mac|iP(?:hone|ad|od)/i.test(
-    navigatorImpl?.platform || navigatorImpl?.userAgent || "",
+    globalThis.navigator?.platform || globalThis.navigator?.userAgent || "",
   );
 
   const setProgress = (text = "", kind = "") => {
@@ -819,9 +817,6 @@ export function createChatPanelStore({
 
   const getSnapshot = () => {
     if (snapshot) return snapshot;
-    const selected = currentModelEntry();
-    const tiers = modelTierChoices(selected);
-    const currentTier = tiers.find((tier) => tier.id === pickerSpeed);
     snapshot = {
       version,
       closed,
@@ -832,24 +827,12 @@ export function createChatPanelStore({
       models,
       progress: { text: progressTextValue, kind: progressKind },
       stopping: stopRequested,
-      picker: {
-        open: pickerOpen,
-        level: pickerLevel,
-        label: pickerLabel(),
-        modelId: pickerModel,
-        effortId: pickerEffort,
-        speedId: pickerSpeed,
-        selectedModel: selected,
-        efforts: modelEfforts(selected),
-        defaultEffort: modelEfforts(selected).includes(
-          selected?.defaultReasoningEffort,
-        )
-          ? selected.defaultReasoningEffort
-          : null,
-        tiers,
-        defaultTierId: defaultTierIdFor(selected),
-        currentTier: currentTier || null,
-      },
+      pickerOpen,
+      pickerLevel,
+      pickerModel,
+      pickerEffort,
+      pickerSpeed,
+      pickerLabel: pickerLabel(),
       history: {
         open: historyOpen,
         error: historyError,
@@ -871,7 +854,6 @@ export function createChatPanelStore({
     getSnapshot,
     now,
     copyText: (text) => copyTextImpl(text),
-    conversationDateLabel,
     // Actions
     send,
     stop,
@@ -904,9 +886,9 @@ export function createChatPanelStore({
       pickerLevel = level;
       emit();
     },
-    pickModel(modelId) {
-      if (modelId !== pickerModel) {
-        pickerModel = modelId;
+    pick(level, id) {
+      if (level === "model" && id !== pickerModel) {
+        pickerModel = id;
         modelChanged = true;
         effortChanged = true;
         speedChanged = true;
@@ -922,25 +904,18 @@ export function createChatPanelStore({
           pickerSpeed = defaultTierIdFor(next);
         }
         savePreferences();
-      }
-      closePicker();
-    },
-    pickEffort(effort) {
-      if (effort !== pickerEffort) {
-        pickerEffort = effort;
+      } else if (level === "effort" && id !== pickerEffort) {
+        pickerEffort = id;
         effortChanged = true;
         savePreferences();
-      }
-      closePicker();
-    },
-    pickSpeed(tierId) {
-      if (tierId !== pickerSpeed) {
-        pickerSpeed = tierId;
+      } else if (level === "speed" && id !== pickerSpeed) {
+        pickerSpeed = id;
         speedChanged = true;
         savePreferences();
       }
       closePicker();
     },
+    clampTranscriptHeight,
     setTranscriptHeight(height) {
       transcriptHeight = clampTranscriptHeight(height);
       emit();

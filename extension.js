@@ -22,7 +22,6 @@ function createChatPanelStore({
   ensureGraphThreadImpl,
   updateGraphActivityImpl = (record, timestamp) => updateGraphThreadActivity(record, timestamp, { api }),
   copyTextImpl = copyRoamText,
-  navigatorImpl = globalThis.navigator,
   readPromptImpl,
   clearScratchPromptImpl,
   restorePromptImpl,
@@ -115,7 +114,7 @@ function createChatPanelStore({
   const currentRecord = () => state.activeThreadId ? state.conversations[state.activeThreadId] : null;
   const currentPreferences = () => currentRecord() || state.newConversationPreferences;
   const sendShortcutIsMac = /Mac|iP(?:hone|ad|od)/i.test(
-    navigatorImpl?.platform || navigatorImpl?.userAgent || ""
+    globalThis.navigator?.platform || globalThis.navigator?.userAgent || ""
   );
   const setProgress = (text = "", kind = "") => {
     progressTextValue = singleLine(text);
@@ -677,9 +676,6 @@ ${name}`);
   };
   const getSnapshot = () => {
     if (snapshot) return snapshot;
-    const selected = currentModelEntry();
-    const tiers = modelTierChoices(selected);
-    const currentTier = tiers.find((tier) => tier.id === pickerSpeed);
     snapshot = {
       version,
       closed,
@@ -690,22 +686,12 @@ ${name}`);
       models,
       progress: { text: progressTextValue, kind: progressKind },
       stopping: stopRequested,
-      picker: {
-        open: pickerOpen,
-        level: pickerLevel,
-        label: pickerLabel(),
-        modelId: pickerModel,
-        effortId: pickerEffort,
-        speedId: pickerSpeed,
-        selectedModel: selected,
-        efforts: modelEfforts(selected),
-        defaultEffort: modelEfforts(selected).includes(
-          selected?.defaultReasoningEffort
-        ) ? selected.defaultReasoningEffort : null,
-        tiers,
-        defaultTierId: defaultTierIdFor(selected),
-        currentTier: currentTier || null
-      },
+      pickerOpen,
+      pickerLevel,
+      pickerModel,
+      pickerEffort,
+      pickerSpeed,
+      pickerLabel: pickerLabel(),
       history: {
         open: historyOpen,
         error: historyError,
@@ -726,7 +712,6 @@ ${name}`);
     getSnapshot,
     now,
     copyText: (text) => copyTextImpl(text),
-    conversationDateLabel,
     // Actions
     send,
     stop,
@@ -759,9 +744,9 @@ ${name}`);
       pickerLevel = level;
       emit();
     },
-    pickModel(modelId) {
-      if (modelId !== pickerModel) {
-        pickerModel = modelId;
+    pick(level, id) {
+      if (level === "model" && id !== pickerModel) {
+        pickerModel = id;
         modelChanged = true;
         effortChanged = true;
         speedChanged = true;
@@ -775,25 +760,18 @@ ${name}`);
           pickerSpeed = defaultTierIdFor(next);
         }
         savePreferences();
-      }
-      closePicker();
-    },
-    pickEffort(effort) {
-      if (effort !== pickerEffort) {
-        pickerEffort = effort;
+      } else if (level === "effort" && id !== pickerEffort) {
+        pickerEffort = id;
         effortChanged = true;
         savePreferences();
-      }
-      closePicker();
-    },
-    pickSpeed(tierId) {
-      if (tierId !== pickerSpeed) {
-        pickerSpeed = tierId;
+      } else if (level === "speed" && id !== pickerSpeed) {
+        pickerSpeed = id;
         speedChanged = true;
         savePreferences();
       }
       closePicker();
     },
+    clampTranscriptHeight,
     setTranscriptHeight(height) {
       transcriptHeight = clampTranscriptHeight(height);
       emit();
@@ -838,16 +816,11 @@ ${name}`);
 var useState = (...args) => React.useState(...args);
 var useEffect = (...args) => React.useEffect(...args);
 var useRef = (...args) => React.useRef(...args);
-function useStoreSnapshot(store) {
-  const [snapshot, setSnapshot] = useState(store.getSnapshot);
-  useEffect(() => {
-    const unsubscribe = store.subscribe(() => setSnapshot(store.getSnapshot()));
-    setSnapshot(store.getSnapshot());
-    return unsubscribe;
-  }, [store]);
-  return snapshot;
-}
-function RoamString({ api, text, className }) {
+var useContext = (...args) => React.useContext(...args);
+var PanelContext = React ? React.createContext(null) : null;
+var usePanel = () => useContext(PanelContext);
+function RoamString({ text, className }) {
+  const { api } = usePanel();
   const ref = useRef(null);
   useEffect(() => {
     const el = ref.current;
@@ -865,39 +838,33 @@ function RoamString({ api, text, className }) {
   }, [api, text]);
   return /* @__PURE__ */ React.createElement("div", { className, ref });
 }
-function CopyButton({
-  copyText,
-  roleLabel,
-  text,
-  setTimeoutImpl,
-  clearTimeoutImpl
-}) {
+function CopyButton({ roleLabel, text }) {
+  const { store } = usePanel();
   const [copyState, setCopyState] = useState("idle");
   const timerRef = useRef(null);
   const mountedRef = useRef(true);
   useEffect(() => () => {
     mountedRef.current = false;
-    if (timerRef.current !== null) clearTimeoutImpl(timerRef.current);
-  }, [clearTimeoutImpl]);
-  const idleLabel = `Copy ${roleLabel} message as Roam text`;
+    if (timerRef.current !== null) clearTimeout(timerRef.current);
+  }, []);
   const title = copyState === "copied" ? "Copied" : copyState === "error" ? "Could not copy Roam text" : "Copy Roam text";
-  const ariaLabel = copyState === "copied" ? "Copied Roam text" : copyState === "error" ? "Could not copy Roam text" : idleLabel;
+  const ariaLabel = copyState === "copied" ? "Copied Roam text" : copyState === "error" ? "Could not copy Roam text" : `Copy ${roleLabel} message as Roam text`;
   const onClick = async (event) => {
     event?.preventDefault?.();
     event?.stopPropagation?.();
-    if (timerRef.current !== null) clearTimeoutImpl(timerRef.current);
+    if (timerRef.current !== null) clearTimeout(timerRef.current);
     timerRef.current = null;
     setCopyState("copying");
     let next;
     try {
-      await copyText(text);
+      await store.copyText(text);
       next = "copied";
     } catch {
       next = "error";
     }
     if (!mountedRef.current) return;
     setCopyState(next);
-    timerRef.current = setTimeoutImpl(() => {
+    timerRef.current = setTimeout(() => {
       timerRef.current = null;
       if (mountedRef.current) setCopyState("idle");
     }, 1400);
@@ -914,42 +881,32 @@ function CopyButton({
     }
   );
 }
-function ProgressRow({ snapshot, now, setIntervalImpl, clearIntervalImpl }) {
+function ProgressRow() {
+  const { store, snapshot } = usePanel();
   const { running, runStartedAt, progress } = snapshot;
   const [elapsedMs, setElapsedMs] = useState(0);
   useEffect(() => {
     if (!running) return void 0;
     setElapsedMs(0);
-    if (!setIntervalImpl || !clearIntervalImpl) return void 0;
-    const intervalId = setIntervalImpl(() => {
-      setElapsedMs(now() - runStartedAt);
+    const intervalId = setInterval(() => {
+      setElapsedMs(store.now() - runStartedAt);
     }, 1e3);
-    return () => clearIntervalImpl(intervalId);
-  }, [running, runStartedAt, now, setIntervalImpl, clearIntervalImpl]);
-  const hidden = !progress.text && !running;
+    return () => clearInterval(intervalId);
+  }, [running, runStartedAt, store]);
   return /* @__PURE__ */ React.createElement(
     "div",
     {
       className: "roam-codex-chat-progress",
       "aria-live": "polite",
       "data-kind": progress.kind,
-      hidden
+      hidden: !progress.text && !running
     },
     /* @__PURE__ */ React.createElement("span", { className: "roam-codex-chat-progress-meta", hidden: !running }, /* @__PURE__ */ React.createElement("span", { className: "roam-codex-chat-progress-timer" }, formatRunningElapsed(running ? elapsedMs : 0))),
     /* @__PURE__ */ React.createElement("span", { className: "roam-codex-chat-progress-text" }, progress.text)
   );
 }
-function Transcript({
-  snapshot,
-  store,
-  api,
-  matchMediaImpl,
-  setTimeoutImpl,
-  clearTimeoutImpl,
-  setIntervalImpl,
-  clearIntervalImpl,
-  transcriptRef
-}) {
+function Transcript({ transcriptRef }) {
+  const { store, snapshot } = usePanel();
   const { messages, transcriptHeight, running, progress } = snapshot;
   const [showLatest, setShowLatest] = useState(false);
   const progressVisible = Boolean(progress.text) || running;
@@ -960,12 +917,9 @@ function Transcript({
     const clientHeight = Number(el.clientHeight) || 0;
     const scrollTop = Number(el.scrollTop) || 0;
     const overflowing = clientHeight > 0 && scrollHeight > clientHeight + 1;
-    const distanceFromBottom = Math.max(
-      0,
-      scrollHeight - clientHeight - scrollTop
-    );
+    const fromBottom = Math.max(0, scrollHeight - clientHeight - scrollTop);
     setShowLatest(
-      messages.length > 0 && overflowing && distanceFromBottom > CHAT_SCROLL_BOTTOM_THRESHOLD
+      messages.length > 0 && overflowing && fromBottom > CHAT_SCROLL_BOTTOM_THRESHOLD
     );
   };
   useEffect(() => {
@@ -978,7 +932,7 @@ function Transcript({
     const el = transcriptRef.current;
     if (!el) return;
     const reduceMotion = Boolean(
-      matchMediaImpl?.("(prefers-reduced-motion: reduce)")?.matches
+      globalThis.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches
     );
     const top = Number(el.scrollHeight) || 0;
     if (typeof el.scrollTo === "function") {
@@ -992,7 +946,6 @@ function Transcript({
     height: `${transcriptHeight}px`,
     maxHeight: `${transcriptHeight}px`
   };
-  const transcriptHidden = !messages.length && !progressVisible;
   return /* @__PURE__ */ React.createElement("div", { className: "roam-codex-chat-transcript-wrap", style: heightStyle }, /* @__PURE__ */ React.createElement(
     "div",
     {
@@ -1000,7 +953,7 @@ function Transcript({
       role: "log",
       "aria-live": "polite",
       ref: transcriptRef,
-      hidden: transcriptHidden,
+      hidden: !messages.length && !progressVisible,
       style: heightStyle,
       onScroll: measureLatest
     },
@@ -1015,35 +968,17 @@ function Transcript({
           key: `${index}-${message.role}`,
           className: `roam-codex-chat-message roam-codex-chat-message-${message.role}`
         },
-        /* @__PURE__ */ React.createElement(
-          CopyButton,
-          {
-            copyText: store.copyText,
-            roleLabel,
-            text: message.text,
-            setTimeoutImpl,
-            clearTimeoutImpl
-          }
-        ),
+        /* @__PURE__ */ React.createElement(CopyButton, { roleLabel, text: message.text }),
         /* @__PURE__ */ React.createElement(
           RoamString,
           {
-            api,
             text: message.text,
             className: "roam-codex-chat-message-text"
           }
         )
       );
     }),
-    /* @__PURE__ */ React.createElement(
-      ProgressRow,
-      {
-        snapshot,
-        now: store.now,
-        setIntervalImpl,
-        clearIntervalImpl
-      }
-    )
+    /* @__PURE__ */ React.createElement(ProgressRow, null)
   ), /* @__PURE__ */ React.createElement(
     "button",
     {
@@ -1057,25 +992,35 @@ function Transcript({
     /* @__PURE__ */ React.createElement("span", { className: "roam-codex-chat-scroll-latest-icon", "aria-hidden": "true" }, "\u2193")
   ));
 }
-function ResizeHandle({ snapshot, store, doc, transcriptRef }) {
+function ResizeHandle({ transcriptRef }) {
+  const { store, snapshot, doc } = usePanel();
   const dragRef = useRef(null);
-  useEffect(() => () => {
-    if (dragRef.current) dragRef.current.stop();
-  }, []);
+  useEffect(() => () => dragRef.current?.stop(), []);
   const onPointerDown = (event) => {
     if (!Number.isFinite(event?.clientY)) return;
-    const measured = transcriptRef.current?.getBoundingClientRect?.()?.height;
+    const transcript = transcriptRef.current;
+    const measured = transcript?.getBoundingClientRect?.()?.height;
     const startHeight = Number.isFinite(measured) && measured > 0 ? measured : snapshot.transcriptHeight;
     const startY = event.clientY;
+    let height = startHeight;
     const onMove = (moveEvent) => {
       if (!Number.isFinite(moveEvent?.clientY)) return;
-      store.setTranscriptHeight(startHeight + (moveEvent.clientY - startY));
+      height = store.clampTranscriptHeight(
+        startHeight + (moveEvent.clientY - startY)
+      );
+      for (const el of [transcript, transcript?.parentElement]) {
+        if (el?.style) {
+          el.style.height = `${height}px`;
+          el.style.maxHeight = `${height}px`;
+        }
+      }
       moveEvent.preventDefault?.();
     };
     const stop = () => {
       dragRef.current = null;
       doc.removeEventListener?.("pointermove", onMove, true);
       doc.removeEventListener?.("pointerup", stop, true);
+      store.setTranscriptHeight(height);
       store.persistTranscriptHeight();
     };
     dragRef.current = { stop };
@@ -1094,69 +1039,98 @@ function ResizeHandle({ snapshot, store, doc, transcriptRef }) {
     }
   );
 }
-function PickerMenu({ snapshot, store }) {
-  const { picker, models } = snapshot;
-  const rows = [
-    [
-      "Model",
-      picker.selectedModel?.displayName || picker.selectedModel?.id || "\u2014",
-      "model"
-    ],
-    ["Effort", picker.effortId ? effortLabel(picker.effortId) : "\u2014", "effort"]
-  ];
-  if (picker.tiers.length) {
-    rows.push([
-      "Speed",
-      picker.currentTier?.name || picker.currentTier?.id || "\u2014",
-      "speed"
-    ]);
-  }
-  const option = (label, active, onPick, description = "") => /* @__PURE__ */ React.createElement(
+function PickerOption({ label, active, level, id, description }) {
+  const { store } = usePanel();
+  return /* @__PURE__ */ React.createElement(
     "button",
     {
-      key: label,
       type: "button",
       className: `roam-codex-chat-picker-option${active ? " is-active" : ""}`,
       role: "menuitemradio",
       "aria-checked": active,
       title: description,
-      onClick: () => onPick()
+      onClick: () => store.pick(level, id)
     },
     /* @__PURE__ */ React.createElement("span", { className: "roam-codex-chat-picker-option-label" }, label),
     description ? /* @__PURE__ */ React.createElement("span", { className: "roam-codex-chat-picker-option-description" }, description) : null
   );
-  let submenuOptions = null;
-  if (picker.level === "model") {
-    submenuOptions = models.filter((model) => model && typeof model.id === "string").map((model) => {
+}
+function pickerModelView(snapshot) {
+  const { models, pickerModel, pickerEffort, pickerSpeed } = snapshot;
+  const selected = models.find((model) => model.id === pickerModel) || models.find((model) => model.isDefault) || models[0] || null;
+  const efforts = modelEfforts(selected);
+  const tiers = modelTierChoices(selected);
+  const defaultTierId = tiers.some(
+    (tier) => tier.id === selected?.defaultServiceTier
+  ) ? selected.defaultServiceTier : "";
+  return {
+    selected,
+    efforts,
+    defaultEffort: efforts.includes(selected?.defaultReasoningEffort) ? selected.defaultReasoningEffort : null,
+    tiers,
+    defaultTierId,
+    currentTier: tiers.find((tier) => tier.id === pickerSpeed) || null,
+    effortId: pickerEffort,
+    speedId: pickerSpeed,
+    modelId: pickerModel
+  };
+}
+function PickerMenu({ view }) {
+  const { store, snapshot } = usePanel();
+  const { pickerOpen, pickerLevel, models } = snapshot;
+  const rows = [
+    ["Model", view.selected?.displayName || view.selected?.id || "\u2014", "model"],
+    ["Effort", view.effortId ? effortLabel(view.effortId) : "\u2014", "effort"]
+  ];
+  if (view.tiers.length) {
+    rows.push([
+      "Speed",
+      view.currentTier?.name || view.currentTier?.id || "\u2014",
+      "speed"
+    ]);
+  }
+  let options = null;
+  if (pickerLevel === "model") {
+    options = models.filter((model) => model && typeof model.id === "string").map((model) => {
       const displayName = model.displayName || model.id;
-      return option(
-        model.isDefault ? `${displayName} (Default)` : displayName,
-        model.id === picker.modelId,
-        () => store.pickModel(model.id),
-        model.description || ""
+      return /* @__PURE__ */ React.createElement(
+        PickerOption,
+        {
+          key: model.id,
+          label: model.isDefault ? `${displayName} (Default)` : displayName,
+          active: model.id === view.modelId,
+          level: "model",
+          id: model.id,
+          description: model.description || ""
+        }
       );
     });
-  } else if (picker.level === "effort") {
-    submenuOptions = picker.efforts.map(
-      (effort) => option(
-        effort === picker.defaultEffort ? `${effortLabel(effort)} (Default)` : effortLabel(effort),
-        effort === picker.effortId,
-        () => store.pickEffort(effort),
-        picker.selectedModel?.supportedReasoningEfforts?.find(
+  } else if (pickerLevel === "effort") {
+    options = view.efforts.map((effort) => /* @__PURE__ */ React.createElement(
+      PickerOption,
+      {
+        key: effort,
+        label: effort === view.defaultEffort ? `${effortLabel(effort)} (Default)` : effortLabel(effort),
+        active: effort === view.effortId,
+        level: "effort",
+        id: effort,
+        description: view.selected?.supportedReasoningEfforts?.find(
           (entry) => entry?.reasoningEffort === effort
         )?.description || ""
-      )
-    );
-  } else if (picker.level === "speed") {
-    submenuOptions = picker.tiers.map((tier) => {
-      const name = tier.name || tier.id;
-      return option(
-        tier.id === picker.defaultTierId ? `${name} (Default)` : name,
-        tier.id === picker.speedId,
-        () => store.pickSpeed(tier.id),
-        tier.description || ""
-      );
-    });
+      }
+    ));
+  } else if (pickerLevel === "speed") {
+    options = view.tiers.map((tier) => /* @__PURE__ */ React.createElement(
+      PickerOption,
+      {
+        key: tier.id,
+        label: tier.id === view.defaultTierId ? `${tier.name || tier.id} (Default)` : tier.name || tier.id,
+        active: tier.id === view.speedId,
+        level: "speed",
+        id: tier.id,
+        description: tier.description || ""
+      }
+    ));
   }
   return /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement(
     "div",
@@ -1164,10 +1138,10 @@ function PickerMenu({ snapshot, store }) {
       className: "roam-codex-chat-picker-menu",
       role: "menu",
       "aria-label": "Model, effort, and speed options",
-      hidden: !picker.open
+      hidden: !pickerOpen
     },
     rows.map(([label, value, level]) => {
-      const open = picker.level === level;
+      const open = pickerLevel === level;
       const openLevel = () => store.openPickerLevel(level);
       return /* @__PURE__ */ React.createElement(
         "button",
@@ -1206,14 +1180,17 @@ function PickerMenu({ snapshot, store }) {
     {
       className: "roam-codex-chat-picker-submenu",
       role: "menu",
-      "aria-label": picker.level ? `${effortLabel(picker.level)} options` : "",
-      hidden: !picker.open || !picker.level
+      "aria-label": pickerLevel ? `${effortLabel(pickerLevel)} options` : "",
+      hidden: !pickerOpen || !pickerLevel
     },
-    submenuOptions
+    options
   ));
 }
-function ControlsBar({ snapshot, store, pickerWrapRef }) {
-  const { running, modelsReady, picker, sendShortcutIsMac } = snapshot;
+function ControlsBar({ pickerWrapRef }) {
+  const { store, snapshot } = usePanel();
+  const { running, modelsReady, stopping, pickerOpen, pickerLabel } = snapshot;
+  const view = pickerModelView(snapshot);
+  const shortcutIsMac = snapshot.sendShortcutIsMac;
   return /* @__PURE__ */ React.createElement("div", { className: "roam-codex-chat-model-row" }, /* @__PURE__ */ React.createElement("div", { className: "roam-codex-chat-picker", ref: pickerWrapRef }, /* @__PURE__ */ React.createElement(
     "button",
     {
@@ -1222,20 +1199,20 @@ function ControlsBar({ snapshot, store, pickerWrapRef }) {
       title: "Choose the model, reasoning effort, and speed",
       "aria-label": "Model, effort, and speed",
       "aria-haspopup": "menu",
-      "aria-expanded": picker.open,
-      "data-speed": modelsReady ? picker.currentTier?.id === "priority" ? "fast" : "standard" : void 0,
+      "aria-expanded": pickerOpen,
+      "data-speed": modelsReady ? view.currentTier?.id === "priority" ? "fast" : "standard" : void 0,
       disabled: running || !modelsReady,
       onClick: () => store.togglePicker()
     },
-    picker.label
-  ), /* @__PURE__ */ React.createElement(PickerMenu, { snapshot, store })), /* @__PURE__ */ React.createElement("div", { className: "roam-codex-chat-actions" }, /* @__PURE__ */ React.createElement(
+    pickerLabel
+  ), /* @__PURE__ */ React.createElement(PickerMenu, { view })), /* @__PURE__ */ React.createElement("div", { className: "roam-codex-chat-actions" }, /* @__PURE__ */ React.createElement(
     "button",
     {
       type: "button",
       className: "roam-codex-chat-stop",
       title: "Stop the current Codex turn",
       hidden: !running,
-      disabled: snapshot.stopping,
+      disabled: stopping,
       onClick: () => {
         void store.stop().catch(() => {
         });
@@ -1247,7 +1224,7 @@ function ControlsBar({ snapshot, store, pickerWrapRef }) {
     {
       type: "button",
       className: "roam-codex-chat-send",
-      title: `Send the focused block in this chat's Block Outline (${sendShortcutIsMac ? "Option" : "Alt"}+Enter, rebindable in Settings \u2192 Hotkeys)`,
+      title: `Send the focused block in this chat's Block Outline (${shortcutIsMac ? "Option" : "Alt"}+Enter, rebindable in Settings \u2192 Hotkeys)`,
       hidden: running,
       disabled: running || !modelsReady,
       onMouseDown: (event) => {
@@ -1256,10 +1233,11 @@ function ControlsBar({ snapshot, store, pickerWrapRef }) {
       onClick: () => void store.send()
     },
     "Send",
-    /* @__PURE__ */ React.createElement("kbd", { className: "roam-codex-chat-send-kbd", "aria-hidden": "true" }, sendShortcutIsMac ? "\u2325\u21B5" : "Alt \u21B5")
+    /* @__PURE__ */ React.createElement("kbd", { className: "roam-codex-chat-send-kbd", "aria-hidden": "true" }, shortcutIsMac ? "\u2325\u21B5" : "Alt \u21B5")
   )));
 }
-function HeaderContent({ snapshot, store, onCloseRequested }) {
+function HeaderContent({ onCloseRequested }) {
+  const { store, snapshot } = usePanel();
   const { running, history, conversationLabel } = snapshot;
   return /* @__PURE__ */ React.createElement("div", { className: "roam-codex-chat-heading" }, /* @__PURE__ */ React.createElement(
     "button",
@@ -1270,11 +1248,7 @@ function HeaderContent({ snapshot, store, onCloseRequested }) {
       "aria-expanded": history.open,
       disabled: running,
       title: history.activeThreadId ? `Current conversation: ${conversationLabel}` : "Start a new conversation or open history",
-      onClick: () => {
-        if (running) return;
-        if (history.open) store.closeHistory();
-        else store.openHistory();
-      }
+      onClick: () => history.open ? store.closeHistory() : store.openHistory()
     },
     conversationLabel
   ), /* @__PURE__ */ React.createElement(
@@ -1328,34 +1302,25 @@ function HeaderContent({ snapshot, store, onCloseRequested }) {
     "\u2715"
   ));
 }
-function ChatPanelRoot({
-  store,
-  doc,
-  api,
-  headerEl,
-  controlsEl,
-  matchMediaImpl,
-  setTimeoutImpl,
-  clearTimeoutImpl,
-  setIntervalImpl,
-  clearIntervalImpl,
-  onCloseRequested
-}) {
-  const snapshot = useStoreSnapshot(store);
+function ChatPanelRoot({ store, doc, api, headerEl, controlsEl, onCloseRequested }) {
+  const [snapshot, setSnapshot] = useState(store.getSnapshot);
   const transcriptRef = useRef(null);
   const pickerWrapRef = useRef(null);
   useEffect(() => {
+    const unsubscribe = store.subscribe(() => setSnapshot(store.getSnapshot()));
+    setSnapshot(store.getSnapshot());
     void store.loadModels();
     void store.loadInitialConversation();
+    return unsubscribe;
   }, [store]);
   useEffect(() => {
     const handleKeydown = (event) => {
       const current = store.getSnapshot();
-      if (!event.defaultPrevented && event.key === "Escape" && (current.history.open || current.picker.open)) {
+      if (!event.defaultPrevented && event.key === "Escape" && (current.history.open || current.pickerOpen)) {
         event.preventDefault();
         event.stopPropagation?.();
         if (current.history.open) store.closeHistory();
-        if (current.picker.open) store.closePicker();
+        if (current.pickerOpen) store.closePicker();
         return;
       }
       if (!event.defaultPrevented && event.altKey && !event.metaKey && !event.ctrlKey && event.key === "Enter") {
@@ -1370,7 +1335,7 @@ function ChatPanelRoot({
       if (current.history.open && !headerEl.contains?.(event.target)) {
         store.closeHistory();
       }
-      if (current.picker.open && !pickerWrapRef.current?.contains?.(event.target)) {
+      if (current.pickerOpen && !pickerWrapRef.current?.contains?.(event.target)) {
         store.closePicker();
       }
     };
@@ -1393,47 +1358,12 @@ function ChatPanelRoot({
       doc.removeEventListener?.("visibilitychange", handleVisibilityChange);
       doc.defaultView?.removeEventListener?.("focus", handleWindowFocus);
     };
-  }, [store, doc]);
-  return /* @__PURE__ */ React.createElement(React.Fragment, null, ReactDOM.createPortal(
-    /* @__PURE__ */ React.createElement(
-      HeaderContent,
-      {
-        snapshot,
-        store,
-        onCloseRequested
-      }
-    ),
+  }, [store, doc, headerEl]);
+  return /* @__PURE__ */ React.createElement(PanelContext.Provider, { value: { store, snapshot, api, doc } }, ReactDOM.createPortal(
+    /* @__PURE__ */ React.createElement(HeaderContent, { onCloseRequested }),
     headerEl
-  ), /* @__PURE__ */ React.createElement("div", { className: "roam-codex-chat-body" }, /* @__PURE__ */ React.createElement(
-    Transcript,
-    {
-      snapshot,
-      store,
-      api,
-      matchMediaImpl,
-      setTimeoutImpl,
-      clearTimeoutImpl,
-      setIntervalImpl,
-      clearIntervalImpl,
-      transcriptRef
-    }
-  ), /* @__PURE__ */ React.createElement(
-    ResizeHandle,
-    {
-      snapshot,
-      store,
-      doc,
-      transcriptRef
-    }
-  )), ReactDOM.createPortal(
-    /* @__PURE__ */ React.createElement(
-      ControlsBar,
-      {
-        snapshot,
-        store,
-        pickerWrapRef
-      }
-    ),
+  ), /* @__PURE__ */ React.createElement("div", { className: "roam-codex-chat-body" }, /* @__PURE__ */ React.createElement(Transcript, { transcriptRef }), /* @__PURE__ */ React.createElement(ResizeHandle, { transcriptRef })), ReactDOM.createPortal(
+    /* @__PURE__ */ React.createElement(ControlsBar, { pickerWrapRef }),
     controlsEl
   ));
 }
@@ -1441,11 +1371,6 @@ function createChatPanel(options = {}) {
   const {
     doc = globalThis.document,
     api = getRoamApi(),
-    setTimeoutImpl = globalThis.setTimeout,
-    clearTimeoutImpl = globalThis.clearTimeout,
-    setIntervalImpl = globalThis.setInterval?.bind(globalThis),
-    clearIntervalImpl = globalThis.clearInterval?.bind(globalThis),
-    matchMediaImpl = globalThis.matchMedia?.bind(globalThis),
     ...storeOptions
   } = options;
   if (!doc?.createElement) {
@@ -1491,11 +1416,6 @@ function createChatPanel(options = {}) {
         api,
         headerEl: header,
         controlsEl: controls,
-        matchMediaImpl,
-        setTimeoutImpl,
-        clearTimeoutImpl,
-        setIntervalImpl,
-        clearIntervalImpl,
         onCloseRequested
       }
     ),
