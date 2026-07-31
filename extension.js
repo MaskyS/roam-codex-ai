@@ -1,6 +1,15 @@
-// src/chat-panel.jsx
-function createChatPanel({
-  doc = globalThis.document,
+// src/react-globals.js
+var host = typeof window !== "undefined" ? window : globalThis;
+var React = host.React;
+var ReactDOM = host.ReactDOM;
+function assertReactAvailable() {
+  if (!React?.createElement || !ReactDOM?.render) {
+    throw new Error("Roam's bundled React is unavailable.");
+  }
+}
+
+// src/chat-panel-store.js
+function createChatPanelStore({
   storage = window.localStorage,
   api = getRoamApi(),
   rootBlockUid,
@@ -10,31 +19,13 @@ function createChatPanel({
   requestHistoryImpl = requestPanelThreadSummaries,
   requestThreadNameImpl = requestPanelThreadName,
   requestGraphIndexImpl = () => readGraphThreadIndex({ api }),
-  ensureGraphThreadImpl = (input) => ensureGraphThreadRecord({
-    ...input,
-    api,
-    storage
-  }),
+  ensureGraphThreadImpl,
   updateGraphActivityImpl = (record, timestamp) => updateGraphThreadActivity(record, timestamp, { api }),
   copyTextImpl = copyRoamText,
-  setTimeoutImpl = globalThis.setTimeout,
-  clearTimeoutImpl = globalThis.clearTimeout,
-  setIntervalImpl = globalThis.setInterval?.bind(globalThis),
-  clearIntervalImpl = globalThis.clearInterval?.bind(globalThis),
-  matchMediaImpl = globalThis.matchMedia?.bind(globalThis),
   navigatorImpl = globalThis.navigator,
-  readPromptImpl = () => readFocusedPromptBlock(rootBlockUid, { api }),
-  clearScratchPromptImpl = (prompt) => clearScratchPromptBlock(prompt, {
-    api,
-    protectedPromptUids,
-    rootBlockUid,
-    scratchPrompt
-  }),
-  restorePromptImpl = (prompt) => restoreClearedChatPromptBlock(prompt, {
-    api,
-    rootBlockUid,
-    scratchPrompt
-  }),
+  readPromptImpl,
+  clearScratchPromptImpl,
+  restorePromptImpl,
   cancelRequest = requestRunCancellation,
   protectedPromptUids = null,
   scratchPrompt = false,
@@ -42,20 +33,30 @@ function createChatPanel({
   onClose = () => {
   }
 } = {}) {
-  if (!doc?.createElement) {
-    throw new Error("A document is required to create the Codex chat panel.");
-  }
   if (!validBlockUid(rootBlockUid)) {
     throw new Error("The Codex chat panel requires a Roam block.");
   }
+  const readPrompt = readPromptImpl || (() => readFocusedPromptBlock(rootBlockUid, { api }));
+  const clearScratchPrompt = clearScratchPromptImpl || ((prompt) => clearScratchPromptBlock(prompt, {
+    api,
+    protectedPromptUids,
+    rootBlockUid,
+    scratchPrompt
+  }));
+  const restorePrompt = restorePromptImpl || ((prompt) => restoreClearedChatPromptBlock(prompt, {
+    api,
+    rootBlockUid,
+    scratchPrompt
+  }));
+  const ensureGraphThread = ensureGraphThreadImpl || ((input) => ensureGraphThreadRecord({ ...input, api, storage }));
   let state = readChatState({ storage });
   let messages = [];
   let models = [];
   let modelsReady = false;
+  let modelsError = "";
   let runId = null;
   let running = false;
   let runStartedAt = 0;
-  let elapsedIntervalId = null;
   let closed = false;
   let idlePromise = Promise.resolve();
   let resolveIdle = null;
@@ -69,6 +70,8 @@ function createChatPanel({
   let historyLoadVersion = 0;
   let selectionLoadVersion = 0;
   let historyError = "";
+  let progressTextValue = "";
+  let progressKind = "";
   let modelChanged = !state.activeThreadId && Boolean(
     state.newConversationPreferences.model
   );
@@ -83,145 +86,10 @@ function createChatPanel({
   let pickerSpeed = "";
   let pickerOpen = false;
   let pickerLevel = null;
-  let messageRenderVersion = 0;
-  const renderedMessageNodes = /* @__PURE__ */ new Set();
-  const copyFeedbackTimers = /* @__PURE__ */ new Map();
-  const panel = createPanelElement(doc, "section", CHAT_PANEL_CLASS);
-  panel.id = CHAT_PANEL_ID;
-  panel.setAttribute("aria-label", "Codex chat");
-  const header = createPanelElement(doc, "header", "roam-codex-chat-header");
-  const heading = createPanelElement(doc, "div", "roam-codex-chat-heading");
-  const conversationButton = panelButton(
-    doc,
-    "roam-codex-chat-conversation",
-    "New chat",
-    "Open conversation history"
-  );
-  conversationButton.setAttribute("aria-haspopup", "menu");
-  conversationButton.setAttribute("aria-expanded", "false");
-  heading.appendChild(conversationButton);
-  header.appendChild(heading);
-  const historyPopover = createPanelElement(
-    doc,
-    "div",
-    "roam-codex-chat-history"
-  );
-  historyPopover.setAttribute("role", "menu");
-  historyPopover.setAttribute("aria-label", "Conversation history");
-  historyPopover.hidden = true;
-  header.appendChild(historyPopover);
-  const closeButton = panelButton(
-    doc,
-    "roam-codex-chat-close",
-    "\u2715",
-    "Close Codex chat"
-  );
-  closeButton.setAttribute("aria-label", "Close Codex chat");
-  header.appendChild(closeButton);
-  const body = createPanelElement(doc, "div", "roam-codex-chat-body");
-  const transcriptWrap = createPanelElement(
-    doc,
-    "div",
-    "roam-codex-chat-transcript-wrap"
-  );
-  const transcript = createPanelElement(doc, "div", "roam-codex-chat-transcript");
-  transcript.setAttribute("role", "log");
-  transcript.setAttribute("aria-live", "polite");
-  transcriptWrap.appendChild(transcript);
-  const scrollLatestButton = panelButton(
-    doc,
-    "roam-codex-chat-scroll-latest",
-    "",
-    "Scroll to latest message"
-  );
-  scrollLatestButton.setAttribute("aria-label", "Scroll to latest message");
-  const scrollLatestIcon = createPanelElement(
-    doc,
-    "span",
-    "roam-codex-chat-scroll-latest-icon",
-    "\u2193"
-  );
-  scrollLatestIcon.setAttribute("aria-hidden", "true");
-  scrollLatestButton.appendChild(scrollLatestIcon);
-  scrollLatestButton.hidden = true;
-  transcriptWrap.appendChild(scrollLatestButton);
-  body.appendChild(transcriptWrap);
-  const updateScrollLatestButton = () => {
-    const scrollHeight = Number(transcript.scrollHeight) || 0;
-    const clientHeight = Number(transcript.clientHeight) || 0;
-    const scrollTop = Number(transcript.scrollTop) || 0;
-    const overflowing = clientHeight > 0 && scrollHeight > clientHeight + 1;
-    const distanceFromBottom = Math.max(
-      0,
-      scrollHeight - clientHeight - scrollTop
-    );
-    scrollLatestButton.hidden = !messages.length || !overflowing || distanceFromBottom <= CHAT_SCROLL_BOTTOM_THRESHOLD;
-  };
-  const scrollToLatest = () => {
-    const reduceMotion = Boolean(
-      matchMediaImpl?.("(prefers-reduced-motion: reduce)")?.matches
-    );
-    const top = Number(transcript.scrollHeight) || 0;
-    if (typeof transcript.scrollTo === "function") {
-      transcript.scrollTo({
-        top,
-        behavior: reduceMotion ? "auto" : "smooth"
-      });
-    } else {
-      transcript.scrollTop = top;
-    }
-    scrollLatestButton.hidden = true;
-  };
-  transcript.addEventListener("scroll", updateScrollLatestButton);
-  scrollLatestButton.addEventListener("click", scrollToLatest);
-  const transcriptHandle = createPanelElement(
-    doc,
-    "div",
-    "roam-codex-chat-resize"
-  );
-  transcriptHandle.setAttribute("role", "separator");
-  transcriptHandle.setAttribute("aria-orientation", "horizontal");
-  transcriptHandle.setAttribute("aria-label", "Resize the conversation area");
-  transcriptHandle.hidden = true;
-  body.appendChild(transcriptHandle);
-  const progress = createPanelElement(doc, "div", "roam-codex-chat-progress");
-  progress.setAttribute("aria-live", "polite");
-  progress.hidden = true;
-  const progressMeta = createPanelElement(
-    doc,
-    "span",
-    "roam-codex-chat-progress-meta"
-  );
-  progressMeta.hidden = true;
-  const progressTimer = createPanelElement(
-    doc,
-    "span",
-    "roam-codex-chat-progress-timer"
-  );
-  progressMeta.appendChild(progressTimer);
-  progress.appendChild(progressMeta);
-  const progressText = createPanelElement(
-    doc,
-    "span",
-    "roam-codex-chat-progress-text"
-  );
-  progress.appendChild(progressText);
-  transcript.appendChild(progress);
-  const syncTranscriptStatus = ({ scroll = false } = {}) => {
-    if (progress.parentNode !== transcript) transcript.appendChild(progress);
-    transcript.hidden = !messages.length && progress.hidden;
-    if (scroll && !progress.hidden) {
-      transcript.scrollTop = transcript.scrollHeight;
-      updateScrollLatestButton();
-    }
-  };
   const clampTranscriptHeight = (value) => Math.min(
     CHAT_TRANSCRIPT_MAX_HEIGHT,
     Math.max(CHAT_TRANSCRIPT_MIN_HEIGHT, Math.round(value))
   );
-  const setElementStyle = (element, property, value) => {
-    if (element.style) element.style[property] = value;
-  };
   const readStoredTranscriptHeight = () => {
     let value;
     try {
@@ -231,114 +99,26 @@ function createChatPanel({
     }
     return Number.isFinite(value) ? clampTranscriptHeight(value) : null;
   };
-  const applyTranscriptHeight = (height) => {
-    setElementStyle(transcript, "height", `${height}px`);
-    setElementStyle(transcript, "maxHeight", `${height}px`);
-  };
   let transcriptHeight = readStoredTranscriptHeight() ?? CHAT_TRANSCRIPT_MAX_HEIGHT;
-  applyTranscriptHeight(transcriptHeight);
-  let transcriptResize = null;
-  const handleTranscriptResizeMove = (event) => {
-    if (!transcriptResize || !Number.isFinite(event?.clientY)) return;
-    transcriptHeight = clampTranscriptHeight(
-      transcriptResize.startHeight + (event.clientY - transcriptResize.startY)
-    );
-    applyTranscriptHeight(transcriptHeight);
-    updateScrollLatestButton();
-    event.preventDefault?.();
+  const listeners = /* @__PURE__ */ new Set();
+  let version = 0;
+  let snapshot = null;
+  const emit = () => {
+    version += 1;
+    snapshot = null;
+    for (const listener of [...listeners]) listener();
   };
-  const stopTranscriptResize = () => {
-    if (!transcriptResize) return;
-    transcriptResize = null;
-    doc.removeEventListener?.("pointermove", handleTranscriptResizeMove, true);
-    doc.removeEventListener?.("pointerup", stopTranscriptResize, true);
-    if (transcriptHeight === null) return;
-    try {
-      storage.setItem(CHAT_TRANSCRIPT_HEIGHT_KEY, String(transcriptHeight));
-    } catch {
-    }
-  };
-  transcriptHandle.addEventListener("pointerdown", (event) => {
-    if (!Number.isFinite(event?.clientY)) return;
-    const measured = transcript.getBoundingClientRect?.()?.height;
-    transcriptResize = {
-      startY: event.clientY,
-      startHeight: Number.isFinite(measured) && measured > 0 ? measured : transcriptHeight ?? 300
-    };
-    doc.addEventListener?.("pointermove", handleTranscriptResizeMove, true);
-    doc.addEventListener?.("pointerup", stopTranscriptResize, true);
-    event.preventDefault?.();
-  });
-  const modelRow = createPanelElement(doc, "div", "roam-codex-chat-model-row");
-  const pickerWrap = createPanelElement(doc, "div", "roam-codex-chat-picker");
-  const pickerButton = panelButton(
-    doc,
-    "roam-codex-chat-picker-button",
-    "Loading models\u2026",
-    "Choose the model, reasoning effort, and speed"
-  );
-  pickerButton.setAttribute("aria-label", "Model, effort, and speed");
-  pickerButton.setAttribute("aria-haspopup", "menu");
-  pickerButton.setAttribute("aria-expanded", "false");
-  pickerButton.disabled = true;
-  pickerWrap.appendChild(pickerButton);
-  const pickerMenu = createPanelElement(
-    doc,
-    "div",
-    "roam-codex-chat-picker-menu"
-  );
-  pickerMenu.setAttribute("role", "menu");
-  pickerMenu.setAttribute("aria-label", "Model, effort, and speed options");
-  pickerMenu.hidden = true;
-  pickerWrap.appendChild(pickerMenu);
-  const pickerSubmenu = createPanelElement(
-    doc,
-    "div",
-    "roam-codex-chat-picker-submenu"
-  );
-  pickerSubmenu.setAttribute("role", "menu");
-  pickerSubmenu.hidden = true;
-  pickerWrap.appendChild(pickerSubmenu);
-  modelRow.appendChild(pickerWrap);
-  const actions = createPanelElement(doc, "div", "roam-codex-chat-actions");
-  const stopButton = panelButton(
-    doc,
-    "roam-codex-chat-stop",
-    "Stop",
-    "Stop the current Codex turn"
-  );
-  stopButton.hidden = true;
-  actions.appendChild(stopButton);
-  const sendShortcutIsMac = /Mac|iP(?:hone|ad|od)/i.test(
-    navigatorImpl?.platform || navigatorImpl?.userAgent || ""
-  );
-  const sendButton = panelButton(
-    doc,
-    "roam-codex-chat-send",
-    "Send",
-    `Send the focused block in this chat's Block Outline (${sendShortcutIsMac ? "Option" : "Alt"}+Enter, rebindable in Settings \u2192 Hotkeys)`
-  );
-  const sendShortcut = createPanelElement(
-    doc,
-    "kbd",
-    "roam-codex-chat-send-kbd",
-    sendShortcutIsMac ? "\u2325\u23CE" : "Alt \u23CE"
-  );
-  sendShortcut.setAttribute("aria-hidden", "true");
-  sendButton.appendChild(sendShortcut);
-  actions.appendChild(sendButton);
-  modelRow.appendChild(actions);
-  panel.appendChild(body);
-  const controls = createPanelElement(
-    doc,
-    "footer",
-    "roam-codex-chat-controls"
-  );
-  controls.id = CHAT_CONTROLS_ID;
-  controls.appendChild(modelRow);
   const persist = () => writeChatState(state, { storage });
   const currentRecord = () => state.activeThreadId ? state.conversations[state.activeThreadId] : null;
   const currentPreferences = () => currentRecord() || state.newConversationPreferences;
+  const sendShortcutIsMac = /Mac|iP(?:hone|ad|od)/i.test(
+    navigatorImpl?.platform || navigatorImpl?.userAgent || ""
+  );
+  const setProgress = (text = "", kind = "") => {
+    progressTextValue = singleLine(text);
+    progressKind = kind;
+    emit();
+  };
   const savePreferences = () => {
     const model = pickerModel || null;
     const effort = pickerEffort || null;
@@ -375,6 +155,7 @@ function createChatPanel({
     state.activeThreadId = threadId;
     state.newConversationPreferences = { model: null, effort: null, speed: null };
     persist();
+    emit();
   };
   const applyGraphRecord = (graphRecord) => {
     if (!validThreadId(graphRecord?.threadId)) return null;
@@ -421,7 +202,7 @@ ${name}`);
         try {
           let graphRecord2 = graphThreadRecords.get(threadId);
           if (!graphRecord2 || !graphRecord2.metadataUids?.origin || !graphRecord2.metadataUids?.createdAt || !graphRecord2.metadataUids?.lastActiveAt) {
-            graphRecord2 = await ensureGraphThreadImpl({
+            graphRecord2 = await ensureGraphThread({
               threadId,
               title,
               timestamp: now()
@@ -466,100 +247,6 @@ ${name}`);
     }
     return graphRecord;
   };
-  const disposeRenderedMessages = () => {
-    messageRenderVersion += 1;
-    for (const element of renderedMessageNodes) {
-      void unmountRoamMarkdown(element, { api });
-    }
-    renderedMessageNodes.clear();
-  };
-  const renderMessages = () => {
-    disposeRenderedMessages();
-    const renderVersion = messageRenderVersion;
-    transcript.replaceChildren();
-    transcriptHandle.hidden = !messages.length;
-    if (!messages.length) {
-      transcript.appendChild(progress);
-      syncTranscriptStatus();
-      scrollLatestButton.hidden = true;
-      return;
-    }
-    for (const message of messages) {
-      if (!message || !["user", "assistant"].includes(message.role)) continue;
-      const article = createPanelElement(
-        doc,
-        "article",
-        `roam-codex-chat-message roam-codex-chat-message-${message.role}`
-      );
-      const roleLabel = message.role === "user" ? "You" : "Codex";
-      const copyButton = panelButton(
-        doc,
-        "roam-codex-chat-copy",
-        "",
-        "Copy Roam text"
-      );
-      copyButton.setAttribute(
-        "aria-label",
-        `Copy ${roleLabel} message as Roam text`
-      );
-      copyButton.dataset.state = "idle";
-      copyButton.addEventListener("click", async (event) => {
-        event?.preventDefault?.();
-        event?.stopPropagation?.();
-        const previousTimer = copyFeedbackTimers.get(copyButton);
-        if (previousTimer !== void 0) clearTimeoutImpl(previousTimer);
-        copyFeedbackTimers.delete(copyButton);
-        copyButton.dataset.state = "copying";
-        try {
-          await copyTextImpl(message.text);
-          if (closed) return;
-          copyButton.dataset.state = "copied";
-          copyButton.title = "Copied";
-          copyButton.setAttribute("aria-label", "Copied Roam text");
-        } catch {
-          if (closed) return;
-          copyButton.dataset.state = "error";
-          copyButton.title = "Could not copy Roam text";
-          copyButton.setAttribute("aria-label", "Could not copy Roam text");
-        }
-        const timer = setTimeoutImpl(() => {
-          copyFeedbackTimers.delete(copyButton);
-          if (closed) return;
-          copyButton.dataset.state = "idle";
-          copyButton.title = "Copy Roam text";
-          copyButton.setAttribute(
-            "aria-label",
-            `Copy ${roleLabel} message as Roam text`
-          );
-        }, 1400);
-        copyFeedbackTimers.set(copyButton, timer);
-      });
-      article.appendChild(copyButton);
-      const messageText = createPanelElement(
-        doc,
-        "div",
-        "roam-codex-chat-message-text"
-      );
-      renderedMessageNodes.add(messageText);
-      void renderRoamMarkdown(messageText, message.text, { api }).then((rendered) => {
-        if (rendered && (closed || renderVersion !== messageRenderVersion || !renderedMessageNodes.has(messageText))) {
-          void unmountRoamMarkdown(messageText, { api });
-        }
-      });
-      article.appendChild(messageText);
-      transcript.appendChild(article);
-    }
-    transcript.appendChild(progress);
-    syncTranscriptStatus();
-    transcript.scrollTop = transcript.scrollHeight;
-    updateScrollLatestButton();
-  };
-  const setProgress = (text = "", kind = "") => {
-    progressText.textContent = singleLine(text);
-    progress.dataset.kind = kind;
-    progress.hidden = !progressText.textContent && progressMeta.hidden;
-    syncTranscriptStatus({ scroll: !progress.hidden });
-  };
   const currentModelEntry = () => models.find((model) => model.id === pickerModel) || models.find((model) => model.isDefault) || models[0] || null;
   const defaultTierIdFor = (model) => {
     const tiers = modelTierChoices(model);
@@ -577,6 +264,7 @@ ${name}`);
     pickerSpeed = tiers.some((tier) => tier.id === preferred.speed) ? preferred.speed : defaultTierIdFor(selected);
   };
   const pickerLabel = () => {
+    if (!modelsReady) return modelsError ? "Models unavailable" : "Loading models\u2026";
     if (!models.length) return "No models available";
     const selected = currentModelEntry();
     const parts = [selected?.displayName || selected?.id || "Model"];
@@ -589,217 +277,24 @@ ${name}`);
     }
     return parts.join(" \xB7 ");
   };
-  const renderPickerButton = () => {
-    if (!modelsReady) return;
-    pickerButton.textContent = pickerLabel();
-    pickerButton.setAttribute("aria-expanded", String(pickerOpen));
-  };
-  const closePicker = ({ restoreFocus = false } = {}) => {
-    pickerOpen = false;
-    pickerLevel = null;
-    pickerMenu.hidden = true;
-    pickerSubmenu.hidden = true;
-    pickerSubmenu.replaceChildren();
-    pickerButton.setAttribute("aria-expanded", "false");
-    if (restoreFocus) pickerButton.focus?.();
-  };
-  const syncPickerRows = () => {
-    for (const row of pickerMenu.children || []) {
-      const open = row.dataset?.level === pickerLevel;
-      row.className = row.className.replace(/\s+is-open/g, "") + (open ? " is-open" : "");
-      row.setAttribute?.("aria-expanded", String(open));
-    }
-  };
-  const renderPickerSubmenu = () => {
-    pickerSubmenu.replaceChildren();
-    if (!pickerLevel) {
-      pickerSubmenu.hidden = true;
-      return;
-    }
-    const selected = currentModelEntry();
-    pickerSubmenu.hidden = false;
-    pickerSubmenu.setAttribute(
-      "aria-label",
-      `${effortLabel(pickerLevel)} options`
-    );
-    const addOption = (label, active, onPick, description = "") => {
-      const option = panelButton(
-        doc,
-        `roam-codex-chat-picker-option${active ? " is-active" : ""}`,
-        "",
-        description
-      );
-      option.setAttribute("role", "menuitemradio");
-      option.setAttribute("aria-checked", String(active));
-      option.appendChild(createPanelElement(
-        doc,
-        "span",
-        "roam-codex-chat-picker-option-label",
-        label
-      ));
-      if (description) {
-        option.appendChild(createPanelElement(
-          doc,
-          "span",
-          "roam-codex-chat-picker-option-description",
-          description
-        ));
-      }
-      option.addEventListener("click", () => {
-        onPick();
-        closePicker({ restoreFocus: true });
-        renderPickerButton();
-      });
-      pickerSubmenu.appendChild(option);
-    };
-    if (pickerLevel === "model") {
-      for (const model of models) {
-        if (!model || typeof model.id !== "string") continue;
-        const displayName = model.displayName || model.id;
-        addOption(
-          model.isDefault ? `${displayName} (Default)` : displayName,
-          model.id === pickerModel,
-          () => {
-            if (model.id === pickerModel) return;
-            pickerModel = model.id;
-            modelChanged = true;
-            effortChanged = true;
-            speedChanged = true;
-            const next = currentModelEntry();
-            const efforts = modelEfforts(next);
-            if (!efforts.includes(pickerEffort)) {
-              const defaultEffort = efforts.includes(
-                next?.defaultReasoningEffort
-              ) ? next.defaultReasoningEffort : null;
-              pickerEffort = defaultEffort || efforts[0] || "";
-            }
-            if (!modelTierChoices(next).some(
-              (tier) => tier.id === pickerSpeed
-            )) {
-              pickerSpeed = defaultTierIdFor(next);
-            }
-            savePreferences();
-          },
-          model.description || ""
-        );
-      }
-      return;
-    }
-    if (pickerLevel === "effort") {
-      const efforts = modelEfforts(selected);
-      const defaultEffort = efforts.includes(selected?.defaultReasoningEffort) ? selected.defaultReasoningEffort : null;
-      for (const effort of efforts) {
-        addOption(
-          effort === defaultEffort ? `${effortLabel(effort)} (Default)` : effortLabel(effort),
-          effort === pickerEffort,
-          () => {
-            if (effort === pickerEffort) return;
-            pickerEffort = effort;
-            effortChanged = true;
-            savePreferences();
-          },
-          selected?.supportedReasoningEfforts?.find(
-            (entry) => entry?.reasoningEffort === effort
-          )?.description || ""
-        );
-      }
-      return;
-    }
-    if (pickerLevel === "speed") {
-      const defaultTier = defaultTierIdFor(selected);
-      for (const tier of modelTierChoices(selected)) {
-        const name = tier.name || tier.id;
-        addOption(
-          tier.id === defaultTier ? `${name} (Default)` : name,
-          tier.id === pickerSpeed,
-          () => {
-            if (tier.id === pickerSpeed) return;
-            pickerSpeed = tier.id;
-            speedChanged = true;
-            savePreferences();
-          },
-          tier.description || ""
-        );
-      }
-    }
-  };
-  const openPickerLevel = (level) => {
-    pickerLevel = level;
-    syncPickerRows();
-    renderPickerSubmenu();
-  };
-  const renderPickerMenu = () => {
-    pickerMenu.replaceChildren();
-    const selected = currentModelEntry();
-    const tiers = modelTierChoices(selected);
-    const currentTier = tiers.find((tier) => tier.id === pickerSpeed);
-    const rows = [
-      ["Model", selected?.displayName || selected?.id || "\u2014", "model"],
-      ["Effort", pickerEffort ? effortLabel(pickerEffort) : "\u2014", "effort"]
-    ];
-    if (tiers.length) {
-      rows.push(["Speed", currentTier?.name || currentTier?.id || "\u2014", "speed"]);
-    }
-    for (const [label, value, level] of rows) {
-      const row = panelButton(
-        doc,
-        "roam-codex-chat-picker-item",
-        "",
-        `Choose ${label.toLowerCase()}`
-      );
-      row.setAttribute("role", "menuitem");
-      row.setAttribute("aria-haspopup", "menu");
-      row.dataset.level = level;
-      row.appendChild(createPanelElement(
-        doc,
-        "span",
-        "roam-codex-chat-picker-item-label",
-        label
-      ));
-      row.appendChild(createPanelElement(
-        doc,
-        "span",
-        "roam-codex-chat-picker-item-value",
-        value
-      ));
-      const chevron = createPanelElement(
-        doc,
-        "span",
-        "roam-codex-chat-picker-item-chevron",
-        "\u203A"
-      );
-      chevron.setAttribute("aria-hidden", "true");
-      row.appendChild(chevron);
-      const open = () => openPickerLevel(level);
-      row.addEventListener("mouseenter", open);
-      row.addEventListener("focus", open);
-      row.addEventListener("click", open);
-      row.addEventListener("keydown", (event) => {
-        if (!["ArrowRight", "Enter", " "].includes(event.key)) return;
-        event.preventDefault?.();
-        open();
-      });
-      pickerMenu.appendChild(row);
-    }
-    syncPickerRows();
-    renderPickerSubmenu();
-  };
   const historyItems = () => buildConversationHistory(
     state,
     [...threadSummaries.values()]
   );
-  const renderConversationButton = () => {
+  const conversationLabel = () => {
     const active = historyItems().find((item) => item.active);
-    const label = state.activeThreadId && active ? active.title : "New chat";
-    conversationButton.textContent = label;
-    conversationButton.title = state.activeThreadId ? `Current conversation: ${label}` : "Start a new conversation or open history";
-    conversationButton.setAttribute("aria-expanded", String(historyOpen));
+    return state.activeThreadId && active ? active.title : "New chat";
   };
-  const closeHistory = ({ restoreFocus = false } = {}) => {
+  const closePicker = () => {
+    if (!pickerOpen && pickerLevel === null) return;
+    pickerOpen = false;
+    pickerLevel = null;
+    emit();
+  };
+  const closeHistory = () => {
+    if (!historyOpen) return;
     historyOpen = false;
-    historyPopover.hidden = true;
-    conversationButton.setAttribute("aria-expanded", "false");
-    if (restoreFocus) conversationButton.focus?.();
+    emit();
   };
   const beginNewConversation = () => {
     if (running) return;
@@ -815,14 +310,11 @@ ${name}`);
     effortChanged = Boolean(effort);
     speedChanged = Boolean(speed);
     persist();
-    renderMessages();
-    if (modelsReady) {
-      initPicker();
-      renderPickerButton();
-    }
-    renderConversationButton();
-    closeHistory();
-    setProgress();
+    if (modelsReady) initPicker();
+    historyOpen = false;
+    progressTextValue = "";
+    progressKind = "";
+    emit();
   };
   const markMissingConversation = (threadId) => {
     const missingRecord = state.conversations[threadId];
@@ -831,13 +323,11 @@ ${name}`);
     threadSummaries.delete(threadId);
     if (state.activeThreadId === threadId) {
       messages = [];
-      renderMessages();
-      setProgress(
-        "Unavailable on this device. The graph thread record was kept.",
-        "error"
-      );
+      progressTextValue = "Unavailable on this device. The graph thread record was kept.";
+      progressKind = "error";
     }
     persist();
+    emit();
   };
   const selectConversation = async (threadId, { reload = false } = {}) => {
     if (running || !state.conversations[threadId]) return;
@@ -852,14 +342,11 @@ ${name}`);
     effortChanged = false;
     speedChanged = false;
     persist();
-    renderMessages();
-    if (modelsReady) {
-      initPicker();
-      renderPickerButton();
-    }
-    renderConversationButton();
-    closeHistory();
-    setProgress("Loading conversation", "activity");
+    if (modelsReady) initPicker();
+    historyOpen = false;
+    progressTextValue = "Loading conversation";
+    progressKind = "activity";
+    emit();
     try {
       const loadedMessages = await requestMessagesImpl(threadId);
       if (closed || loadVersion !== selectionLoadVersion || state.activeThreadId !== threadId) {
@@ -878,83 +365,18 @@ ${name}`);
         );
         persist();
       }
-      renderMessages();
-      setProgress();
+      progressTextValue = "";
+      progressKind = "";
+      emit();
     } catch (error) {
       if (closed || loadVersion !== selectionLoadVersion || state.activeThreadId !== threadId) {
         return;
       }
       if (error.status === 404) {
         markMissingConversation(threadId);
-        renderConversationButton();
         return;
       }
       setProgress(error.message || "Could not load that conversation.", "error");
-    }
-  };
-  const renderHistory = () => {
-    historyPopover.replaceChildren();
-    const newButton = panelButton(
-      doc,
-      "roam-codex-chat-history-item roam-codex-chat-history-new",
-      "+ New chat",
-      "Start a new conversation"
-    );
-    newButton.setAttribute("role", "menuitem");
-    newButton.disabled = running;
-    if (!state.activeThreadId) {
-      newButton.className += " is-active";
-      newButton.setAttribute("aria-current", "true");
-    }
-    newButton.addEventListener("click", beginNewConversation);
-    historyPopover.appendChild(newButton);
-    const items = historyItems();
-    if (!items.length) {
-      historyPopover.appendChild(createPanelElement(
-        doc,
-        "div",
-        "roam-codex-chat-history-empty",
-        historyError || "No previous chats yet."
-      ));
-      return;
-    }
-    for (const item of items) {
-      const button = panelButton(
-        doc,
-        "roam-codex-chat-history-item",
-        "",
-        `Resume ${item.title}`
-      );
-      button.setAttribute("role", "menuitem");
-      button.dataset.threadId = item.threadId;
-      button.dataset.availability = item.availability;
-      button.disabled = running;
-      if (item.active) {
-        button.className += " is-active";
-        button.setAttribute("aria-current", "true");
-      }
-      button.appendChild(createPanelElement(
-        doc,
-        "span",
-        "roam-codex-chat-history-title",
-        item.title
-      ));
-      button.appendChild(createPanelElement(
-        doc,
-        "span",
-        "roam-codex-chat-history-date",
-        ["missing", "unavailable"].includes(item.availability) ? "Unavailable" : conversationDateLabel(item.updatedAt)
-      ));
-      button.addEventListener("click", () => void selectConversation(item.threadId));
-      historyPopover.appendChild(button);
-    }
-    if (historyError) {
-      historyPopover.appendChild(createPanelElement(
-        doc,
-        "div",
-        "roam-codex-chat-history-error",
-        historyError
-      ));
     }
   };
   const loadHistory = async ({ reconcileActive = false } = {}) => {
@@ -975,8 +397,7 @@ ${name}`);
     }
     const threadIds = historyItems().map((item) => item.threadId);
     if (!threadIds.length) {
-      renderConversationButton();
-      if (historyOpen) renderHistory();
+      emit();
       return;
     }
     try {
@@ -1041,8 +462,7 @@ ${name}`);
       if (closed || loadVersion !== historyLoadVersion) return;
       historyError ||= error.message || "Conversation history is unavailable.";
     }
-    renderConversationButton();
-    if (historyOpen) renderHistory();
+    emit();
   };
   const setRunning = (value) => {
     if (value && !running) {
@@ -1050,35 +470,16 @@ ${name}`);
         resolveIdle = resolve;
       });
       runStartedAt = now();
-      progressTimer.textContent = formatRunningElapsed(0);
-      progressMeta.hidden = false;
-      if (setIntervalImpl && clearIntervalImpl && elapsedIntervalId === null) {
-        elapsedIntervalId = setIntervalImpl(() => {
-          progressTimer.textContent = formatRunningElapsed(now() - runStartedAt);
-        }, 1e3);
-      }
     } else if (!value && running) {
       resolveIdle?.();
       resolveIdle = null;
     }
-    if (!value) {
-      progressMeta.hidden = true;
-      if (clearIntervalImpl && elapsedIntervalId !== null) {
-        clearIntervalImpl(elapsedIntervalId);
-      }
-      elapsedIntervalId = null;
-    }
-    progress.hidden = !progressText.textContent && progressMeta.hidden;
-    syncTranscriptStatus({ scroll: value });
     running = value;
-    if (value && pickerOpen) closePicker();
-    pickerButton.disabled = value || !modelsReady;
-    sendButton.disabled = value || !modelsReady;
-    sendButton.hidden = value;
-    conversationButton.disabled = value;
-    stopButton.hidden = !value;
-    stopButton.disabled = false;
-    if (historyOpen) renderHistory();
+    if (value && pickerOpen) {
+      pickerOpen = false;
+      pickerLevel = null;
+    }
+    emit();
   };
   const send = async () => {
     if (running) return null;
@@ -1097,7 +498,7 @@ ${name}`);
     }
     let prompt;
     try {
-      prompt = await readPromptImpl();
+      prompt = await readPrompt();
     } catch (error) {
       setProgress(error.message || "Focus a Roam block before sending.", "error");
       setRunning(false);
@@ -1116,10 +517,10 @@ ${name}`);
     let composerCleared = false;
     if (shouldClearPrompt) {
       try {
-        composerCleared = await clearScratchPromptImpl(prompt);
+        composerCleared = await clearScratchPrompt(prompt);
       } catch (error) {
         try {
-          await restorePromptImpl(prompt);
+          await restorePrompt(prompt);
         } catch {
         }
         setProgress(
@@ -1151,8 +552,7 @@ ${name}`);
       } catch {
       }
     }
-    messages.push({ role: "user", text: prompt.text });
-    renderMessages();
+    messages = [...messages, { role: "user", text: prompt.text }];
     runId = null;
     setProgress("Starting", "activity");
     try {
@@ -1173,8 +573,8 @@ ${name}`);
           effortChanged = false;
           speedChanged = false;
         },
-        onProgress: ({ kind, text: progressText2 }) => {
-          setProgress(progressText2, kind);
+        onProgress: ({ kind, text }) => {
+          setProgress(text, kind);
         }
       });
       const completedAt = now();
@@ -1185,8 +585,7 @@ ${name}`);
       if (typeof result.reply !== "string" || !result.reply.trim()) {
         throw new Error("Codex completed without a reply.");
       }
-      messages.push({ role: "assistant", text: result.reply.trim() });
-      renderMessages();
+      messages = [...messages, { role: "assistant", text: result.reply.trim() }];
       const existingSummary = threadSummaries.get(result.threadId) || {};
       threadSummaries.set(result.threadId, {
         ...existingSummary,
@@ -1197,8 +596,6 @@ ${name}`);
         updatedAt: completedAt,
         status: "idle"
       });
-      renderConversationButton();
-      if (historyOpen) renderHistory();
       void loadHistory({ reconcileActive: false });
       setProgress("", "");
       return result;
@@ -1207,7 +604,7 @@ ${name}`);
       let restoreFailed = false;
       if (composerCleared) {
         try {
-          restored = await restorePromptImpl(prompt);
+          restored = await restorePrompt(prompt);
           if (restored) {
             const sidebarWindow = findSidebarBlockWindow(rootBlockUid, { api });
             if (sidebarWindow?.["window-id"]) {
@@ -1241,149 +638,869 @@ ${name}`);
       setRunning(false);
     }
   };
-  const handleSendShortcut = (event) => {
-    if (!event.defaultPrevented && event.key === "Escape" && (historyOpen || pickerOpen)) {
-      event.preventDefault();
-      event.stopPropagation?.();
-      if (historyOpen) closeHistory({ restoreFocus: true });
-      if (pickerOpen) closePicker({ restoreFocus: true });
-      return;
-    }
-    if (!event.defaultPrevented && event.altKey && !event.metaKey && !event.ctrlKey && event.key === "Enter") {
-      const focused = api.ui?.getFocusedBlock?.();
-      const sidebarWindow = findSidebarBlockWindow(rootBlockUid, { api });
-      if (focused?.["window-id"] && focused["window-id"] === sidebarWindow?.["window-id"]) {
-        event.preventDefault();
-        event.stopPropagation?.();
-        void send();
-      }
-    }
-  };
-  const handleDocumentClick = (event) => {
-    if (historyOpen && !header.contains?.(event.target)) closeHistory();
-    if (pickerOpen && !pickerWrap.contains?.(event.target)) closePicker();
+  const stop = () => {
+    if (!runId) return Promise.resolve();
+    setProgress("Stopping", "activity");
+    return cancelRequest(runId).catch((error) => {
+      setProgress(error.message || "Could not stop the turn.", "error");
+      throw error;
+    });
   };
   const close = () => {
     if (closed) return closePromise || Promise.resolve();
     closed = true;
-    stopTranscriptResize();
-    if (clearIntervalImpl && elapsedIntervalId !== null) {
-      clearIntervalImpl(elapsedIntervalId);
-    }
-    elapsedIntervalId = null;
-    doc.removeEventListener?.("keydown", handleSendShortcut, true);
-    doc.removeEventListener?.("click", handleDocumentClick, true);
-    doc.removeEventListener?.("visibilitychange", handleVisibilityChange);
-    doc.defaultView?.removeEventListener?.("focus", handleWindowFocus);
-    transcript.removeEventListener?.("scroll", updateScrollLatestButton);
-    for (const timer of copyFeedbackTimers.values()) clearTimeoutImpl(timer);
-    copyFeedbackTimers.clear();
-    disposeRenderedMessages();
-    header.remove();
-    panel.remove();
-    controls.remove();
+    emit();
     closePromise = Promise.resolve(onClose({
       whenIdle: () => idlePromise,
       resetPromptUids
     }));
     return closePromise;
   };
-  sendButton.addEventListener("mousedown", (event) => {
+  const maybeSendFromShortcut = () => {
+    const focused = api.ui?.getFocusedBlock?.();
+    const sidebarWindow = findSidebarBlockWindow(rootBlockUid, { api });
+    if (!focused?.["window-id"] || focused["window-id"] !== sidebarWindow?.["window-id"]) {
+      return false;
+    }
+    void send();
+    return true;
+  };
+  const focusRoot = () => {
+    const sidebarWindow = findSidebarBlockWindow(rootBlockUid, { api });
+    if (!sidebarWindow?.["window-id"]) return Promise.resolve();
+    return api.ui.setBlockFocusAndSelection({
+      location: {
+        "block-uid": rootBlockUid,
+        "window-id": sidebarWindow["window-id"]
+      }
+    });
+  };
+  const getSnapshot = () => {
+    if (snapshot) return snapshot;
+    const selected = currentModelEntry();
+    const tiers = modelTierChoices(selected);
+    const currentTier = tiers.find((tier) => tier.id === pickerSpeed);
+    snapshot = {
+      version,
+      closed,
+      messages,
+      running,
+      runStartedAt,
+      modelsReady,
+      models,
+      progress: { text: progressTextValue, kind: progressKind },
+      picker: {
+        open: pickerOpen,
+        level: pickerLevel,
+        label: pickerLabel(),
+        modelId: pickerModel,
+        effortId: pickerEffort,
+        speedId: pickerSpeed,
+        selectedModel: selected,
+        efforts: modelEfforts(selected),
+        defaultEffort: modelEfforts(selected).includes(
+          selected?.defaultReasoningEffort
+        ) ? selected.defaultReasoningEffort : null,
+        tiers,
+        defaultTierId: defaultTierIdFor(selected),
+        currentTier: currentTier || null
+      },
+      history: {
+        open: historyOpen,
+        error: historyError,
+        items: historyItems(),
+        activeThreadId: state.activeThreadId
+      },
+      conversationLabel: conversationLabel(),
+      transcriptHeight,
+      sendShortcutIsMac
+    };
+    return snapshot;
+  };
+  return {
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    getSnapshot,
+    now,
+    copyText: (text) => copyTextImpl(text),
+    conversationDateLabel,
+    // Actions
+    send,
+    stop,
+    close,
+    focusRoot,
+    maybeSendFromShortcut,
+    beginNewConversation,
+    selectConversation: (threadId) => void selectConversation(threadId),
+    loadHistory,
+    openHistory() {
+      if (running || historyOpen) return;
+      historyOpen = true;
+      emit();
+      void loadHistory({ reconcileActive: true });
+    },
+    closeHistory,
+    togglePicker() {
+      if (running || !modelsReady) return;
+      if (pickerOpen) {
+        closePicker();
+        return;
+      }
+      pickerOpen = true;
+      pickerLevel = null;
+      emit();
+    },
+    closePicker,
+    openPickerLevel(level) {
+      if (!pickerOpen) return;
+      pickerLevel = level;
+      emit();
+    },
+    pickModel(modelId) {
+      if (modelId !== pickerModel) {
+        pickerModel = modelId;
+        modelChanged = true;
+        effortChanged = true;
+        speedChanged = true;
+        const next = currentModelEntry();
+        const efforts = modelEfforts(next);
+        if (!efforts.includes(pickerEffort)) {
+          const defaultEffort = efforts.includes(next?.defaultReasoningEffort) ? next.defaultReasoningEffort : null;
+          pickerEffort = defaultEffort || efforts[0] || "";
+        }
+        if (!modelTierChoices(next).some((tier) => tier.id === pickerSpeed)) {
+          pickerSpeed = defaultTierIdFor(next);
+        }
+        savePreferences();
+      }
+      closePicker();
+    },
+    pickEffort(effort) {
+      if (effort !== pickerEffort) {
+        pickerEffort = effort;
+        effortChanged = true;
+        savePreferences();
+      }
+      closePicker();
+    },
+    pickSpeed(tierId) {
+      if (tierId !== pickerSpeed) {
+        pickerSpeed = tierId;
+        speedChanged = true;
+        savePreferences();
+      }
+      closePicker();
+    },
+    setTranscriptHeight(height) {
+      transcriptHeight = clampTranscriptHeight(height);
+      emit();
+    },
+    persistTranscriptHeight() {
+      try {
+        storage.setItem(CHAT_TRANSCRIPT_HEIGHT_KEY, String(transcriptHeight));
+      } catch {
+      }
+    },
+    loadModels() {
+      return requestModelsImpl().then((availableModels) => {
+        if (closed) return;
+        models = Array.isArray(availableModels) ? availableModels : [];
+        modelsReady = true;
+        initPicker();
+        emit();
+      }).catch((error) => {
+        if (closed) return;
+        modelsError = error.message || "Could not load Codex models.";
+        setProgress(error.message, "error");
+      });
+    },
+    loadInitialConversation() {
+      const initialThreadId = state.activeThreadId;
+      return loadHistory().then(() => {
+        if (!closed && initialThreadId && state.activeThreadId === initialThreadId && !["missing", "unavailable"].includes(
+          state.conversations[initialThreadId]?.availability
+        )) {
+          return selectConversation(initialThreadId, { reload: true });
+        }
+      });
+    }
+  };
+}
+
+// src/chat-panel.jsx
+var useState = (...args) => React.useState(...args);
+var useEffect = (...args) => React.useEffect(...args);
+var useRef = (...args) => React.useRef(...args);
+function useStoreSnapshot(store) {
+  const [snapshot, setSnapshot] = useState(store.getSnapshot);
+  useEffect(
+    () => store.subscribe(() => setSnapshot(store.getSnapshot())),
+    [store]
+  );
+  return snapshot;
+}
+function RoamString({ api, text, className }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return void 0;
+    let cancelled = false;
+    let mounted = false;
+    void renderRoamMarkdown(el, text, { api }).then((rendered) => {
+      mounted = rendered;
+      if (cancelled && rendered) void unmountRoamMarkdown(el, { api });
+    });
+    return () => {
+      cancelled = true;
+      if (mounted) void unmountRoamMarkdown(el, { api });
+    };
+  }, [api, text]);
+  return /* @__PURE__ */ React.createElement("div", { className, ref });
+}
+function CopyButton({
+  copyText,
+  roleLabel,
+  text,
+  setTimeoutImpl,
+  clearTimeoutImpl
+}) {
+  const [copyState, setCopyState] = useState("idle");
+  const timerRef = useRef(null);
+  useEffect(() => () => {
+    if (timerRef.current !== null) clearTimeoutImpl(timerRef.current);
+  }, [clearTimeoutImpl]);
+  const idleLabel = `Copy ${roleLabel} message as Roam text`;
+  const title = copyState === "copied" ? "Copied" : copyState === "error" ? "Could not copy Roam text" : "Copy Roam text";
+  const ariaLabel = copyState === "copied" ? "Copied Roam text" : copyState === "error" ? "Could not copy Roam text" : idleLabel;
+  const onClick = async (event) => {
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    if (timerRef.current !== null) clearTimeoutImpl(timerRef.current);
+    timerRef.current = null;
+    setCopyState("copying");
+    let next;
+    try {
+      await copyText(text);
+      next = "copied";
+    } catch {
+      next = "error";
+    }
+    setCopyState(next);
+    timerRef.current = setTimeoutImpl(() => {
+      timerRef.current = null;
+      setCopyState("idle");
+    }, 1400);
+  };
+  return /* @__PURE__ */ React.createElement(
+    "button",
+    {
+      type: "button",
+      className: "roam-codex-chat-copy",
+      "data-state": copyState,
+      title,
+      "aria-label": ariaLabel,
+      onClick
+    }
+  );
+}
+function ProgressRow({ snapshot, now, setIntervalImpl, clearIntervalImpl }) {
+  const { running, runStartedAt, progress } = snapshot;
+  const [elapsedMs, setElapsedMs] = useState(0);
+  useEffect(() => {
+    if (!running) return void 0;
+    setElapsedMs(0);
+    if (!setIntervalImpl || !clearIntervalImpl) return void 0;
+    const intervalId = setIntervalImpl(() => {
+      setElapsedMs(now() - runStartedAt);
+    }, 1e3);
+    return () => clearIntervalImpl(intervalId);
+  }, [running, runStartedAt, now, setIntervalImpl, clearIntervalImpl]);
+  const hidden = !progress.text && !running;
+  return /* @__PURE__ */ React.createElement(
+    "div",
+    {
+      className: "roam-codex-chat-progress",
+      "aria-live": "polite",
+      "data-kind": progress.kind,
+      hidden
+    },
+    /* @__PURE__ */ React.createElement("span", { className: "roam-codex-chat-progress-meta", hidden: !running }, /* @__PURE__ */ React.createElement("span", { className: "roam-codex-chat-progress-timer" }, formatRunningElapsed(running ? elapsedMs : 0))),
+    /* @__PURE__ */ React.createElement("span", { className: "roam-codex-chat-progress-text" }, progress.text)
+  );
+}
+function Transcript({
+  snapshot,
+  store,
+  api,
+  matchMediaImpl,
+  setTimeoutImpl,
+  clearTimeoutImpl,
+  setIntervalImpl,
+  clearIntervalImpl,
+  transcriptRef
+}) {
+  const { messages, transcriptHeight, running, progress } = snapshot;
+  const [showLatest, setShowLatest] = useState(false);
+  const progressVisible = Boolean(progress.text) || running;
+  const measureLatest = () => {
+    const el = transcriptRef.current;
+    if (!el) return;
+    const scrollHeight = Number(el.scrollHeight) || 0;
+    const clientHeight = Number(el.clientHeight) || 0;
+    const scrollTop = Number(el.scrollTop) || 0;
+    const overflowing = clientHeight > 0 && scrollHeight > clientHeight + 1;
+    const distanceFromBottom = Math.max(
+      0,
+      scrollHeight - clientHeight - scrollTop
+    );
+    setShowLatest(
+      messages.length > 0 && overflowing && distanceFromBottom > CHAT_SCROLL_BOTTOM_THRESHOLD
+    );
+  };
+  useEffect(() => {
+    const el = transcriptRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    measureLatest();
+  }, [messages.length, progressVisible]);
+  const scrollToLatest = () => {
+    const el = transcriptRef.current;
+    if (!el) return;
+    const reduceMotion = Boolean(
+      matchMediaImpl?.("(prefers-reduced-motion: reduce)")?.matches
+    );
+    const top = Number(el.scrollHeight) || 0;
+    if (typeof el.scrollTo === "function") {
+      el.scrollTo({ top, behavior: reduceMotion ? "auto" : "smooth" });
+    } else {
+      el.scrollTop = top;
+    }
+    setShowLatest(false);
+  };
+  const heightStyle = {
+    height: `${transcriptHeight}px`,
+    maxHeight: `${transcriptHeight}px`
+  };
+  const transcriptHidden = !messages.length && !progressVisible;
+  return /* @__PURE__ */ React.createElement("div", { className: "roam-codex-chat-transcript-wrap" }, /* @__PURE__ */ React.createElement(
+    "div",
+    {
+      className: "roam-codex-chat-transcript",
+      role: "log",
+      "aria-live": "polite",
+      ref: transcriptRef,
+      hidden: transcriptHidden,
+      style: heightStyle,
+      onScroll: measureLatest
+    },
+    messages.map((message, index) => {
+      if (!message || !["user", "assistant"].includes(message.role)) {
+        return null;
+      }
+      const roleLabel = message.role === "user" ? "You" : "Codex";
+      return /* @__PURE__ */ React.createElement(
+        "article",
+        {
+          key: `${index}-${message.role}`,
+          className: `roam-codex-chat-message roam-codex-chat-message-${message.role}`
+        },
+        /* @__PURE__ */ React.createElement(
+          CopyButton,
+          {
+            copyText: store.copyText,
+            roleLabel,
+            text: message.text,
+            setTimeoutImpl,
+            clearTimeoutImpl
+          }
+        ),
+        /* @__PURE__ */ React.createElement(
+          RoamString,
+          {
+            api,
+            text: message.text,
+            className: "roam-codex-chat-message-text"
+          }
+        )
+      );
+    }),
+    /* @__PURE__ */ React.createElement(
+      ProgressRow,
+      {
+        snapshot,
+        now: store.now,
+        setIntervalImpl,
+        clearIntervalImpl
+      }
+    )
+  ), /* @__PURE__ */ React.createElement(
+    "button",
+    {
+      type: "button",
+      className: "roam-codex-chat-scroll-latest",
+      title: "Scroll to latest message",
+      "aria-label": "Scroll to latest message",
+      hidden: !showLatest,
+      onClick: scrollToLatest
+    },
+    /* @__PURE__ */ React.createElement("span", { className: "roam-codex-chat-scroll-latest-icon", "aria-hidden": "true" }, "\u2193")
+  ));
+}
+function ResizeHandle({ snapshot, store, doc, transcriptRef }) {
+  const dragRef = useRef(null);
+  useEffect(() => () => {
+    if (dragRef.current) dragRef.current.stop();
+  }, []);
+  const onPointerDown = (event) => {
+    if (!Number.isFinite(event?.clientY)) return;
+    const measured = transcriptRef.current?.getBoundingClientRect?.()?.height;
+    const startHeight = Number.isFinite(measured) && measured > 0 ? measured : snapshot.transcriptHeight;
+    const startY = event.clientY;
+    const onMove = (moveEvent) => {
+      if (!Number.isFinite(moveEvent?.clientY)) return;
+      store.setTranscriptHeight(startHeight + (moveEvent.clientY - startY));
+      moveEvent.preventDefault?.();
+    };
+    const stop = () => {
+      dragRef.current = null;
+      doc.removeEventListener?.("pointermove", onMove, true);
+      doc.removeEventListener?.("pointerup", stop, true);
+      store.persistTranscriptHeight();
+    };
+    dragRef.current = { stop };
+    doc.addEventListener?.("pointermove", onMove, true);
+    doc.addEventListener?.("pointerup", stop, true);
     event.preventDefault?.();
-  });
-  sendButton.addEventListener("click", () => void send());
-  closeButton.addEventListener("click", () => {
+  };
+  return /* @__PURE__ */ React.createElement(
+    "div",
+    {
+      className: "roam-codex-chat-resize",
+      role: "separator",
+      "aria-orientation": "horizontal",
+      "aria-label": "Resize the conversation area",
+      hidden: !snapshot.messages.length,
+      onPointerDown
+    }
+  );
+}
+function PickerMenu({ snapshot, store }) {
+  const { picker, models } = snapshot;
+  const rows = [
+    [
+      "Model",
+      picker.selectedModel?.displayName || picker.selectedModel?.id || "\u2014",
+      "model"
+    ],
+    ["Effort", picker.effortId ? effortLabel(picker.effortId) : "\u2014", "effort"]
+  ];
+  if (picker.tiers.length) {
+    rows.push([
+      "Speed",
+      picker.currentTier?.name || picker.currentTier?.id || "\u2014",
+      "speed"
+    ]);
+  }
+  const option = (label, active, onPick, description = "") => /* @__PURE__ */ React.createElement(
+    "button",
+    {
+      key: label,
+      type: "button",
+      className: `roam-codex-chat-picker-option${active ? " is-active" : ""}`,
+      role: "menuitemradio",
+      "aria-checked": active,
+      title: description,
+      onClick: () => onPick()
+    },
+    /* @__PURE__ */ React.createElement("span", { className: "roam-codex-chat-picker-option-label" }, label),
+    description ? /* @__PURE__ */ React.createElement("span", { className: "roam-codex-chat-picker-option-description" }, description) : null
+  );
+  let submenuOptions = null;
+  if (picker.level === "model") {
+    submenuOptions = models.filter((model) => model && typeof model.id === "string").map((model) => {
+      const displayName = model.displayName || model.id;
+      return option(
+        model.isDefault ? `${displayName} (Default)` : displayName,
+        model.id === picker.modelId,
+        () => store.pickModel(model.id),
+        model.description || ""
+      );
+    });
+  } else if (picker.level === "effort") {
+    submenuOptions = picker.efforts.map(
+      (effort) => option(
+        effort === picker.defaultEffort ? `${effortLabel(effort)} (Default)` : effortLabel(effort),
+        effort === picker.effortId,
+        () => store.pickEffort(effort),
+        picker.selectedModel?.supportedReasoningEfforts?.find(
+          (entry) => entry?.reasoningEffort === effort
+        )?.description || ""
+      )
+    );
+  } else if (picker.level === "speed") {
+    submenuOptions = picker.tiers.map((tier) => {
+      const name = tier.name || tier.id;
+      return option(
+        tier.id === picker.defaultTierId ? `${name} (Default)` : name,
+        tier.id === picker.speedId,
+        () => store.pickSpeed(tier.id),
+        tier.description || ""
+      );
+    });
+  }
+  return /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement(
+    "div",
+    {
+      className: "roam-codex-chat-picker-menu",
+      role: "menu",
+      "aria-label": "Model, effort, and speed options",
+      hidden: !picker.open
+    },
+    rows.map(([label, value, level]) => {
+      const open = picker.level === level;
+      const openLevel = () => store.openPickerLevel(level);
+      return /* @__PURE__ */ React.createElement(
+        "button",
+        {
+          key: level,
+          type: "button",
+          className: `roam-codex-chat-picker-item${open ? " is-open" : ""}`,
+          role: "menuitem",
+          "aria-haspopup": "menu",
+          "aria-expanded": open,
+          "data-level": level,
+          title: `Choose ${label.toLowerCase()}`,
+          onMouseEnter: openLevel,
+          onFocus: openLevel,
+          onClick: openLevel,
+          onKeyDown: (event) => {
+            if (!["ArrowRight", "Enter", " "].includes(event.key)) return;
+            event.preventDefault?.();
+            openLevel();
+          }
+        },
+        /* @__PURE__ */ React.createElement("span", { className: "roam-codex-chat-picker-item-label" }, label),
+        /* @__PURE__ */ React.createElement("span", { className: "roam-codex-chat-picker-item-value" }, value),
+        /* @__PURE__ */ React.createElement(
+          "span",
+          {
+            className: "roam-codex-chat-picker-item-chevron",
+            "aria-hidden": "true"
+          },
+          "\u203A"
+        )
+      );
+    })
+  ), /* @__PURE__ */ React.createElement(
+    "div",
+    {
+      className: "roam-codex-chat-picker-submenu",
+      role: "menu",
+      "aria-label": picker.level ? `${effortLabel(picker.level)} options` : "",
+      hidden: !picker.open || !picker.level
+    },
+    submenuOptions
+  ));
+}
+function ControlsBar({ snapshot, store, pickerWrapRef }) {
+  const { running, modelsReady, picker, sendShortcutIsMac } = snapshot;
+  return /* @__PURE__ */ React.createElement("div", { className: "roam-codex-chat-model-row" }, /* @__PURE__ */ React.createElement("div", { className: "roam-codex-chat-picker", ref: pickerWrapRef }, /* @__PURE__ */ React.createElement(
+    "button",
+    {
+      type: "button",
+      className: "roam-codex-chat-picker-button",
+      title: "Choose the model, reasoning effort, and speed",
+      "aria-label": "Model, effort, and speed",
+      "aria-haspopup": "menu",
+      "aria-expanded": picker.open,
+      disabled: running || !modelsReady,
+      onClick: () => store.togglePicker()
+    },
+    picker.label
+  ), /* @__PURE__ */ React.createElement(PickerMenu, { snapshot, store })), /* @__PURE__ */ React.createElement("div", { className: "roam-codex-chat-actions" }, /* @__PURE__ */ React.createElement(
+    "button",
+    {
+      type: "button",
+      className: "roam-codex-chat-stop",
+      title: "Stop the current Codex turn",
+      hidden: !running,
+      onClick: (event) => {
+        event.currentTarget.disabled = true;
+        void store.stop().catch(() => {
+        });
+      }
+    },
+    "Stop"
+  ), /* @__PURE__ */ React.createElement(
+    "button",
+    {
+      type: "button",
+      className: "roam-codex-chat-send",
+      title: `Send the focused block in this chat's Block Outline (${sendShortcutIsMac ? "Option" : "Alt"}+Enter, rebindable in Settings \u2192 Hotkeys)`,
+      hidden: running,
+      disabled: running || !modelsReady,
+      onMouseDown: (event) => {
+        event.preventDefault?.();
+      },
+      onClick: () => void store.send()
+    },
+    "Send",
+    /* @__PURE__ */ React.createElement("kbd", { className: "roam-codex-chat-send-kbd", "aria-hidden": "true" }, sendShortcutIsMac ? "\u2325\u23CE" : "Alt \u23CE")
+  )));
+}
+function HeaderContent({ snapshot, store, onCloseRequested }) {
+  const { running, history, conversationLabel } = snapshot;
+  return /* @__PURE__ */ React.createElement("div", { className: "roam-codex-chat-heading" }, /* @__PURE__ */ React.createElement(
+    "button",
+    {
+      type: "button",
+      className: "roam-codex-chat-conversation",
+      "aria-haspopup": "menu",
+      "aria-expanded": history.open,
+      disabled: running,
+      title: history.activeThreadId ? `Current conversation: ${conversationLabel}` : "Start a new conversation or open history",
+      onClick: () => {
+        if (running) return;
+        if (history.open) store.closeHistory();
+        else store.openHistory();
+      }
+    },
+    conversationLabel
+  ), /* @__PURE__ */ React.createElement(
+    "div",
+    {
+      className: "roam-codex-chat-history",
+      role: "menu",
+      "aria-label": "Conversation history",
+      hidden: !history.open
+    },
+    /* @__PURE__ */ React.createElement(
+      "button",
+      {
+        type: "button",
+        role: "menuitem",
+        className: `roam-codex-chat-history-item roam-codex-chat-history-new${history.activeThreadId ? "" : " is-active"}`,
+        "aria-current": history.activeThreadId ? void 0 : "true",
+        title: "Start a new conversation",
+        disabled: running,
+        onClick: () => store.beginNewConversation()
+      },
+      "+ New chat"
+    ),
+    history.items.length ? history.items.map((item) => /* @__PURE__ */ React.createElement(
+      "button",
+      {
+        key: item.threadId,
+        type: "button",
+        role: "menuitem",
+        className: `roam-codex-chat-history-item${item.active ? " is-active" : ""}`,
+        "aria-current": item.active ? "true" : void 0,
+        "data-thread-id": item.threadId,
+        "data-availability": item.availability,
+        title: `Resume ${item.title}`,
+        disabled: running,
+        onClick: () => store.selectConversation(item.threadId)
+      },
+      /* @__PURE__ */ React.createElement("span", { className: "roam-codex-chat-history-title" }, item.title),
+      /* @__PURE__ */ React.createElement("span", { className: "roam-codex-chat-history-date" }, ["missing", "unavailable"].includes(item.availability) ? "Unavailable" : conversationDateLabel(item.updatedAt))
+    )) : /* @__PURE__ */ React.createElement("div", { className: "roam-codex-chat-history-empty" }, history.error || "No previous chats yet."),
+    history.items.length && history.error ? /* @__PURE__ */ React.createElement("div", { className: "roam-codex-chat-history-error" }, history.error) : null
+  ), /* @__PURE__ */ React.createElement(
+    "button",
+    {
+      type: "button",
+      className: "roam-codex-chat-close",
+      title: "Close Codex chat",
+      "aria-label": "Close Codex chat",
+      onClick: onCloseRequested
+    },
+    "\u2715"
+  ));
+}
+function ChatPanelRoot({
+  store,
+  doc,
+  api,
+  headerEl,
+  controlsEl,
+  matchMediaImpl,
+  setTimeoutImpl,
+  clearTimeoutImpl,
+  setIntervalImpl,
+  clearIntervalImpl,
+  onCloseRequested
+}) {
+  const snapshot = useStoreSnapshot(store);
+  const transcriptRef = useRef(null);
+  const pickerWrapRef = useRef(null);
+  const headerElRef = useRef(headerEl);
+  useEffect(() => {
+    void store.loadModels();
+    void store.loadInitialConversation();
+  }, [store]);
+  useEffect(() => {
+    const handleKeydown = (event) => {
+      const current = store.getSnapshot();
+      if (!event.defaultPrevented && event.key === "Escape" && (current.history.open || current.picker.open)) {
+        event.preventDefault();
+        event.stopPropagation?.();
+        if (current.history.open) store.closeHistory();
+        if (current.picker.open) store.closePicker();
+        return;
+      }
+      if (!event.defaultPrevented && event.altKey && !event.metaKey && !event.ctrlKey && event.key === "Enter") {
+        if (store.maybeSendFromShortcut()) {
+          event.preventDefault();
+          event.stopPropagation?.();
+        }
+      }
+    };
+    const handleClick = (event) => {
+      const current = store.getSnapshot();
+      if (current.history.open && !headerElRef.current?.contains?.(event.target)) {
+        store.closeHistory();
+      }
+      if (current.picker.open && !pickerWrapRef.current?.contains?.(event.target)) {
+        store.closePicker();
+      }
+    };
+    const handleWindowFocus = () => {
+      const current = store.getSnapshot();
+      if (!current.closed && !current.running) {
+        void store.loadHistory({ reconcileActive: true });
+      }
+    };
+    const handleVisibilityChange = () => {
+      if (doc.visibilityState === "visible") handleWindowFocus();
+    };
+    doc.addEventListener?.("keydown", handleKeydown, true);
+    doc.addEventListener?.("click", handleClick, true);
+    doc.addEventListener?.("visibilitychange", handleVisibilityChange);
+    doc.defaultView?.addEventListener?.("focus", handleWindowFocus);
+    return () => {
+      doc.removeEventListener?.("keydown", handleKeydown, true);
+      doc.removeEventListener?.("click", handleClick, true);
+      doc.removeEventListener?.("visibilitychange", handleVisibilityChange);
+      doc.defaultView?.removeEventListener?.("focus", handleWindowFocus);
+    };
+  }, [store, doc]);
+  return /* @__PURE__ */ React.createElement(React.Fragment, null, ReactDOM.createPortal(
+    /* @__PURE__ */ React.createElement(
+      HeaderContent,
+      {
+        snapshot,
+        store,
+        onCloseRequested
+      }
+    ),
+    headerEl
+  ), /* @__PURE__ */ React.createElement("div", { className: "roam-codex-chat-body" }, /* @__PURE__ */ React.createElement(
+    Transcript,
+    {
+      snapshot,
+      store,
+      api,
+      matchMediaImpl,
+      setTimeoutImpl,
+      clearTimeoutImpl,
+      setIntervalImpl,
+      clearIntervalImpl,
+      transcriptRef
+    }
+  ), /* @__PURE__ */ React.createElement(
+    ResizeHandle,
+    {
+      snapshot,
+      store,
+      doc,
+      transcriptRef
+    }
+  )), ReactDOM.createPortal(
+    /* @__PURE__ */ React.createElement(
+      ControlsBar,
+      {
+        snapshot,
+        store,
+        pickerWrapRef
+      }
+    ),
+    controlsEl
+  ));
+}
+function createChatPanel(options = {}) {
+  const {
+    doc = globalThis.document,
+    api = getRoamApi(),
+    setTimeoutImpl = globalThis.setTimeout,
+    clearTimeoutImpl = globalThis.clearTimeout,
+    setIntervalImpl = globalThis.setInterval?.bind(globalThis),
+    clearIntervalImpl = globalThis.clearInterval?.bind(globalThis),
+    matchMediaImpl = globalThis.matchMedia?.bind(globalThis),
+    ...storeOptions
+  } = options;
+  if (!doc?.createElement) {
+    throw new Error("A document is required to create the Codex chat panel.");
+  }
+  assertReactAvailable();
+  const store = createChatPanelStore({ ...storeOptions, api });
+  const panel = doc.createElement("section");
+  panel.className = CHAT_PANEL_CLASS;
+  panel.id = CHAT_PANEL_ID;
+  panel.setAttribute("aria-label", "Codex chat");
+  const header = doc.createElement("header");
+  header.className = "roam-codex-chat-header";
+  const controls = doc.createElement("footer");
+  controls.className = "roam-codex-chat-controls";
+  controls.id = CHAT_CONTROLS_ID;
+  let unmounted = false;
+  const close = () => {
+    const result = store.close();
+    if (!unmounted) {
+      unmounted = true;
+      ReactDOM.unmountComponentAtNode(panel);
+    }
+    header.remove();
+    panel.remove();
+    controls.remove();
+    return result;
+  };
+  const onCloseRequested = () => {
     const removeWindow = api.ui?.rightSidebar?.removeWindow;
     const removal = typeof removeWindow === "function" ? Promise.resolve(removeWindow({
-      window: { type: "block", "block-uid": rootBlockUid }
+      window: { type: "block", "block-uid": storeOptions.rootBlockUid }
     })).catch(() => {
     }) : Promise.resolve();
     void removal.then(() => close());
-  });
-  conversationButton.addEventListener("click", () => {
-    if (running) return;
-    if (historyOpen) {
-      closeHistory();
-      return;
-    }
-    historyOpen = true;
-    historyPopover.hidden = false;
-    renderConversationButton();
-    renderHistory();
-    void loadHistory({ reconcileActive: true });
-  });
-  const handleWindowFocus = () => {
-    if (!closed && !running) void loadHistory({ reconcileActive: true });
   };
-  const handleVisibilityChange = () => {
-    if (doc.visibilityState === "visible") handleWindowFocus();
-  };
-  doc.addEventListener?.("keydown", handleSendShortcut, true);
-  doc.addEventListener?.("click", handleDocumentClick, true);
-  doc.addEventListener?.("visibilitychange", handleVisibilityChange);
-  doc.defaultView?.addEventListener?.("focus", handleWindowFocus);
-  pickerButton.addEventListener("click", () => {
-    if (running || !modelsReady) return;
-    if (pickerOpen) {
-      closePicker();
-      return;
-    }
-    pickerOpen = true;
-    pickerLevel = null;
-    pickerMenu.hidden = false;
-    pickerButton.setAttribute("aria-expanded", "true");
-    renderPickerMenu();
-  });
-  stopButton.addEventListener("click", () => {
-    if (!runId) return;
-    stopButton.disabled = true;
-    setProgress("Stopping", "activity");
-    void cancelRequest(runId).catch((error) => {
-      stopButton.disabled = false;
-      setProgress(error.message || "Could not stop the turn.", "error");
-    });
-  });
-  renderMessages();
-  setProgress();
-  renderConversationButton();
-  setRunning(false);
-  void requestModelsImpl().then((availableModels) => {
-    if (closed) return;
-    models = Array.isArray(availableModels) ? availableModels : [];
-    modelsReady = true;
-    initPicker();
-    renderPickerButton();
-    setRunning(false);
-  }).catch((error) => {
-    if (closed) return;
-    pickerButton.textContent = "Models unavailable";
-    setProgress(error.message, "error");
-  });
-  const initialThreadId = state.activeThreadId;
-  void loadHistory().then(() => {
-    if (!closed && initialThreadId && state.activeThreadId === initialThreadId && !["missing", "unavailable"].includes(
-      state.conversations[initialThreadId]?.availability
-    )) {
-      return selectConversation(initialThreadId, { reload: true });
-    }
-  });
+  ReactDOM.render(
+    /* @__PURE__ */ React.createElement(
+      ChatPanelRoot,
+      {
+        store,
+        doc,
+        api,
+        headerEl: header,
+        controlsEl: controls,
+        matchMediaImpl,
+        setTimeoutImpl,
+        clearTimeoutImpl,
+        setIntervalImpl,
+        clearIntervalImpl,
+        onCloseRequested
+      }
+    ),
+    panel
+  );
   return {
     element: panel,
     headerElement: header,
     controlsElement: controls,
-    rootBlockUid,
+    rootBlockUid: storeOptions.rootBlockUid,
     close,
-    focus: () => {
-      const sidebarWindow = findSidebarBlockWindow(rootBlockUid, { api });
-      if (!sidebarWindow?.["window-id"]) return Promise.resolve();
-      return api.ui.setBlockFocusAndSelection({
-        location: {
-          "block-uid": rootBlockUid,
-          "window-id": sidebarWindow["window-id"]
-        }
-      });
-    },
-    send
+    focus: store.focusRoot,
+    send: store.send
   };
 }
 
@@ -2271,8 +2388,8 @@ function startRunningPresentation(statusUid, {
         const summary2 = doc.createElement("span");
         summary2.className = RUNNING_SUMMARY_CLASS;
         badge.appendChild(summary2);
-        const host = container.querySelector?.(".rm-block-main") || container;
-        host.appendChild(badge);
+        const host2 = container.querySelector?.(".rm-block-main") || container;
+        host2.appendChild(badge);
       }
       const meta = badge.querySelector?.(`.${RUNNING_META_CLASS}`);
       const timer = meta?.querySelector?.(`.${RUNNING_TIMER_CLASS}`);
@@ -2505,8 +2622,8 @@ async function waitForChatPanelHost(doc, sidebarWindow, {
   waitImpl = (resolveWait) => setTimeout(resolveWait, 50)
 } = {}) {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const host = findChatPanelHost(doc, sidebarWindow);
-    if (host) return host;
+    const host2 = findChatPanelHost(doc, sidebarWindow);
+    if (host2) return host2;
     await new Promise(waitImpl);
   }
   throw new Error("Roam's native prompt window did not become available.");
@@ -3113,7 +3230,7 @@ async function openChatPanelInternal({
   let controller;
   let nativeWindowObserver = null;
   let disconnectedHostTimer = null;
-  let host = null;
+  let host2 = null;
   let nativeHeader = null;
   let nativeComposer = null;
   let composerShell = null;
@@ -3124,7 +3241,7 @@ async function openChatPanelInternal({
       composerShell.parentNode.insertBefore?.(nativeComposer, composerShell);
     }
     composerShell?.remove?.();
-    host?.classList?.remove?.("roam-codex-chat-window");
+    host2?.classList?.remove?.("roam-codex-chat-window");
     nativeHeader = null;
     nativeComposer = null;
     composerShell = null;
@@ -3132,10 +3249,10 @@ async function openChatPanelInternal({
   const mountControllerInHost = (nextHost) => {
     if (!nextHost || !controller) return false;
     releaseMountedHost();
-    host = nextHost;
-    host.classList?.add?.("roam-codex-chat-window");
-    nativeHeader = host.firstElementChild || null;
-    host.insertBefore(
+    host2 = nextHost;
+    host2.classList?.add?.("roam-codex-chat-window");
+    nativeHeader = host2.firstElementChild || null;
+    host2.insertBefore(
       controller.element,
       nativeHeader?.nextSibling || null
     );
@@ -3145,11 +3262,11 @@ async function openChatPanelInternal({
     if (nativeComposer && typeof doc.createElement === "function") {
       composerShell = doc.createElement("div");
       composerShell.className = "roam-codex-chat-composer-shell";
-      host.insertBefore(composerShell, nativeComposer);
+      host2.insertBefore(composerShell, nativeComposer);
       composerShell.appendChild(nativeComposer);
       composerShell.appendChild(controller.controlsElement);
     } else {
-      host.appendChild(controller.controlsElement);
+      host2.appendChild(controller.controlsElement);
     }
     if (controller.headerElement) {
       const launcherPlacement = findSidebarChatLauncherPlacement(doc);
@@ -3160,7 +3277,7 @@ async function openChatPanelInternal({
           launcher.nextSibling || null
         );
       } else {
-        host.insertBefore(controller.headerElement, controller.element);
+        host2.insertBefore(controller.headerElement, controller.element);
       }
     }
     return true;
@@ -3170,7 +3287,7 @@ async function openChatPanelInternal({
       promptBlockUid,
       { api, waitOptions }
     );
-    host = await waitForChatPanelHost(doc, sidebarWindow, waitOptions);
+    host2 = await waitForChatPanelHost(doc, sidebarWindow, waitOptions);
     doc.getElementById?.(CHAT_PANEL_ID)?.remove?.();
     doc.getElementById?.(CHAT_CONTROLS_ID)?.remove?.();
     controller = createPanel({
@@ -3196,17 +3313,17 @@ async function openChatPanelInternal({
         });
       }
     });
-    mountControllerInHost(host);
+    mountControllerInHost(host2);
     ACTIVE_CHAT_PANEL = controller;
     const MutationObserverImpl = doc.defaultView?.MutationObserver || globalThis.MutationObserver;
-    const observationRoot = doc.body || doc.documentElement || host.parentNode;
+    const observationRoot = doc.body || doc.documentElement || host2.parentNode;
     if (MutationObserverImpl && observationRoot) {
       nativeWindowObserver = new MutationObserverImpl(() => {
-        if (host?.isConnected && controller.element?.isConnected) return;
+        if (host2?.isConnected && controller.element?.isConnected) return;
         if (disconnectedHostTimer !== null) return;
         disconnectedHostTimer = globalThis.setTimeout(() => {
           disconnectedHostTimer = null;
-          if (host?.isConnected && controller.element?.isConnected) return;
+          if (host2?.isConnected && controller.element?.isConnected) return;
           const liveWindow = findSidebarBlockWindow(promptBlockUid, { api });
           if (!liveWindow) {
             void controller.close();
