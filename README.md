@@ -29,6 +29,76 @@ the unfamiliar seams while keeping failures easy to locate.
 - `.dev/last-run.jsonl`: an ignored, local trace of the latest experiments.
 - `AGENTS.md`: the builder/runtime boundary and the improvement loop.
 
+`Codex: Open chat` uses the focused ordinary Roam block when one exists. With
+no focused block, it creates one visually empty ordinary block at the end of
+the page or block open in the main window; from the Daily Notes log it uses today's Daily
+Note. It opens that block through Roam's supported right-sidebar API and mounts
+the extension-owned chat controls inside that exact native editable Block
+Outline window. A fallback block is an extension-owned scratch prompt: closing
+the native window removes that exact block after any active turn has finished.
+Existing focused blocks are never cleared or deleted.
+
+While the right sidebar is open, a small sparkle button appears immediately
+beside Roam's native sidebar toggle. It invokes the same `openChatPanel`
+workflow as the `Codex: Open chat` command-palette command. While a Codex panel
+is active, the highlighted button and its accessible label switch to Close;
+activating it again closes that panel. The launcher disappears with the sidebar
+when that sidebar is closed.
+
+Within that native window, the conversation sits above Roam's editable block
+and the compact model, effort, Stop, and Send bar sits below it. The complete
+extension-created fallback Block Outline is one composer. On Send, the extension
+snapshots that exact outline, immediately removes every unchanged descendant,
+resets the root to a visually empty temporary placeholder without losing its
+UID, and focuses that root for the next message. Success keeps the empty
+composer. Failure or Stop restores the submitted root and descendant hierarchy,
+including their UIDs and order. If the user has already begun a new draft, that
+newer draft wins and is never overwritten by restoration.
+
+When chat opens on a user-owned outline, the extension first snapshots the UIDs
+of its existing blocks. Those blocks remain protected source material. A new
+block created afterward with ordinary Roam Enter behavior becomes a reusable
+composer when submitted: its complete unchanged submitted outline disappears
+immediately while its root UID, pre-existing parent, and siblings remain; it is
+restored on failure or Stop under the same newer-draft guard.
+Closing chat deletes only an untouched temporary placeholder; a real draft is
+preserved.
+
+The focused block in that sidebar window is the message composer, so Roam keeps
+ownership of editing, autocomplete, `[[page references]]`, and
+`((block references))`; the extension does not render a textarea or parallel
+Read and Write inputs. An empty conversation shows no explanatory placeholder
+or send-hint sentence. The first sent block starts a persistent Codex app-server
+thread and later blocks resume it. The panel loads recent user messages and
+final replies, streams concise progress, and gets model and reasoning-effort
+choices from `model/list`. It selects the concrete default model and that
+model's concrete default reasoning effort, marking each visible option with
+`(Default)` instead of showing synthetic blank default entries.
+
+The conversation title opens a graph-scoped history popover. `New chat` keeps
+the existing Codex rollout and current Roam draft, clears only the panel's
+active conversation and transcript, and carries the visible model and effort
+into the next conversation. History is built only from thread IDs already
+recorded for this graph; the bridge hydrates those exact IDs with `thread/read`
+without listing or resuming unrelated Codex work.
+
+User and Codex messages are rendered with Roam's native `renderString`
+component. Page links, block references, and Roam formatting therefore behave
+like ordinary non-editable Roam content in the transcript. The extension
+unmounts those native components whenever the transcript changes or closes and
+falls back to safe plain text if Roam's renderer is unavailable.
+Each message also has a keyboard-accessible copy icon that appears on hover or
+focus. It copies the exact source string passed to `renderString`, preserving
+Roam links, references, formatting markers, newlines, and indentation rather
+than copying transformed DOM text.
+
+Persistent chat has direct read/write access to this one configured graph. It
+does not write ordinary replies into Roam, but when the user explicitly asks
+for a graph change it performs that change through Roam MCP and reports the
+result in chat. There is no separate Apply stage. The structured `Work on this
+block` command remains a different workflow: it asks for a bounded plan and the
+extension applies that plan through the browser API.
+
 The runtime agent reads the graph and prior comments, then returns a bounded,
 flat edit plan. The extension appends that plan beneath the invoked block.
 Questions, caveats, and explanations use Roam's supported comment API on the
@@ -67,11 +137,34 @@ badge and interval. Run IDs, Codex thread IDs, and failures stay in local
 diagnostics or transient toasts.
 
 Builder tasks inherit the user's ordinary read/write Roam connection and every
-Roam MCP tool, including developer-extension reload commands. When the bridge
-launches the runtime app-server, command-line configuration overrides restore
-the separate read-only token, six-tool allowlist, and disabled unrelated MCP
-servers/plugins. Thus builder capability does not broaden ambient task-agent
-authority.
+Roam MCP tool, including developer-extension reload commands. The bridge uses a
+separate graph-scoped Roam connection for the runtime app-server, exposes graph
+read/write tools to persistent chat, and narrows the structured `Work on this
+block` thread to its read-only tool list. Unrelated MCP servers and plugins stay
+disabled.
+
+Runtime instructions are deliberately separate from builder instructions:
+
+- [`runtime-agent.md`](./runtime-agent.md) is the plugin-owned contract for
+  persistent chat.
+- [`runtime-work-agent.md`](./runtime-work-agent.md) is the stricter read-only
+  contract for `Work on this block` planning.
+- `[[roam/agent guidelines]]` remains the graph owner's place for graph-specific
+  naming, structure, filing, and presentation preferences. The runtime reads it
+  through `get_graph_guidelines` according to the Roam tool contract.
+- The ordinary prompt block and its descendants are the task and immediate
+  context for one turn.
+- Bridge authentication, the fixed graph, sandbox, approval policy, and the
+  per-mode MCP allowlists enforce capability. Prompt or graph text cannot widen
+  them.
+
+The app-server process and its threads run with a dedicated temporary runtime
+directory as their `cwd`, not this builder repository. The bridge checks the
+`instructionSources` returned by every `thread/start` and `thread/resume`:
+user-global Codex guidance under the active `CODEX_HOME` may apply, but any
+project instruction source is rejected. This prevents this repository's
+`AGENTS.md`, project configuration, and development skills from becoming part
+of the Roam agent's role.
 
 ## Prerequisites
 
@@ -85,10 +178,11 @@ This workspace was created against Codex CLI `0.144.4` and
 
 ## One-time setup
 
-### 1. Create a separate runtime Roam token
+### 1. Create a separate graph-scoped runtime Roam token
 
-Keep the runtime token separate from personal Roam tokens and request the
-smallest available scope:
+Keep the runtime token separate from personal Roam tokens. Persistent chat can
+make graph changes when explicitly requested, so this connection requires full
+access:
 
 ```bash
 mkdir -p .dev/roam-home
@@ -96,14 +190,13 @@ HOME="$PWD/.dev/roam-home" \
   npx -y @roam-research/roam-mcp@0.9.1 connect \
   --graph maskys \
   --nickname maskys \
-  --access-level read-only
+  --access-level full
 ```
 
 Approve the token request in Roam Desktop. This creates ignored files beneath
-`.dev/roam-home`; do not commit them. Roam decides the actual grant at approval
-time. If it grants broader access, `bridge.mjs` still starts the runtime with
-only the six read-only Roam tools, but token-level read-only access is the
-stronger boundary.
+`.dev/roam-home`; do not commit them. Keep only the intended graph in this
+runtime profile. `bridge.mjs` controls which tools are available to persistent
+chat and to the separate structured planning workflow.
 
 ### 2. Load this directory as a developer extension
 
@@ -111,7 +204,7 @@ In Roam Desktop, open Settings → Extensions, enable Developer Mode, and add th
 repository directory:
 
 ```text
-/Users/sheikmeeran/Documents/Roam Better AI
+/Users/sheikmeeran/roam-extensions/roam-better-ai
 ```
 
 Roam loads the default export in `extension.js`. After edits, run:
@@ -181,8 +274,16 @@ The bridge binds only to `127.0.0.1:47321`.
 
 ```text
 GET  /health
+GET  /models
+GET  /threads/:threadId/messages
+POST /threads/summaries
+     Authorization: Bearer <device-local token>
+     {"graph":"maskys","threadIds":["..."]}
 POST /pair
      Origin: https://roamresearch.com
+POST /chat
+     Authorization: Bearer <device-local token>
+     {"graph":"maskys","message":"...","promptBlockUid":"abcdefghi","threadId":"optional"}
 POST /probe
      Authorization: Bearer <device-local token>
      {"graph":"maskys","blockUid":"abcdefghi"}

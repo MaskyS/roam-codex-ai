@@ -6,27 +6,70 @@ import {
   readFile,
   writeFile,
 } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { dirname, resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { EventEmitter } from "node:events";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
+export const DEFAULT_RUNTIME_CWD = resolve(tmpdir(), "roam-better-ai-runtime");
+const DEFAULT_CODEX_HOME = resolve(
+  process.env.CODEX_HOME || resolve(homedir(), ".codex"),
+);
+const RUNTIME_CHAT_INSTRUCTIONS = readFileSync(
+  resolve(ROOT, "runtime-agent.md"),
+  "utf8",
+).trim();
+const RUNTIME_WORK_INSTRUCTIONS = readFileSync(
+  resolve(ROOT, "runtime-work-agent.md"),
+  "utf8",
+).trim();
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 47321;
 const DEFAULT_GRAPH = "maskys";
 const DEFAULT_TIMEOUT_MS = 180_000;
 const MAX_BODY_BYTES = 16 * 1024;
 const MAX_PROGRESS_TEXT_LENGTH = 240;
-const RUNTIME_ROAM_TOOLS = [
+const MAX_CHAT_MESSAGE_LENGTH = 8_000;
+const MAX_THREAD_SUMMARY_IDS = 100;
+const THREAD_ID_PATTERN = /^[A-Za-z0-9_-]{8,128}$/;
+const RUNTIME_READ_ROAM_TOOLS = [
   "get_graph_guidelines",
   "get_block",
   "get_page",
   "get_backlinks",
   "search",
   "get_comments",
+];
+const RUNTIME_CHAT_ROAM_TOOLS = [
+  ...RUNTIME_READ_ROAM_TOOLS,
+  "search_templates",
+  "roam_query",
+  "datalog_query",
+  "get_open_windows",
+  "get_selection",
+  "suggest_links",
+  "semantic_search",
+  "create_page",
+  "create_block",
+  "append_to_daily_note",
+  "update_block",
+  "delete_block",
+  "move_block",
+  "add_comment",
+  "delete_page",
+  "update_page",
+  "open_main_window",
+  "open_sidebar",
+  "add_shortcut",
+  "remove_shortcut",
+  "file_get",
+  "file_upload",
+  "file_delete",
 ];
 const RUNTIME_DISABLED_MCP_SERVERS = [
   "Railway",
@@ -38,6 +81,22 @@ const RUNTIME_DISABLED_MCP_SERVERS = [
   "paper",
   "supabase",
 ];
+
+function missingThreadError(error) {
+  return /not found|does not exist|no rollout/i.test(error?.message || "");
+}
+
+function threadSummary(thread) {
+  return {
+    id: thread.id,
+    name: typeof thread.name === "string" && thread.name.trim()
+      ? thread.name.trim()
+      : null,
+    preview: typeof thread.preview === "string" ? thread.preview.trim() : "",
+    createdAt: Number.isFinite(thread.createdAt) ? thread.createdAt : null,
+    updatedAt: Number.isFinite(thread.updatedAt) ? thread.updatedAt : null,
+  };
+}
 
 export function runtimeAppServerArgs({
   roamHome = resolve(ROOT, ".dev", "roam-home"),
@@ -58,12 +117,73 @@ export function runtimeAppServerArgs({
     "-c",
     `mcp_servers.roam.env={HOME=${JSON.stringify(roamHome)}}`,
     "-c",
-    `mcp_servers.roam.enabled_tools=${JSON.stringify(RUNTIME_ROAM_TOOLS)}`,
+    `mcp_servers.roam.enabled_tools=${JSON.stringify(RUNTIME_CHAT_ROAM_TOOLS)}`,
     ...RUNTIME_DISABLED_MCP_SERVERS.flatMap((server) => [
       "-c",
       `mcp_servers.${server}.enabled=false`,
     ]),
   ];
+}
+
+export function runtimeThreadConfig(enabledTools) {
+  return {
+    features: {
+      apps: false,
+      plugins: false,
+      plugin_sharing: false,
+      remote_plugin: false,
+    },
+    apps: { _default: { enabled: false } },
+    mcp_servers: {
+      ...Object.fromEntries(
+        RUNTIME_DISABLED_MCP_SERVERS.map((server) => [
+          server,
+          { enabled: false },
+        ]),
+      ),
+      roam: { enabled: true, enabled_tools: enabledTools },
+    },
+  };
+}
+
+function isWithin(root, candidate) {
+  const pathFromRoot = relative(resolve(root), resolve(candidate));
+  return (
+    pathFromRoot === "" ||
+    (!pathFromRoot.startsWith("..") && !isAbsolute(pathFromRoot))
+  );
+}
+
+export function validateRuntimeInstructionSources(
+  instructionSources,
+  { codexHome = DEFAULT_CODEX_HOME } = {},
+) {
+  if (!Array.isArray(instructionSources)) {
+    throw rpcError(
+      "App-server did not return a valid runtime instruction-source list.",
+      "RUNTIME_INSTRUCTION_SOURCE_INVALID",
+    );
+  }
+
+  const unexpected = instructionSources.filter(
+    (source) => typeof source !== "string" || !isWithin(codexHome, source),
+  );
+  if (unexpected.length > 0) {
+    throw rpcError(
+      "App-server loaded project instructions that are not allowed in the Roam runtime.",
+      "RUNTIME_INSTRUCTION_SOURCE_INVALID",
+    );
+  }
+
+  return instructionSources;
+}
+
+function runtimeInstructions(source, graph) {
+  return [
+    source,
+    "",
+    `Active Roam graph nickname: ${JSON.stringify(graph)}.`,
+  ].join("\n");
 }
 
 export const PLAN_SCHEMA = {
@@ -307,13 +427,15 @@ export function createProgressNormalizer(onProgress = () => {}) {
 
 export class AppServerClient extends EventEmitter {
   constructor({
-    cwd = ROOT,
+    runtimeCwd = DEFAULT_RUNTIME_CWD,
+    codexHome = DEFAULT_CODEX_HOME,
     command = process.env.CODEX_BIN || "codex",
     spawnProcess = spawn,
     stderr = process.stderr,
   } = {}) {
     super();
-    this.cwd = cwd;
+    this.runtimeCwd = runtimeCwd;
+    this.codexHome = codexHome;
     this.command = command;
     this.spawnProcess = spawnProcess;
     this.stderr = stderr;
@@ -322,6 +444,7 @@ export class AppServerClient extends EventEmitter {
     this.pending = new Map();
     this.nextId = 1;
     this.ready = false;
+    this.modelsCache = null;
   }
 
   async start() {
@@ -337,11 +460,12 @@ export class AppServerClient extends EventEmitter {
   }
 
   async #startProcess() {
+    await mkdir(this.runtimeCwd, { recursive: true, mode: 0o700 });
     const child = this.spawnProcess(
       this.command,
       runtimeAppServerArgs(),
       {
-        cwd: this.cwd,
+        cwd: this.runtimeCwd,
         env: process.env,
         stdio: ["pipe", "pipe", "pipe"],
       },
@@ -372,6 +496,7 @@ export class AppServerClient extends EventEmitter {
           title: "Roam Codex Lab",
           version: "0.8.0",
         },
+        capabilities: { experimentalApi: true },
       },
       30_000,
     );
@@ -439,6 +564,7 @@ export class AppServerClient extends EventEmitter {
     if (!this.child) return;
     this.child = null;
     this.ready = false;
+    this.modelsCache = null;
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
       pending.reject(error);
@@ -491,10 +617,293 @@ export class AppServerClient extends EventEmitter {
     return this.request("turn/interrupt", { threadId, turnId });
   }
 
+  async listModels({ refresh = false } = {}) {
+    if (this.modelsCache && !refresh) return this.modelsCache;
+    await this.start();
+
+    const models = [];
+    let cursor = null;
+    do {
+      const result = await this.request("model/list", {
+        cursor,
+        limit: 100,
+        includeHidden: false,
+      });
+      if (Array.isArray(result?.data)) models.push(...result.data);
+      cursor = result?.nextCursor || null;
+    } while (cursor && models.length < 500);
+
+    this.modelsCache = models.filter(
+      (model) =>
+        model &&
+        typeof model.id === "string" &&
+        model.hidden !== true,
+    );
+    return this.modelsCache;
+  }
+
+  async readThreadSummaries(threadIds) {
+    await this.start();
+    const threads = [];
+    const missingThreadIds = [];
+    const unavailableThreadIds = [];
+
+    await Promise.all(threadIds.map(async (threadId) => {
+      try {
+        const result = await this.request("thread/read", {
+          threadId,
+          includeTurns: false,
+        });
+        const thread = result?.thread;
+        if (!thread || thread.id !== threadId) {
+          unavailableThreadIds.push(threadId);
+          return;
+        }
+        threads.push(threadSummary(thread));
+      } catch (error) {
+        if (missingThreadError(error)) {
+          missingThreadIds.push(threadId);
+        } else {
+          unavailableThreadIds.push(threadId);
+        }
+      }
+    }));
+
+    const order = new Map(threadIds.map((threadId, index) => [threadId, index]));
+    const byRequestOrder = (left, right) => order.get(left) - order.get(right);
+    threads.sort((left, right) => byRequestOrder(left.id, right.id));
+    missingThreadIds.sort(byRequestOrder);
+    unavailableThreadIds.sort(byRequestOrder);
+
+    return { threads, missingThreadIds, unavailableThreadIds };
+  }
+
+  async listThreadMessages(threadId, { limit = 12 } = {}) {
+    await this.start();
+    const result = await this.request("thread/turns/list", {
+      threadId,
+      limit,
+      sortDirection: "desc",
+      itemsView: "full",
+    });
+    const turns = Array.isArray(result?.data) ? [...result.data].reverse() : [];
+    const messages = [];
+
+    for (const turn of turns) {
+      const items = Array.isArray(turn?.items) ? turn.items : [];
+      const userItem = items.find((item) => item?.type === "userMessage");
+      const userText = Array.isArray(userItem?.content)
+        ? userItem.content
+            .filter((part) => part?.type === "text" && typeof part.text === "string")
+            .map((part) => part.text)
+            .join("\n")
+            .trim()
+        : "";
+      if (userText) messages.push({ role: "user", text: userText });
+
+      const agentItems = items.filter(
+        (item) => item?.type === "agentMessage" && typeof item.text === "string",
+      );
+      const final = [...agentItems]
+        .reverse()
+        .find((item) => item.phase === "final_answer") || agentItems.at(-1);
+      if (final?.text?.trim()) {
+        messages.push({ role: "assistant", text: final.text.trim() });
+      }
+    }
+
+    return messages;
+  }
+
+  async runChat({
+    message,
+    graph = DEFAULT_GRAPH,
+    promptBlockUid,
+    threadId: requestedThreadId = null,
+    model = null,
+    effort = null,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    onProgress = () => {},
+    onThread = () => {},
+    onStarted = () => {},
+  }) {
+    await this.start();
+    if (!/^[A-Za-z0-9_-]{6,64}$/.test(promptBlockUid || "")) {
+      throw rpcError(
+        "A valid Roam prompt block UID is required.",
+        "PROMPT_BLOCK_INVALID",
+      );
+    }
+
+    if (model || effort) {
+      const models = await this.listModels();
+      const selectedModel = model
+        ? models.find((entry) => entry.id === model)
+        : models.find((entry) => entry.isDefault) || models[0];
+      if (!selectedModel) {
+        throw rpcError("The selected Codex model is unavailable.", "MODEL_INVALID");
+      }
+      if (effort) {
+        const efforts = Array.isArray(selectedModel.supportedReasoningEfforts)
+          ? selectedModel.supportedReasoningEfforts.map(
+              (option) => option?.reasoningEffort,
+            )
+          : [];
+        if (!efforts.includes(effort)) {
+          throw rpcError(
+            "The selected reasoning effort is unavailable for that model.",
+            "EFFORT_INVALID",
+          );
+        }
+      }
+    }
+
+    const threadOptions = {
+      cwd: this.runtimeCwd,
+      approvalPolicy: "never",
+      sandbox: "read-only",
+      config: runtimeThreadConfig(RUNTIME_CHAT_ROAM_TOOLS),
+      developerInstructions: runtimeInstructions(
+        RUNTIME_CHAT_INSTRUCTIONS,
+        graph,
+      ),
+    };
+
+    const threadResult = requestedThreadId
+      ? await this.request("thread/resume", {
+          threadId: requestedThreadId,
+          ...threadOptions,
+          excludeTurns: true,
+        })
+      : await this.request("thread/start", {
+          ...threadOptions,
+          serviceName: "roam_codex_chat",
+        });
+    validateRuntimeInstructionSources(threadResult?.instructionSources, {
+      codexHome: this.codexHome,
+    });
+    const threadId = threadResult?.thread?.id;
+    if (!threadId) {
+      throw new Error("App-server did not return a thread id.");
+    }
+    await onThread({ threadId });
+
+    const buffered = [];
+    const completedAgentMessages = [];
+    const normalizeProgress = createProgressNormalizer(onProgress);
+    let turnId = null;
+    let completeTurn = null;
+    let resolveCompletion;
+    let rejectCompletion;
+    const completion = new Promise((resolveTurn, rejectTurn) => {
+      resolveCompletion = resolveTurn;
+      rejectCompletion = rejectTurn;
+    });
+    const timer = setTimeout(() => {
+      rejectCompletion(
+        rpcError("Timed out waiting for the Codex turn.", "TURN_TIMEOUT"),
+      );
+    }, timeoutMs);
+
+    const processNotification = ({ method, params }) => {
+      if (!turnId) {
+        buffered.push({ method, params });
+        return;
+      }
+      if (params.threadId && params.threadId !== threadId) return;
+      const notificationTurnId = params.turnId || params.turn?.id;
+      if (notificationTurnId && notificationTurnId !== turnId) return;
+
+      normalizeProgress({ method, params });
+      if (
+        method === "item/completed" &&
+        params.item?.type === "agentMessage" &&
+        typeof params.item.text === "string"
+      ) {
+        completedAgentMessages.push(params.item);
+      }
+      if (method === "turn/completed") {
+        completeTurn = params.turn;
+        resolveCompletion(params.turn);
+      }
+    };
+    this.on("notification", processNotification);
+
+    try {
+      const turnParams = {
+        threadId,
+        input: [{ type: "text", text: message }],
+        additionalContext: {
+          roamPrompt: {
+            kind: "application",
+            value: [
+              `Roam graph: ${graph}`,
+              `Prompt block UID: ${promptBlockUid}`,
+              "Read this block and useful descendants with Roam MCP before answering.",
+              "Treat its page and block references as part of the user's instruction.",
+            ].join("\n"),
+          },
+        },
+        approvalPolicy: "never",
+        sandboxPolicy: { type: "readOnly", networkAccess: false },
+        summary: "concise",
+      };
+      if (model) turnParams.model = model;
+      if (effort) turnParams.effort = effort;
+
+      const turnResult = await this.request("turn/start", turnParams);
+      turnId = turnResult?.turn?.id;
+      if (!turnId) throw new Error("App-server did not return a turn id.");
+      await onStarted({ threadId, turnId });
+
+      for (const notification of buffered.splice(0)) {
+        processNotification(notification);
+      }
+
+      const turn = completeTurn || (await completion);
+      if (turn?.status === "interrupted") {
+        throw rpcError("Codex turn was stopped.", "TURN_INTERRUPTED");
+      }
+      if (turn?.status !== "completed") {
+        const detail = turn?.error?.message ||
+          `status ${turn?.status || "unknown"}`;
+        throw new Error(`Codex turn did not complete: ${detail}`);
+      }
+
+      const items = Array.isArray(turn.items) ? turn.items : [];
+      const allAgentMessages = [
+        ...completedAgentMessages,
+        ...items.filter((item) => item?.type === "agentMessage"),
+      ];
+      const finalMessage = [...allAgentMessages]
+        .reverse()
+        .find((item) => item.phase === "final_answer") ||
+        allAgentMessages.at(-1);
+      if (!finalMessage?.text?.trim()) {
+        throw new Error("Codex completed without a final reply.");
+      }
+
+      return {
+        threadId,
+        turnId,
+        reply: finalMessage.text.trim(),
+      };
+    } finally {
+      clearTimeout(timer);
+      this.off("notification", processNotification);
+      try {
+        await this.request("thread/unsubscribe", { threadId }, 5_000);
+      } catch {
+        // The turn result is authoritative; teardown is best-effort.
+      }
+    }
+  }
+
   async stop() {
     const child = this.child;
     this.child = null;
     this.ready = false;
+    this.modelsCache = null;
     if (!child) return;
     child.stdin.end();
     child.kill("SIGTERM");
@@ -510,21 +919,20 @@ export class AppServerClient extends EventEmitter {
     await this.start();
 
     const threadResult = await this.request("thread/start", {
-      cwd: this.cwd,
+      cwd: this.runtimeCwd,
       approvalPolicy: "never",
       sandbox: "read-only",
+      config: runtimeThreadConfig(RUNTIME_READ_ROAM_TOOLS),
       serviceName: "roam_codex_lab",
       ephemeral: true,
-      developerInstructions: [
-        "You are the research and planning runtime for a Roam editing command.",
-        `Operate only on the Roam graph nickname "${graph}".`,
-        "Use only the allowlisted Roam MCP read tools.",
-        "Do not use the shell, filesystem tools, or any write tool.",
-        "Use built-in web search for current or external information.",
-        "The Roam extension—not you—will apply your bounded edit plan.",
-        "Do not ask the user for interactive input.",
-        "Return the requested JSON object and no Markdown outside its fields.",
-      ].join(" "),
+      developerInstructions: runtimeInstructions(
+        RUNTIME_WORK_INSTRUCTIONS,
+        graph,
+      ),
+    });
+
+    validateRuntimeInstructionSources(threadResult?.instructionSources, {
+      codexHome: this.codexHome,
     });
 
     const threadId = threadResult?.thread?.id;
@@ -957,6 +1365,7 @@ export function createBridgeServer({
 } = {}) {
   if (!token) throw new Error("A bridge bearer token is required.");
   const activeRunsByBlockUid = new Map();
+  const activeRunsByThreadId = new Map();
   const activeRunsById = new Map();
 
   const interruptRun = async (run) => {
@@ -979,13 +1388,19 @@ export function createBridgeServer({
     }
 
     if (request.method === "OPTIONS") {
-      response.writeHead(204, {
+      const headers = {
         "access-control-allow-origin": origin || "https://roamresearch.com",
         "access-control-allow-methods": "GET, POST, OPTIONS",
         "access-control-allow-headers": "authorization, content-type",
         "access-control-max-age": "600",
         vary: "Origin",
-      });
+      };
+      if (
+        request.headers["access-control-request-private-network"] === "true"
+      ) {
+        headers["access-control-allow-private-network"] = "true";
+      }
+      response.writeHead(204, headers);
       response.end();
       return;
     }
@@ -1018,6 +1433,284 @@ export function createBridgeServer({
       return;
     }
 
+    if (request.method === "GET" && request.url === "/models") {
+      if (!bearerMatches(request.headers.authorization, token)) {
+        sendJson(response, 401, { error: "Invalid bridge token." }, origin);
+        return;
+      }
+      try {
+        const models = (await client.listModels()).map((model) => ({
+          id: model.id,
+          displayName: model.displayName || model.id,
+          isDefault: model.isDefault === true,
+          defaultReasoningEffort: model.defaultReasoningEffort || null,
+          supportedReasoningEfforts: Array.isArray(
+            model.supportedReasoningEfforts,
+          )
+            ? model.supportedReasoningEfforts.map((option) => ({
+                reasoningEffort: option.reasoningEffort,
+                description: option.description || "",
+              }))
+            : [],
+        }));
+        sendJson(response, 200, { models }, origin);
+      } catch (error) {
+        sendJson(
+          response,
+          502,
+          { error: error.message || "Could not load Codex models." },
+          origin,
+        );
+      }
+      return;
+    }
+
+    if (request.method === "POST" && request.url === "/threads/summaries") {
+      if (!bearerMatches(request.headers.authorization, token)) {
+        sendJson(response, 401, { error: "Invalid bridge token." }, origin);
+        return;
+      }
+
+      let body;
+      try {
+        body = await readJsonBody(request);
+      } catch (error) {
+        const status = error.code === "BODY_TOO_LARGE" ? 413 : 400;
+        sendJson(response, status, { error: error.message }, origin);
+        return;
+      }
+      if (body?.graph !== graph) {
+        sendJson(
+          response,
+          400,
+          { error: `This bridge is restricted to graph "${graph}".` },
+          origin,
+        );
+        return;
+      }
+      const threadIds = body?.threadIds;
+      if (
+        !Array.isArray(threadIds) ||
+        threadIds.length > MAX_THREAD_SUMMARY_IDS ||
+        threadIds.some((threadId) =>
+          typeof threadId !== "string" || !THREAD_ID_PATTERN.test(threadId)
+        ) ||
+        new Set(threadIds).size !== threadIds.length
+      ) {
+        sendJson(
+          response,
+          400,
+          {
+            error:
+              `threadIds must contain at most ${MAX_THREAD_SUMMARY_IDS} ` +
+              "unique Codex thread IDs.",
+          },
+          origin,
+        );
+        return;
+      }
+
+      try {
+        const result = await client.readThreadSummaries(threadIds);
+        sendJson(response, 200, result, origin);
+      } catch (error) {
+        sendJson(
+          response,
+          502,
+          { error: error.message || "Could not load conversation history." },
+          origin,
+        );
+      }
+      return;
+    }
+
+    const messagesMatch = request.url?.match(
+      /^\/threads\/([A-Za-z0-9_-]{8,128})\/messages$/,
+    );
+    if (request.method === "GET" && messagesMatch) {
+      if (!bearerMatches(request.headers.authorization, token)) {
+        sendJson(response, 401, { error: "Invalid bridge token." }, origin);
+        return;
+      }
+      try {
+        const messages = await client.listThreadMessages(messagesMatch[1]);
+        sendJson(response, 200, { messages }, origin);
+      } catch (error) {
+        const missing = missingThreadError(error);
+        sendJson(
+          response,
+          missing ? 404 : 502,
+          { error: error.message || "Could not load that conversation." },
+          origin,
+        );
+      }
+      return;
+    }
+
+    if (request.method === "POST" && request.url === "/chat") {
+      if (!bearerMatches(request.headers.authorization, token)) {
+        sendJson(response, 401, { error: "Invalid bridge token." }, origin);
+        return;
+      }
+
+      let body;
+      try {
+        body = await readJsonBody(request);
+      } catch (error) {
+        const status = error.code === "BODY_TOO_LARGE" ? 413 : 400;
+        sendJson(response, status, { error: error.message }, origin);
+        return;
+      }
+
+      if (body.graph && body.graph !== graph) {
+        sendJson(
+          response,
+          400,
+          { error: `This bridge is restricted to graph "${graph}".` },
+          origin,
+        );
+        return;
+      }
+      const message = typeof body.message === "string" ? body.message.trim() : "";
+      if (!message || message.length > MAX_CHAT_MESSAGE_LENGTH) {
+        sendJson(
+          response,
+          400,
+          { error: `A chat message must be 1-${MAX_CHAT_MESSAGE_LENGTH} characters.` },
+          origin,
+        );
+        return;
+      }
+      const promptBlockUid = body.promptBlockUid;
+      if (
+        typeof promptBlockUid !== "string" ||
+        !/^[A-Za-z0-9_-]{6,64}$/.test(promptBlockUid)
+      ) {
+        sendJson(response, 400, { error: "Invalid Roam prompt block UID." }, origin);
+        return;
+      }
+      const requestedThreadId = body.threadId || null;
+      if (
+        requestedThreadId !== null &&
+        (typeof requestedThreadId !== "string" ||
+          !THREAD_ID_PATTERN.test(requestedThreadId))
+      ) {
+        sendJson(response, 400, { error: "Invalid Codex thread ID." }, origin);
+        return;
+      }
+      for (const field of ["model", "effort"]) {
+        if (
+          body[field] !== undefined &&
+          (typeof body[field] !== "string" || body[field].length > 100)
+        ) {
+          sendJson(response, 400, { error: `Invalid ${field}.` }, origin);
+          return;
+        }
+      }
+      if (
+        requestedThreadId &&
+        activeRunsByThreadId.has(requestedThreadId)
+      ) {
+        sendJson(
+          response,
+          409,
+          { error: "That Codex conversation already has an active turn." },
+          origin,
+        );
+        return;
+      }
+
+      const runId = randomUUID();
+      const startedAt = Date.now();
+      const activeRun = {
+        kind: "chat",
+        runId,
+        blockUid: null,
+        threadId: requestedThreadId,
+        turnId: null,
+        cancelRequested: false,
+        interruptPromise: null,
+      };
+      activeRunsById.set(runId, activeRun);
+      if (requestedThreadId) {
+        activeRunsByThreadId.set(requestedThreadId, activeRun);
+      }
+      await trace({
+        runId,
+        event: "chat.started",
+        graph,
+        threadId: requestedThreadId,
+        promptBlockUid,
+        messageLength: message.length,
+      });
+      startNdjson(response, origin);
+      writeNdjson(response, { type: "started", runId });
+
+      try {
+        const result = await client.runChat({
+          message,
+          graph,
+          promptBlockUid,
+          threadId: requestedThreadId,
+          model: body.model || null,
+          effort: body.effort || null,
+          onProgress: (progress) => {
+            writeNdjson(response, { type: "progress", ...progress });
+          },
+          onThread: ({ threadId }) => {
+            activeRun.threadId = threadId;
+            activeRunsByThreadId.set(threadId, activeRun);
+            writeNdjson(response, { type: "conversation", threadId });
+          },
+          onStarted: async ({ threadId, turnId }) => {
+            activeRun.threadId = threadId;
+            activeRun.turnId = turnId;
+            if (activeRun.cancelRequested) await interruptRun(activeRun);
+          },
+        });
+        const payload = {
+          runId,
+          graph,
+          durationMs: Date.now() - startedAt,
+          ...result,
+        };
+        await trace({
+          runId,
+          event: "chat.completed",
+          graph,
+          threadId: result.threadId,
+          turnId: result.turnId,
+          durationMs: payload.durationMs,
+        });
+        writeNdjson(response, { type: "completed", result: payload });
+      } catch (error) {
+        await trace({
+          runId,
+          event: error.code === "TURN_INTERRUPTED"
+            ? "chat.interrupted"
+            : "chat.failed",
+          graph,
+          threadId: activeRun.threadId,
+          durationMs: Date.now() - startedAt,
+          error: error.message,
+          code: error.code,
+        });
+        writeNdjson(response, {
+          type: "error",
+          runId,
+          error: error.message || "Chat failed.",
+          code: error.code,
+        });
+      } finally {
+        if (activeRun.threadId) {
+          activeRunsByThreadId.delete(activeRun.threadId);
+        }
+        activeRunsById.delete(runId);
+        response.end();
+      }
+      return;
+    }
+
     const cancelMatch = request.url?.match(
       /^\/runs\/([0-9a-f-]{36})\/cancel$/i,
     );
@@ -1036,9 +1729,10 @@ export function createBridgeServer({
       run.cancelRequested = true;
       await trace({
         runId: run.runId,
-        event: "probe.cancel.requested",
+        event: `${run.kind}.cancel.requested`,
         graph,
         blockUid: run.blockUid,
+        threadId: run.threadId,
       });
       try {
         const sent = await interruptRun(run);
@@ -1108,6 +1802,7 @@ export function createBridgeServer({
     const runId = randomUUID();
     const startedAt = Date.now();
     const activeRun = {
+      kind: "probe",
       runId,
       blockUid,
       threadId: null,

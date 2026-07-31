@@ -10,8 +10,95 @@ const RUNNING_META_CLASS = "roam-codex-running-meta";
 const RUNNING_TIMER_CLASS = "roam-codex-running-timer";
 const RUNNING_CANCEL_CLASS = "roam-codex-running-cancel";
 const RUNNING_SUMMARY_CLASS = "roam-codex-running-summary";
+const CHAT_PANEL_ID = "roam-codex-chat-panel";
+const CHAT_CONTROLS_ID = "roam-codex-chat-controls";
+const CHAT_PANEL_CLASS = "roam-codex-chat-panel";
+const SIDEBAR_CHAT_LAUNCHER_ID = "roam-codex-sidebar-chat-launcher";
+const CHAT_STATE_VERSION = 2;
+const CHAT_STATE_KEY = `roam-codex-lab.chat-state.v${CHAT_STATE_VERSION}.${GRAPH}`;
+const CHAT_TRANSCRIPT_HEIGHT_KEY = `roam-codex-lab.chat-transcript-height.${GRAPH}`;
+const CHAT_TRANSCRIPT_MIN_HEIGHT = 140;
+const CHAT_TRANSCRIPT_MAX_HEIGHT = 640;
+const NATIVE_WINDOW_HEADER_CLASS = "roam-codex-native-window-header";
+let ACTIVE_CHAT_PANEL = null;
+let SIDEBAR_CHAT_LAUNCHER = null;
 
 export const RUNNING_BLOCK_TEXT = "[[Codex/running]]";
+export const CHAT_COMPOSER_PLACEHOLDER = "\u200B";
+
+function emptyChatState() {
+  return {
+    version: CHAT_STATE_VERSION,
+    activeThreadId: null,
+    newConversationPreferences: { model: null, effort: null },
+    conversations: {},
+  };
+}
+
+function validThreadId(value) {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{8,128}$/.test(value);
+}
+
+function validBlockUid(value) {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{6,64}$/.test(value);
+}
+
+export function readChatState({
+  storage = window.localStorage,
+  key = CHAT_STATE_KEY,
+} = {}) {
+  let value;
+  try {
+    value = JSON.parse(storage.getItem(key) || "null");
+  } catch {
+    return emptyChatState();
+  }
+
+  if (!value || value.version !== CHAT_STATE_VERSION) {
+    return emptyChatState();
+  }
+
+  const conversations = {};
+  for (const [threadId, record] of Object.entries(value.conversations || {})) {
+    if (!validThreadId(threadId) || record?.threadId !== threadId) continue;
+    conversations[threadId] = {
+      threadId,
+      createdAt: Number.isFinite(record.createdAt) ? record.createdAt : Date.now(),
+      updatedAt: Number.isFinite(record.updatedAt) ? record.updatedAt : Date.now(),
+      model: typeof record.model === "string" ? record.model : null,
+      effort: typeof record.effort === "string" ? record.effort : null,
+      threadPageUid: typeof record.threadPageUid === "string"
+        ? record.threadPageUid
+        : null,
+    };
+  }
+
+  const activeThreadId = validThreadId(value.activeThreadId) &&
+      conversations[value.activeThreadId]
+    ? value.activeThreadId
+    : null;
+
+  return {
+    version: CHAT_STATE_VERSION,
+    activeThreadId,
+    newConversationPreferences: {
+      model: typeof value.newConversationPreferences?.model === "string"
+        ? value.newConversationPreferences.model
+        : null,
+      effort: typeof value.newConversationPreferences?.effort === "string"
+        ? value.newConversationPreferences.effort
+        : null,
+    },
+    conversations,
+  };
+}
+
+export function writeChatState(
+  state,
+  { storage = window.localStorage, key = CHAT_STATE_KEY } = {},
+) {
+  storage.setItem(key, JSON.stringify({ ...state, version: CHAT_STATE_VERSION }));
+}
 
 function getRoamApi() {
   if (!window.roamAlphaAPI) {
@@ -80,7 +167,11 @@ export async function requestProbe(blockUid, {
 
 export async function readProbeStream(
   response,
-  { onProgress = () => {}, onStarted = () => {} } = {},
+  {
+    onProgress = () => {},
+    onStarted = () => {},
+    onThread = () => {},
+  } = {},
 ) {
   if (!response.body?.getReader) {
     throw new Error("This browser cannot read streamed Codex progress.");
@@ -105,6 +196,15 @@ export async function readProbeStream(
         onStarted({ runId: event.runId });
       } catch {
         // A presentation problem must not cancel the underlying Codex turn.
+      }
+    } else if (
+      event.type === "conversation" &&
+      typeof event.threadId === "string"
+    ) {
+      try {
+        onThread({ threadId: event.threadId });
+      } catch {
+        // Local conversation persistence must not cancel the Codex turn.
       }
     } else if (event.type === "progress" && typeof event.text === "string") {
       try {
@@ -135,6 +235,156 @@ export async function readProbeStream(
     throw new Error("The bridge stream ended before Codex returned a result.");
   }
   return result;
+}
+
+async function bridgeJson(path, {
+  fetchImpl = window.fetch.bind(window),
+  token = getToken(),
+} = {}) {
+  if (!token) {
+    throw new Error(
+      'No bridge token. Run "Codex: Pair local bridge" first.',
+    );
+  }
+
+  const response = await fetchImpl(`${BRIDGE_URL}${path}`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  let body = {};
+  try {
+    body = await response.json();
+  } catch {
+    // A useful status error is emitted below.
+  }
+  if (!response.ok) {
+    const error = new Error(
+      body.error || `Bridge returned HTTP ${response.status}.`,
+    );
+    error.status = response.status;
+    throw error;
+  }
+  return body;
+}
+
+export async function requestPanelModels(options = {}) {
+  const result = await bridgeJson("/models", options);
+  return Array.isArray(result.models) ? result.models : [];
+}
+
+export async function requestPanelThreadSummaries(threadIds, {
+  fetchImpl = window.fetch.bind(window),
+  token = getToken(),
+} = {}) {
+  if (!token) {
+    throw new Error(
+      'No bridge token. Run "Codex: Pair local bridge" first.',
+    );
+  }
+  if (
+    !Array.isArray(threadIds) ||
+    threadIds.length > 100 ||
+    threadIds.some((threadId) => !validThreadId(threadId)) ||
+    new Set(threadIds).size !== threadIds.length
+  ) {
+    throw new Error("Conversation history requires at most 100 unique thread IDs.");
+  }
+
+  const response = await fetchImpl(`${BRIDGE_URL}/threads/summaries`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ graph: GRAPH, threadIds }),
+  });
+  let result = {};
+  try {
+    result = await response.json();
+  } catch {
+    // A useful status error is emitted below.
+  }
+  if (!response.ok) {
+    throw new Error(
+      result.error || `Bridge returned HTTP ${response.status}.`,
+    );
+  }
+  return {
+    threads: Array.isArray(result.threads) ? result.threads : [],
+    missingThreadIds: Array.isArray(result.missingThreadIds)
+      ? result.missingThreadIds
+      : [],
+    unavailableThreadIds: Array.isArray(result.unavailableThreadIds)
+      ? result.unavailableThreadIds
+      : [],
+  };
+}
+
+export async function requestPanelMessages(threadId, options = {}) {
+  if (!validThreadId(threadId)) {
+    throw new Error("Cannot load a conversation without a valid thread ID.");
+  }
+  const result = await bridgeJson(
+    `/threads/${encodeURIComponent(threadId)}/messages`,
+    options,
+  );
+  return Array.isArray(result.messages) ? result.messages : [];
+}
+
+export async function requestPanelChat(message, {
+  fetchImpl = window.fetch.bind(window),
+  token = getToken(),
+  promptBlockUid,
+  threadId = null,
+  model = null,
+  effort = null,
+  onProgress = () => {},
+  onStarted = () => {},
+  onThread = () => {},
+} = {}) {
+  if (!token) {
+    throw new Error(
+      'No bridge token. Run "Codex: Pair local bridge" first.',
+    );
+  }
+  if (!validBlockUid(promptBlockUid)) {
+    throw new Error("Cannot chat without a valid Roam prompt block UID.");
+  }
+
+  const body = {
+    graph: GRAPH,
+    message: String(message),
+    promptBlockUid,
+  };
+  if (threadId) body.threadId = threadId;
+  if (model) body.model = model;
+  if (effort) body.effort = effort;
+
+  const response = await fetchImpl(`${BRIDGE_URL}/chat`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    let result = {};
+    try {
+      result = await response.json();
+    } catch {
+      // A useful status error is emitted below.
+    }
+    throw new Error(
+      result.error || `Bridge returned HTTP ${response.status}.`,
+    );
+  }
+
+  return readProbeStream(response, {
+    onProgress,
+    onStarted,
+    onThread,
+  });
 }
 
 export async function requestRunCancellation(runId, {
@@ -171,6 +421,55 @@ export async function requestRunCancellation(runId, {
 
 function singleLine(value) {
   return String(value).replace(/\s+/g, " ").trim();
+}
+
+function serverTimestampMs(value) {
+  if (!Number.isFinite(value)) return 0;
+  return value < 1_000_000_000_000 ? value * 1_000 : value;
+}
+
+function conversationDateLabel(value) {
+  if (!Number.isFinite(value) || value <= 0) return "";
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(value));
+}
+
+export function buildConversationHistory(state, summaries = []) {
+  const summaryByThreadId = new Map(
+    summaries
+      .filter((summary) => validThreadId(summary?.id))
+      .map((summary) => [summary.id, summary]),
+  );
+  return Object.values(state?.conversations || {})
+    .filter((record) => validThreadId(record?.threadId))
+    .map((record) => {
+      const summary = summaryByThreadId.get(record.threadId) || null;
+      const name = singleLine(summary?.name || "");
+      const preview = singleLine(summary?.preview || "");
+      const createdAt = serverTimestampMs(summary?.createdAt) ||
+        record.createdAt;
+      const updatedAt = Math.max(
+        serverTimestampMs(summary?.updatedAt),
+        Number.isFinite(record.updatedAt) ? record.updatedAt : 0,
+      );
+      return {
+        threadId: record.threadId,
+        title: name || preview ||
+          `Untitled${createdAt ? ` · ${conversationDateLabel(createdAt)}` : ""}`,
+        createdAt,
+        updatedAt,
+        active: state.activeThreadId === record.threadId,
+      };
+    })
+    .sort((left, right) =>
+      right.updatedAt - left.updatedAt ||
+      right.createdAt - left.createdAt ||
+      left.threadId.localeCompare(right.threadId)
+    );
 }
 
 function readRunningStatusUids(storage) {
@@ -658,6 +957,1875 @@ export async function workOnBlock(
   return applied;
 }
 
+export function findChatPanelHost(
+  doc = globalThis.document,
+  sidebarWindow,
+) {
+  const windowId = sidebarWindow?.["window-id"];
+  if (typeof windowId !== "string" || !windowId) return null;
+  return doc?.getElementById?.(`sidebar-window-${windowId}`) || null;
+}
+
+async function waitForChatPanelHost(
+  doc,
+  sidebarWindow,
+  {
+    attempts = 40,
+    waitImpl = (resolveWait) => setTimeout(resolveWait, 50),
+  } = {},
+) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const host = findChatPanelHost(doc, sidebarWindow);
+    if (host) return host;
+    await new Promise(waitImpl);
+  }
+  throw new Error("Roam's native prompt window did not become available.");
+}
+
+function createPanelElement(doc, tag, className, text = "") {
+  const element = doc.createElement(tag);
+  if (className) element.className = className;
+  if (text) element.textContent = text;
+  return element;
+}
+
+export function renderRoamMarkdown(
+  element,
+  string,
+  { api = getRoamApi() } = {},
+) {
+  const value = typeof string === "string" ? string : "";
+  const renderString = api.ui?.components?.renderString;
+  if (typeof renderString !== "function") {
+    element.textContent = value;
+    return Promise.resolve(false);
+  }
+  return Promise.resolve(renderString({ el: element, string: value }))
+    .then(() => true)
+    .catch(() => {
+      element.textContent = value;
+      return false;
+    });
+}
+
+export function unmountRoamMarkdown(
+  element,
+  { api = getRoamApi() } = {},
+) {
+  const unmountNode = api.ui?.components?.unmountNode;
+  if (typeof unmountNode !== "function") return Promise.resolve(false);
+  return Promise.resolve(unmountNode({ el: element }))
+    .then(() => true)
+    .catch(() => false);
+}
+
+export function copyRoamText(
+  string,
+  { navigatorImpl = globalThis.navigator } = {},
+) {
+  const value = typeof string === "string" ? string : "";
+  const writeText = navigatorImpl?.clipboard?.writeText;
+  if (typeof writeText !== "function") {
+    return Promise.reject(new Error("Clipboard access is unavailable."));
+  }
+  return Promise.resolve(writeText.call(navigatorImpl.clipboard, value));
+}
+
+function panelButton(doc, className, label, title) {
+  const button = createPanelElement(doc, "button", className, label);
+  button.type = "button";
+  if (title) button.title = title;
+  return button;
+}
+
+function directChildWithClass(element, className) {
+  return Array.from(element?.children || []).find((child) =>
+    String(child.className || "").split(/\s+/).includes(className)
+  ) || null;
+}
+
+function rightSidebarVisible(sidebar, doc) {
+  if (!sidebar || sidebar.hidden) return false;
+  const style = doc.defaultView?.getComputedStyle?.(sidebar);
+  if (style?.display === "none" || style?.visibility === "hidden") return false;
+  const rect = sidebar.getBoundingClientRect?.();
+  if (rect && Number.isFinite(rect.width) && rect.width <= 1) return false;
+  return true;
+}
+
+export function findSidebarChatLauncherPlacement(doc = globalThis.document) {
+  const sidebar = doc?.getElementById?.("right-sidebar");
+  const content = doc?.getElementById?.("roam-right-sidebar-content");
+  if (!sidebar || !content || !rightSidebarVisible(sidebar, doc)) return null;
+  const header = directChildWithClass(sidebar, "flex-h-box") ||
+    sidebar.querySelector?.(":scope > .flex-h-box") || null;
+  if (!header) return null;
+  const nativeToggle = Array.from(header.children || []).find((child) =>
+    child?.tagName?.toLowerCase?.() === "button" &&
+    child.id !== SIDEBAR_CHAT_LAUNCHER_ID
+  ) || null;
+  if (!nativeToggle) return null;
+  return { sidebar, content, header, nativeToggle };
+}
+
+function activeChatPanelIsOpen() {
+  return Boolean(ACTIVE_CHAT_PANEL?.element?.isConnected);
+}
+
+function updateSidebarChatLauncherState(button, chatOpen) {
+  const open = Boolean(chatOpen);
+  button.dataset.chatOpen = open ? "true" : "false";
+  button.setAttribute("aria-pressed", open ? "true" : "false");
+  if (button.dataset.state === "idle") {
+    button.title = open ? "Close Codex chat" : "Open Codex chat";
+    button.setAttribute(
+      "aria-label",
+      open ? "Close Codex chat" : "Open Codex chat",
+    );
+  }
+}
+
+export function mountSidebarChatLauncher({
+  doc = globalThis.document,
+  openChatImpl = openChatPanel,
+  closeChatImpl = closeChatPanel,
+  isChatOpenImpl = activeChatPanelIsOpen,
+  notifyImpl = notify,
+  setTimeoutImpl = globalThis.setTimeout,
+  clearTimeoutImpl = globalThis.clearTimeout,
+} = {}) {
+  const existing = doc?.getElementById?.(SIDEBAR_CHAT_LAUNCHER_ID);
+  const placement = findSidebarChatLauncherPlacement(doc);
+  if (!placement) {
+    existing?.roamCodexDispose?.();
+    existing?.remove?.();
+    return null;
+  }
+  if (existing?.parentNode === placement.header) {
+    updateSidebarChatLauncherState(existing, isChatOpenImpl());
+    return existing;
+  }
+  existing?.roamCodexDispose?.();
+  existing?.remove?.();
+
+  const button = panelButton(
+    doc,
+    "bp3-button bp3-minimal roam-codex-sidebar-chat-launcher",
+    "",
+    "Open Codex chat",
+  );
+  button.id = SIDEBAR_CHAT_LAUNCHER_ID;
+  button.dataset.state = "idle";
+  updateSidebarChatLauncherState(button, isChatOpenImpl());
+  const icon = createPanelElement(
+    doc,
+    "span",
+    "roam-codex-sidebar-chat-launcher-icon",
+    "✦",
+  );
+  icon.setAttribute("aria-hidden", "true");
+  button.appendChild(icon);
+
+  let feedbackTimer = null;
+  button.roamCodexDispose = () => {
+    if (feedbackTimer !== null) clearTimeoutImpl(feedbackTimer);
+    feedbackTimer = null;
+  };
+  button.addEventListener("click", async () => {
+    if (["opening", "closing"].includes(button.dataset.state)) return;
+    button.roamCodexDispose();
+    const closing = isChatOpenImpl();
+    button.dataset.state = closing ? "closing" : "opening";
+    button.disabled = true;
+    button.title = closing ? "Closing Codex chat" : "Opening Codex chat";
+    try {
+      await (closing ? closeChatImpl() : openChatImpl());
+      if (!button.isConnected) return;
+      button.dataset.state = "idle";
+      updateSidebarChatLauncherState(button, isChatOpenImpl());
+    } catch (error) {
+      if (!button.isConnected) return;
+      button.dataset.state = "error";
+      button.title = closing
+        ? "Codex chat could not close"
+        : "Codex chat could not open";
+      const action = closing ? "close" : "open";
+      notifyImpl(`Codex chat could not ${action}: ${error.message}`, "danger");
+      feedbackTimer = setTimeoutImpl(() => {
+        feedbackTimer = null;
+        if (!button.isConnected) return;
+        button.dataset.state = "idle";
+        updateSidebarChatLauncherState(button, isChatOpenImpl());
+      }, 1_400);
+    } finally {
+      if (button.isConnected) button.disabled = false;
+    }
+  });
+
+  placement.header.insertBefore(button, placement.nativeToggle);
+  return button;
+}
+
+export function installSidebarChatLauncher({
+  doc = globalThis.document,
+  MutationObserverImpl = doc?.defaultView?.MutationObserver ||
+    globalThis.MutationObserver,
+  requestAnimationFrameImpl = doc?.defaultView?.requestAnimationFrame?.bind(
+    doc.defaultView,
+  ) || ((callback) => globalThis.setTimeout(callback, 0)),
+  cancelAnimationFrameImpl = doc?.defaultView?.cancelAnimationFrame?.bind(
+    doc.defaultView,
+  ) || globalThis.clearTimeout,
+  ...mountOptions
+} = {}) {
+  let disposed = false;
+  let scheduled = null;
+  const sync = () => {
+    scheduled = null;
+    if (disposed) return null;
+    return mountSidebarChatLauncher({ doc, ...mountOptions });
+  };
+  const schedule = () => {
+    if (disposed || scheduled !== null) return;
+    scheduled = requestAnimationFrameImpl(sync);
+  };
+  const observer = typeof MutationObserverImpl === "function"
+    ? new MutationObserverImpl((mutations) => {
+      const sidebar = doc?.getElementById?.("right-sidebar");
+      if (!sidebar || mutations.some((mutation) =>
+        mutation.target === sidebar || sidebar.contains?.(mutation.target)
+      )) {
+        schedule();
+      }
+    })
+    : null;
+  const observationRoot = doc?.body || doc?.documentElement;
+  if (observer && observationRoot) {
+    observer.observe(observationRoot, {
+      attributes: true,
+      attributeFilter: ["class", "style", "hidden"],
+      childList: true,
+      subtree: true,
+    });
+  }
+  sync();
+  return {
+    sync,
+    dispose: () => {
+      if (disposed) return;
+      disposed = true;
+      observer?.disconnect?.();
+      if (scheduled !== null) cancelAnimationFrameImpl(scheduled);
+      scheduled = null;
+      const button = doc?.getElementById?.(SIDEBAR_CHAT_LAUNCHER_ID);
+      button?.roamCodexDispose?.();
+      button?.remove?.();
+    },
+  };
+}
+
+function modelEfforts(model) {
+  return Array.isArray(model?.supportedReasoningEfforts)
+    ? model.supportedReasoningEfforts
+        .map((option) => option?.reasoningEffort)
+        .filter((effort) => typeof effort === "string")
+    : [];
+}
+
+function effortLabel(effort) {
+  const value = String(effort).replaceAll(/[-_]+/g, " ");
+  return value ? value[0].toUpperCase() + value.slice(1) : value;
+}
+
+export function findSidebarBlockWindow(
+  blockUid,
+  { api = getRoamApi() } = {},
+) {
+  const windows = api.ui?.rightSidebar?.getWindows?.() || [];
+  return windows.find(
+    (sidebarWindow) =>
+      sidebarWindow?.type === "block" &&
+      sidebarWindow["block-uid"] === blockUid,
+  ) || null;
+}
+
+async function waitForSidebarBlockWindow(
+  blockUid,
+  api,
+  {
+    attempts = 40,
+    waitImpl = (resolveWait) => setTimeout(resolveWait, 50),
+  } = {},
+) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const sidebarWindow = findSidebarBlockWindow(blockUid, { api });
+    if (sidebarWindow) return sidebarWindow;
+    await new Promise(waitImpl);
+  }
+  throw new Error("Roam did not open the prompt block in the right sidebar.");
+}
+
+export async function openPromptBlockInSidebar(
+  blockUid,
+  {
+    api = getRoamApi(),
+    waitOptions,
+  } = {},
+) {
+  if (!validBlockUid(blockUid)) {
+    throw new Error("Focus an ordinary Roam block before opening Codex chat.");
+  }
+
+  await api.ui.rightSidebar.addWindow({
+    window: { type: "block", "block-uid": blockUid, order: 0 },
+  });
+  const sidebarWindow = await waitForSidebarBlockWindow(
+    blockUid,
+    api,
+    waitOptions,
+  );
+  if (sidebarWindow["collapsed?"]) {
+    await api.ui.rightSidebar.expandWindow({
+      window: { type: "block", "block-uid": blockUid },
+    });
+  }
+  return sidebarWindow;
+}
+
+export function normalizeChatPromptText(value) {
+  return typeof value === "string"
+    ? value.split(CHAT_COMPOSER_PLACEHOLDER).join("").trim()
+    : "";
+}
+
+function snapshotChatPromptOutline(block) {
+  return {
+    uid: block?.[":block/uid"] || null,
+    string: typeof block?.[":block/string"] === "string"
+      ? block[":block/string"]
+      : "",
+    children: (block?.[":block/children"] || []).map(snapshotChatPromptOutline),
+  };
+}
+
+function findChatPromptPath(block, targetUid, path = []) {
+  if (!block || !validBlockUid(targetUid)) return null;
+  const nextPath = [...path, block];
+  if (block[":block/uid"] === targetUid) return nextPath;
+  for (const child of block[":block/children"] || []) {
+    const childPath = findChatPromptPath(child, targetUid, nextPath);
+    if (childPath) return childPath;
+  }
+  return null;
+}
+
+function sameChatPromptOutline(left, right) {
+  if (!left || !right) return false;
+  if (left.uid !== right.uid || left.string !== right.string) return false;
+  if (left.children.length !== right.children.length) return false;
+  return left.children.every(
+    (child, index) => sameChatPromptOutline(child, right.children[index]),
+  );
+}
+
+function outlineContainsProtectedUid(outline, protectedPromptUids) {
+  if (!(protectedPromptUids instanceof Set)) return false;
+  if (protectedPromptUids.has(outline?.uid)) return true;
+  return (outline?.children || []).some(
+    (child) => outlineContainsProtectedUid(child, protectedPromptUids),
+  );
+}
+
+function resetChatPromptSnapshot(
+  prompt,
+  { rootBlockUid = null, scratchPrompt = false } = {},
+) {
+  return scratchPrompt
+    ? {
+      uid: rootBlockUid,
+      text: prompt?.rootOutline?.string,
+      outline: prompt?.rootOutline,
+    }
+    : prompt;
+}
+
+export async function readFocusedPromptBlock(
+  rootBlockUid,
+  { api = getRoamApi() } = {},
+) {
+  const sidebarWindow = findSidebarBlockWindow(rootBlockUid, { api });
+  const focused = api.ui?.getFocusedBlock?.();
+  if (
+    !sidebarWindow?.["window-id"] ||
+    !validBlockUid(focused?.["block-uid"]) ||
+    focused["window-id"] !== sidebarWindow["window-id"]
+  ) {
+    throw new Error("Focus the Roam block you want to send in the Block Outline.");
+  }
+
+  const uid = focused["block-uid"];
+  const pattern = "[:block/uid :block/string {:block/children ...}]";
+  const pull = api.data?.async?.pull
+    ? await api.data.async.pull(pattern, [":block/uid", uid])
+    : api.data?.pull?.(pattern, [":block/uid", uid]);
+  let rootPull = pull;
+  if (uid !== rootBlockUid) {
+    rootPull = api.data?.async?.pull
+      ? await api.data.async.pull(pattern, [":block/uid", rootBlockUid])
+      : api.data?.pull?.(pattern, [":block/uid", rootBlockUid]);
+  }
+  let promptPull = pull;
+  let text = normalizeChatPromptText(promptPull?.[":block/string"]);
+  if (!text && rootPull) {
+    const focusedPath = findChatPromptPath(rootPull, uid) || [];
+    promptPull = focusedPath
+      .slice(0, -1)
+      .reverse()
+      .find((block) => normalizeChatPromptText(block?.[":block/string"])) ||
+      promptPull;
+    text = normalizeChatPromptText(promptPull?.[":block/string"]);
+  }
+  if (!text) {
+    throw new Error("Write a message in this Roam outline before sending.");
+  }
+  return {
+    uid: promptPull[":block/uid"],
+    text,
+    outline: snapshotChatPromptOutline(promptPull),
+    rootOutline: snapshotChatPromptOutline(rootPull),
+  };
+}
+
+async function pullUid(uid, api) {
+  if (api.data?.async?.pull) {
+    return api.data.async.pull("[:block/uid]", [":block/uid", uid]);
+  }
+  return api.data?.pull?.("[:block/uid]", [":block/uid", uid]) || null;
+}
+
+async function ensureDailyNotePage(date, api) {
+  const uid = api.util?.dateToPageUid?.(date);
+  const title = api.util?.dateToPageTitle?.(date);
+  if (!validBlockUid(uid) || typeof title !== "string" || !title) {
+    throw new Error("Roam could not resolve today's Daily Note.");
+  }
+  if (await pullUid(uid, api)) return uid;
+
+  try {
+    await api.data.page.create({ page: { title } });
+  } catch (error) {
+    // Another Roam event may have created today's page between the read and
+    // write. Only suppress that race when the expected page now exists.
+    if (!await pullUid(uid, api)) throw error;
+  }
+  return uid;
+}
+
+export async function resolveChatPromptBlock(
+  blockUid,
+  {
+    api = getRoamApi(),
+    date = new Date(),
+  } = {},
+) {
+  if (blockUid !== undefined && blockUid !== null) {
+    if (!validBlockUid(blockUid)) {
+      throw new Error("Codex chat received an invalid Roam block UID.");
+    }
+    return { uid: blockUid, scratch: false };
+  }
+
+  const focusedBlockUid = api.ui?.getFocusedBlock?.()?.["block-uid"];
+  if (validBlockUid(focusedBlockUid)) {
+    return { uid: focusedBlockUid, scratch: false };
+  }
+
+  let parentUid = await api.ui?.mainWindow?.getOpenPageOrBlockUid?.();
+  if (!validBlockUid(parentUid)) {
+    parentUid = await ensureDailyNotePage(date, api);
+  }
+
+  const uid = api.util?.generateUID?.();
+  if (!validBlockUid(uid)) {
+    throw new Error("Roam could not create a prompt block UID.");
+  }
+  await api.data.block.create({
+    location: { "parent-uid": parentUid, order: "last" },
+    block: { uid, string: CHAT_COMPOSER_PLACEHOLDER },
+  });
+  return { uid, scratch: true, parentUid };
+}
+
+export async function removeScratchPromptBlock(
+  blockUid,
+  { api = getRoamApi() } = {},
+) {
+  if (!validBlockUid(blockUid)) return;
+  if (findSidebarBlockWindow(blockUid, { api })) {
+    await api.ui.rightSidebar.removeWindow({
+      window: { type: "block", "block-uid": blockUid },
+    });
+  }
+  await api.data.block.delete({ block: { uid: blockUid } });
+}
+
+export async function clearScratchPromptBlock(
+  prompt,
+  {
+    api = getRoamApi(),
+    protectedPromptUids = null,
+    rootBlockUid = null,
+    scratchPrompt = false,
+  } = {},
+) {
+  const resetPrompt = resetChatPromptSnapshot(prompt, {
+    rootBlockUid,
+    scratchPrompt,
+  });
+  if (
+    !validBlockUid(resetPrompt?.uid) ||
+    typeof resetPrompt?.text !== "string"
+  ) {
+    return false;
+  }
+  const pattern = "[:block/uid :block/string {:block/children ...}]";
+  const pull = api.data?.async?.pull
+    ? await api.data.async.pull(pattern, [":block/uid", resetPrompt.uid])
+    : api.data?.pull?.(pattern, [":block/uid", resetPrompt.uid]);
+  const currentText = pull?.[":block/string"];
+  if (
+    typeof currentText !== "string" ||
+    normalizeChatPromptText(currentText) !==
+      normalizeChatPromptText(resetPrompt.text)
+  ) {
+    return false;
+  }
+
+  const currentOutline = snapshotChatPromptOutline(pull);
+  if (
+    resetPrompt.outline &&
+    !sameChatPromptOutline(currentOutline, resetPrompt.outline)
+  ) {
+    return false;
+  }
+
+  // Mark the root as the empty composer before removing its submitted
+  // descendants. If a later delete fails, restoration can distinguish this
+  // reset-in-progress state from a user's newer draft.
+  await api.data.block.update({
+    block: { uid: resetPrompt.uid, string: CHAT_COMPOSER_PLACEHOLDER },
+  });
+  for (const child of currentOutline.children) {
+    if (outlineContainsProtectedUid(child, protectedPromptUids)) continue;
+    await api.data.block.delete({ block: { uid: child.uid } });
+  }
+  return true;
+}
+
+function outlineIsOrderedSubset(currentChildren, submittedChildren) {
+  let submittedIndex = 0;
+  for (const currentChild of currentChildren) {
+    while (
+      submittedIndex < submittedChildren.length &&
+      submittedChildren[submittedIndex].uid !== currentChild.uid
+    ) {
+      submittedIndex += 1;
+    }
+    if (
+      submittedIndex >= submittedChildren.length ||
+      !sameChatPromptOutline(
+        currentChild,
+        submittedChildren[submittedIndex],
+      )
+    ) {
+      return false;
+    }
+    submittedIndex += 1;
+  }
+  return true;
+}
+
+async function createChatPromptOutline(outline, parentUid, order, api) {
+  await api.data.block.create({
+    location: { "parent-uid": parentUid, order },
+    block: { uid: outline.uid, string: outline.string },
+  });
+  for (const [childOrder, child] of outline.children.entries()) {
+    await createChatPromptOutline(child, outline.uid, childOrder, api);
+  }
+}
+
+export async function restoreClearedChatPromptBlock(
+  prompt,
+  {
+    api = getRoamApi(),
+    rootBlockUid = null,
+    scratchPrompt = false,
+  } = {},
+) {
+  const resetPrompt = resetChatPromptSnapshot(prompt, {
+    rootBlockUid,
+    scratchPrompt,
+  });
+  if (
+    !validBlockUid(resetPrompt?.uid) ||
+    !resetPrompt?.outline ||
+    resetPrompt.outline.uid !== resetPrompt.uid
+  ) {
+    return false;
+  }
+
+  const pattern = "[:block/uid :block/string {:block/children ...}]";
+  const pull = api.data?.async?.pull
+    ? await api.data.async.pull(pattern, [":block/uid", resetPrompt.uid])
+    : api.data?.pull?.(pattern, [":block/uid", resetPrompt.uid]);
+  if (
+    !pull ||
+    normalizeChatPromptText(pull[":block/string"]) ||
+    pull[":block/uid"] !== resetPrompt.uid
+  ) {
+    return false;
+  }
+
+  const currentOutline = snapshotChatPromptOutline(pull);
+  if (!outlineIsOrderedSubset(
+    currentOutline.children,
+    resetPrompt.outline.children,
+  )) {
+    return false;
+  }
+
+  const currentChildUids = new Set(
+    currentOutline.children.map((child) => child.uid),
+  );
+  for (const [order, child] of resetPrompt.outline.children.entries()) {
+    if (currentChildUids.has(child.uid)) continue;
+    await createChatPromptOutline(child, resetPrompt.uid, order, api);
+  }
+  await api.data.block.update({
+    block: {
+      uid: resetPrompt.uid,
+      string: resetPrompt.outline.string,
+    },
+  });
+  return true;
+}
+
+export async function removeResetChatPromptBlocks(
+  blockUids,
+  { api = getRoamApi() } = {},
+) {
+  const removed = [];
+  if (!(blockUids instanceof Set)) return removed;
+
+  for (const uid of blockUids) {
+    if (!validBlockUid(uid)) continue;
+    const pull = api.data?.async?.pull
+      ? await api.data.async.pull(
+        "[:block/uid :block/string]",
+        [":block/uid", uid],
+      )
+      : api.data?.pull?.(
+        "[:block/uid :block/string]",
+        [":block/uid", uid],
+      );
+    if (pull?.[":block/string"] !== CHAT_COMPOSER_PLACEHOLDER) continue;
+    await api.data.block.delete({ block: { uid } });
+    removed.push(uid);
+  }
+  return removed;
+}
+
+function collectOutlineUids(block, uids) {
+  const uid = block?.[":block/uid"];
+  if (validBlockUid(uid)) uids.add(uid);
+  for (const child of block?.[":block/children"] || []) {
+    collectOutlineUids(child, uids);
+  }
+}
+
+export async function readPromptOutlineUids(
+  rootBlockUid,
+  { api = getRoamApi() } = {},
+) {
+  if (!validBlockUid(rootBlockUid)) return new Set();
+  const pattern = "[:block/uid {:block/children ...}]";
+  const outline = api.data?.async?.pull
+    ? await api.data.async.pull(pattern, [":block/uid", rootBlockUid])
+    : api.data?.pull?.(pattern, [":block/uid", rootBlockUid]);
+  const uids = new Set();
+  collectOutlineUids(outline, uids);
+  return uids;
+}
+
+export function shouldClearChatPrompt(
+  promptUid,
+  { scratchPrompt = false, protectedPromptUids = null } = {},
+) {
+  return scratchPrompt ||
+    (protectedPromptUids instanceof Set &&
+      !protectedPromptUids.has(promptUid));
+}
+
+export function createChatPanel({
+  doc = globalThis.document,
+  storage = window.localStorage,
+  api = getRoamApi(),
+  rootBlockUid,
+  requestChatImpl = requestPanelChat,
+  requestModelsImpl = requestPanelModels,
+  requestMessagesImpl = requestPanelMessages,
+  requestHistoryImpl = requestPanelThreadSummaries,
+  copyTextImpl = copyRoamText,
+  setTimeoutImpl = globalThis.setTimeout,
+  clearTimeoutImpl = globalThis.clearTimeout,
+  setIntervalImpl = globalThis.setInterval?.bind(globalThis),
+  clearIntervalImpl = globalThis.clearInterval?.bind(globalThis),
+  navigatorImpl = globalThis.navigator,
+  readPromptImpl = () => readFocusedPromptBlock(rootBlockUid, { api }),
+  clearScratchPromptImpl = (prompt) =>
+    clearScratchPromptBlock(prompt, {
+      api,
+      protectedPromptUids,
+      rootBlockUid,
+      scratchPrompt,
+    }),
+  restorePromptImpl = (prompt) =>
+    restoreClearedChatPromptBlock(prompt, {
+      api,
+      rootBlockUid,
+      scratchPrompt,
+    }),
+  cancelRequest = requestRunCancellation,
+  protectedPromptUids = null,
+  scratchPrompt = false,
+  now = Date.now,
+  onClose = () => {},
+} = {}) {
+  if (!doc?.createElement) {
+    throw new Error("A document is required to create the Codex chat panel.");
+  }
+  if (!validBlockUid(rootBlockUid)) {
+    throw new Error("The Codex chat panel requires a Roam block.");
+  }
+
+  let state = readChatState({ storage });
+  let messages = [];
+  let models = [];
+  let modelsReady = false;
+  let runId = null;
+  let running = false;
+  let runStartedAt = 0;
+  let elapsedIntervalId = null;
+  let closed = false;
+  let idlePromise = Promise.resolve();
+  let resolveIdle = null;
+  let closePromise = null;
+  const resetPromptUids = new Set();
+  const threadSummaries = new Map();
+  let historyOpen = false;
+  let historyLoadVersion = 0;
+  let selectionLoadVersion = 0;
+  let historyError = "";
+  let modelChanged = !state.activeThreadId && Boolean(
+    state.newConversationPreferences.model,
+  );
+  let effortChanged = !state.activeThreadId && Boolean(
+    state.newConversationPreferences.effort,
+  );
+  let messageRenderVersion = 0;
+  const renderedMessageNodes = new Set();
+  const copyFeedbackTimers = new Map();
+
+  const panel = createPanelElement(doc, "section", CHAT_PANEL_CLASS);
+  panel.id = CHAT_PANEL_ID;
+  panel.setAttribute("aria-label", "Codex chat");
+
+  const header = createPanelElement(doc, "header", "roam-codex-chat-header");
+  const heading = createPanelElement(doc, "div", "roam-codex-chat-heading");
+  heading.appendChild(
+    createPanelElement(doc, "strong", "roam-codex-chat-title", "Codex chat"),
+  );
+  const conversationButton = panelButton(
+    doc,
+    "roam-codex-chat-conversation",
+    "New chat",
+    "Open conversation history",
+  );
+  conversationButton.setAttribute("aria-haspopup", "menu");
+  conversationButton.setAttribute("aria-expanded", "false");
+  heading.appendChild(conversationButton);
+  header.appendChild(heading);
+  const historyPopover = createPanelElement(
+    doc,
+    "div",
+    "roam-codex-chat-history",
+  );
+  historyPopover.setAttribute("role", "menu");
+  historyPopover.setAttribute("aria-label", "Conversation history");
+  historyPopover.hidden = true;
+  header.appendChild(historyPopover);
+  const closeButton = panelButton(
+    doc,
+    "roam-codex-chat-close",
+    "✕",
+    "Close Codex chat",
+  );
+  closeButton.setAttribute("aria-label", "Close Codex chat");
+  header.appendChild(closeButton);
+  panel.appendChild(header);
+
+  const body = createPanelElement(doc, "div", "roam-codex-chat-body");
+
+  const transcript = createPanelElement(doc, "div", "roam-codex-chat-transcript");
+  transcript.setAttribute("role", "log");
+  transcript.setAttribute("aria-live", "polite");
+  body.appendChild(transcript);
+
+  const transcriptHandle = createPanelElement(
+    doc,
+    "div",
+    "roam-codex-chat-resize",
+  );
+  transcriptHandle.setAttribute("role", "separator");
+  transcriptHandle.setAttribute("aria-orientation", "horizontal");
+  transcriptHandle.setAttribute("aria-label", "Resize the conversation area");
+  transcriptHandle.hidden = true;
+  body.appendChild(transcriptHandle);
+
+  const progress = createPanelElement(doc, "div", "roam-codex-chat-progress");
+  progress.setAttribute("aria-live", "polite");
+  const progressMeta = createPanelElement(
+    doc,
+    "span",
+    "roam-codex-chat-progress-meta",
+  );
+  progressMeta.hidden = true;
+  const progressTimer = createPanelElement(
+    doc,
+    "span",
+    "roam-codex-chat-progress-timer",
+  );
+  progressMeta.appendChild(progressTimer);
+  progress.appendChild(progressMeta);
+  const progressText = createPanelElement(
+    doc,
+    "span",
+    "roam-codex-chat-progress-text",
+  );
+  progress.appendChild(progressText);
+  body.appendChild(progress);
+
+  const clampTranscriptHeight = (value) => Math.min(
+    CHAT_TRANSCRIPT_MAX_HEIGHT,
+    Math.max(CHAT_TRANSCRIPT_MIN_HEIGHT, Math.round(value)),
+  );
+  const setElementStyle = (element, property, value) => {
+    if (element.style) element.style[property] = value;
+  };
+  const readStoredTranscriptHeight = () => {
+    let value;
+    try {
+      value = Number.parseInt(storage.getItem(CHAT_TRANSCRIPT_HEIGHT_KEY), 10);
+    } catch {
+      return null;
+    }
+    return Number.isFinite(value) ? clampTranscriptHeight(value) : null;
+  };
+  const applyTranscriptHeight = (height) => {
+    setElementStyle(transcript, "height", `${height}px`);
+    setElementStyle(transcript, "maxHeight", `${height}px`);
+  };
+  let transcriptHeight = readStoredTranscriptHeight();
+  if (transcriptHeight !== null) applyTranscriptHeight(transcriptHeight);
+
+  let transcriptResize = null;
+  const handleTranscriptResizeMove = (event) => {
+    if (!transcriptResize || !Number.isFinite(event?.clientY)) return;
+    transcriptHeight = clampTranscriptHeight(
+      transcriptResize.startHeight + (event.clientY - transcriptResize.startY),
+    );
+    applyTranscriptHeight(transcriptHeight);
+    event.preventDefault?.();
+  };
+  const stopTranscriptResize = () => {
+    if (!transcriptResize) return;
+    transcriptResize = null;
+    doc.removeEventListener?.("pointermove", handleTranscriptResizeMove, true);
+    doc.removeEventListener?.("pointerup", stopTranscriptResize, true);
+    if (transcriptHeight === null) return;
+    try {
+      storage.setItem(CHAT_TRANSCRIPT_HEIGHT_KEY, String(transcriptHeight));
+    } catch {
+      // A device that cannot persist the height still keeps this session's.
+    }
+  };
+  transcriptHandle.addEventListener("pointerdown", (event) => {
+    if (!Number.isFinite(event?.clientY)) return;
+    const measured = transcript.getBoundingClientRect?.()?.height;
+    transcriptResize = {
+      startY: event.clientY,
+      startHeight: Number.isFinite(measured) && measured > 0
+        ? measured
+        : transcriptHeight ?? 300,
+    };
+    doc.addEventListener?.("pointermove", handleTranscriptResizeMove, true);
+    doc.addEventListener?.("pointerup", stopTranscriptResize, true);
+    event.preventDefault?.();
+  });
+
+  const modelRow = createPanelElement(doc, "div", "roam-codex-chat-model-row");
+  const modelSelect = createPanelElement(doc, "select", "roam-codex-chat-select");
+  modelSelect.setAttribute("aria-label", "Codex model");
+  modelSelect.disabled = true;
+  const loadingModel = createPanelElement(doc, "option", "", "Loading models…");
+  loadingModel.value = "";
+  modelSelect.appendChild(loadingModel);
+  modelRow.appendChild(modelSelect);
+
+  const effortSelect = createPanelElement(doc, "select", "roam-codex-chat-select");
+  effortSelect.setAttribute("aria-label", "Reasoning effort");
+  effortSelect.disabled = true;
+  const loadingEffort = createPanelElement(doc, "option", "", "Loading efforts…");
+  loadingEffort.value = "";
+  effortSelect.appendChild(loadingEffort);
+  modelRow.appendChild(effortSelect);
+  const actions = createPanelElement(doc, "div", "roam-codex-chat-actions");
+  const stopButton = panelButton(
+    doc,
+    "roam-codex-chat-stop",
+    "Stop",
+    "Stop the current Codex turn",
+  );
+  stopButton.hidden = true;
+  actions.appendChild(stopButton);
+  const sendShortcutIsMac = /Mac|iP(?:hone|ad|od)/i.test(
+    navigatorImpl?.platform || navigatorImpl?.userAgent || "",
+  );
+  const sendButton = panelButton(
+    doc,
+    "roam-codex-chat-send",
+    "Send",
+    `Send the focused block in this chat's Block Outline (${
+      sendShortcutIsMac ? "Option" : "Alt"
+    }+Enter, rebindable in Settings → Hotkeys)`,
+  );
+  const sendShortcut = createPanelElement(
+    doc,
+    "kbd",
+    "roam-codex-chat-send-kbd",
+    sendShortcutIsMac ? "⌥⏎" : "Alt ⏎",
+  );
+  sendShortcut.setAttribute("aria-hidden", "true");
+  sendButton.appendChild(sendShortcut);
+  actions.appendChild(sendButton);
+  modelRow.appendChild(actions);
+  panel.appendChild(body);
+
+  const controls = createPanelElement(
+    doc,
+    "footer",
+    "roam-codex-chat-controls",
+  );
+  controls.id = CHAT_CONTROLS_ID;
+  controls.appendChild(modelRow);
+
+  const persist = () => writeChatState(state, { storage });
+  const currentRecord = () => state.activeThreadId
+    ? state.conversations[state.activeThreadId]
+    : null;
+  const currentPreferences = () =>
+    currentRecord() || state.newConversationPreferences;
+
+  const savePreferences = () => {
+    const model = modelSelect.value || null;
+    const effort = effortSelect.value || null;
+    const record = currentRecord();
+    if (record) {
+      record.model = model;
+      record.effort = effort;
+      record.updatedAt = now();
+    } else {
+      state.newConversationPreferences = { model, effort };
+    }
+    persist();
+  };
+
+  const rememberThread = (threadId) => {
+    if (!validThreadId(threadId)) return;
+    const timestamp = now();
+    const previous = state.conversations[threadId];
+    state.conversations[threadId] = {
+      threadId,
+      createdAt: previous?.createdAt || timestamp,
+      updatedAt: timestamp,
+      model: modelSelect.value || previous?.model || null,
+      effort: effortSelect.value || previous?.effort || null,
+      threadPageUid: previous?.threadPageUid || null,
+    };
+    state.activeThreadId = threadId;
+    state.newConversationPreferences = { model: null, effort: null };
+    persist();
+  };
+
+  const disposeRenderedMessages = () => {
+    messageRenderVersion += 1;
+    for (const element of renderedMessageNodes) {
+      void unmountRoamMarkdown(element, { api });
+    }
+    renderedMessageNodes.clear();
+  };
+
+  const renderMessages = () => {
+    disposeRenderedMessages();
+    const renderVersion = messageRenderVersion;
+    transcript.replaceChildren();
+    transcript.hidden = !messages.length;
+    transcriptHandle.hidden = !messages.length;
+    if (!messages.length) {
+      return;
+    }
+
+    for (const message of messages) {
+      if (!message || !["user", "assistant"].includes(message.role)) continue;
+      const article = createPanelElement(
+        doc,
+        "article",
+        `roam-codex-chat-message roam-codex-chat-message-${message.role}`,
+      );
+      const roleLabel = message.role === "user" ? "You" : "Codex";
+      const copyButton = panelButton(
+        doc,
+        "roam-codex-chat-copy",
+        "",
+        "Copy Roam text",
+      );
+      copyButton.setAttribute(
+        "aria-label",
+        `Copy ${roleLabel} message as Roam text`,
+      );
+      copyButton.dataset.state = "idle";
+      copyButton.addEventListener("click", async (event) => {
+        event?.preventDefault?.();
+        event?.stopPropagation?.();
+        const previousTimer = copyFeedbackTimers.get(copyButton);
+        if (previousTimer !== undefined) clearTimeoutImpl(previousTimer);
+        copyFeedbackTimers.delete(copyButton);
+        copyButton.dataset.state = "copying";
+        try {
+          await copyTextImpl(message.text);
+          if (closed) return;
+          copyButton.dataset.state = "copied";
+          copyButton.title = "Copied";
+          copyButton.setAttribute("aria-label", "Copied Roam text");
+        } catch {
+          if (closed) return;
+          copyButton.dataset.state = "error";
+          copyButton.title = "Could not copy Roam text";
+          copyButton.setAttribute("aria-label", "Could not copy Roam text");
+        }
+        const timer = setTimeoutImpl(() => {
+          copyFeedbackTimers.delete(copyButton);
+          if (closed) return;
+          copyButton.dataset.state = "idle";
+          copyButton.title = "Copy Roam text";
+          copyButton.setAttribute(
+            "aria-label",
+            `Copy ${roleLabel} message as Roam text`,
+          );
+        }, 1_400);
+        copyFeedbackTimers.set(copyButton, timer);
+      });
+      article.appendChild(copyButton);
+      const messageText = createPanelElement(
+        doc,
+        "div",
+        "roam-codex-chat-message-text",
+      );
+      renderedMessageNodes.add(messageText);
+      void renderRoamMarkdown(messageText, message.text, { api })
+        .then((rendered) => {
+          if (
+            rendered &&
+            (closed || renderVersion !== messageRenderVersion ||
+              !renderedMessageNodes.has(messageText))
+          ) {
+            void unmountRoamMarkdown(messageText, { api });
+          }
+        });
+      article.appendChild(messageText);
+      transcript.appendChild(article);
+    }
+    transcript.scrollTop = transcript.scrollHeight;
+  };
+
+  const setProgress = (text = "", kind = "") => {
+    progressText.textContent = singleLine(text);
+    progress.dataset.kind = kind;
+    progress.hidden = !progressText.textContent && progressMeta.hidden;
+  };
+
+  const renderEfforts = () => {
+    const preferred = currentPreferences().effort || "";
+    const selectedModel = models.find((model) => model.id === modelSelect.value) ||
+      models.find((model) => model.isDefault) ||
+      models[0];
+    const efforts = modelEfforts(selectedModel);
+    const defaultEffort = efforts.includes(selectedModel?.defaultReasoningEffort)
+      ? selectedModel.defaultReasoningEffort
+      : null;
+    effortSelect.replaceChildren();
+    if (!efforts.length) {
+      const unavailable = createPanelElement(
+        doc,
+        "option",
+        "",
+        "No effort choices",
+      );
+      unavailable.value = "";
+      effortSelect.appendChild(unavailable);
+      effortSelect.value = "";
+      effortSelect.disabled = true;
+      return;
+    }
+    for (const effort of efforts) {
+      const label = effort === defaultEffort
+        ? `${effortLabel(effort)} (Default)`
+        : effortLabel(effort);
+      const option = createPanelElement(doc, "option", "", label);
+      option.value = effort;
+      effortSelect.appendChild(option);
+    }
+    effortSelect.value = efforts.includes(preferred)
+      ? preferred
+      : defaultEffort || efforts[0];
+    effortSelect.disabled = false;
+  };
+
+  const renderModels = () => {
+    const preferred = currentPreferences().model || "";
+    modelSelect.replaceChildren();
+    for (const model of models) {
+      if (!model || typeof model.id !== "string") continue;
+      const displayName = model.displayName || model.id;
+      const option = createPanelElement(
+        doc,
+        "option",
+        "",
+        model.isDefault ? `${displayName} (Default)` : displayName,
+      );
+      option.value = model.id;
+      modelSelect.appendChild(option);
+    }
+    const defaultModel = models.find((model) => model.isDefault) || models[0];
+    modelSelect.value = models.some((model) => model.id === preferred)
+      ? preferred
+      : defaultModel?.id || "";
+    modelSelect.disabled = !models.length;
+    renderEfforts();
+  };
+
+  const historyItems = () => buildConversationHistory(
+    state,
+    [...threadSummaries.values()],
+  );
+
+  const renderConversationButton = () => {
+    const active = historyItems().find((item) => item.active);
+    const label = state.activeThreadId && active ? active.title : "New chat";
+    conversationButton.textContent = label;
+    conversationButton.title = state.activeThreadId
+      ? `Current conversation: ${label}`
+      : "Start a new conversation or open history";
+    conversationButton.setAttribute("aria-expanded", String(historyOpen));
+  };
+
+  const closeHistory = ({ restoreFocus = false } = {}) => {
+    historyOpen = false;
+    historyPopover.hidden = true;
+    conversationButton.setAttribute("aria-expanded", "false");
+    if (restoreFocus) conversationButton.focus?.();
+  };
+
+  const beginNewConversation = () => {
+    if (running) return;
+    const preferences = currentPreferences();
+    const model = modelSelect.value || preferences.model || null;
+    const effort = effortSelect.value || preferences.effort || null;
+    selectionLoadVersion += 1;
+    state.activeThreadId = null;
+    state.newConversationPreferences = { model, effort };
+    messages = [];
+    modelChanged = Boolean(model);
+    effortChanged = Boolean(effort);
+    persist();
+    renderMessages();
+    if (modelsReady) renderModels();
+    renderConversationButton();
+    closeHistory();
+    setProgress();
+  };
+
+  const markMissingConversation = (threadId) => {
+    const missingRecord = state.conversations[threadId];
+    delete state.conversations[threadId];
+    threadSummaries.delete(threadId);
+    if (state.activeThreadId === threadId) {
+      selectionLoadVersion += 1;
+      state.activeThreadId = null;
+      state.newConversationPreferences = {
+        model: modelSelect.value || missingRecord?.model || null,
+        effort: effortSelect.value || missingRecord?.effort || null,
+      };
+      messages = [];
+      modelChanged = Boolean(state.newConversationPreferences.model);
+      effortChanged = Boolean(state.newConversationPreferences.effort);
+      renderMessages();
+      if (modelsReady) renderModels();
+      setProgress(
+        "The saved conversation is no longer available. A new one will start.",
+        "error",
+      );
+    }
+    persist();
+  };
+
+  const selectConversation = async (threadId, { reload = false } = {}) => {
+    if (running || !state.conversations[threadId]) return;
+    if (state.activeThreadId === threadId && !reload) {
+      closeHistory();
+      return;
+    }
+    const loadVersion = ++selectionLoadVersion;
+    state.activeThreadId = threadId;
+    messages = [];
+    modelChanged = false;
+    effortChanged = false;
+    persist();
+    renderMessages();
+    if (modelsReady) renderModels();
+    renderConversationButton();
+    closeHistory();
+    setProgress("Loading conversation", "activity");
+
+    try {
+      const loadedMessages = await requestMessagesImpl(threadId);
+      if (
+        closed ||
+        loadVersion !== selectionLoadVersion ||
+        state.activeThreadId !== threadId
+      ) {
+        return;
+      }
+      messages = loadedMessages.filter(
+        (message) =>
+          ["user", "assistant"].includes(message?.role) &&
+          typeof message.text === "string",
+      );
+      renderMessages();
+      setProgress();
+    } catch (error) {
+      if (
+        closed ||
+        loadVersion !== selectionLoadVersion ||
+        state.activeThreadId !== threadId
+      ) {
+        return;
+      }
+      if (error.status === 404) {
+        markMissingConversation(threadId);
+        renderConversationButton();
+        return;
+      }
+      setProgress(error.message || "Could not load that conversation.", "error");
+    }
+  };
+
+  const renderHistory = () => {
+    historyPopover.replaceChildren();
+    const newButton = panelButton(
+      doc,
+      "roam-codex-chat-history-item roam-codex-chat-history-new",
+      "+ New chat",
+      "Start a new conversation",
+    );
+    newButton.setAttribute("role", "menuitem");
+    newButton.disabled = running;
+    if (!state.activeThreadId) {
+      newButton.className += " is-active";
+      newButton.setAttribute("aria-current", "true");
+    }
+    newButton.addEventListener("click", beginNewConversation);
+    historyPopover.appendChild(newButton);
+
+    const items = historyItems();
+    if (!items.length) {
+      historyPopover.appendChild(createPanelElement(
+        doc,
+        "div",
+        "roam-codex-chat-history-empty",
+        historyError || "No previous chats yet.",
+      ));
+      return;
+    }
+
+    for (const item of items) {
+      const button = panelButton(
+        doc,
+        "roam-codex-chat-history-item",
+        "",
+        `Resume ${item.title}`,
+      );
+      button.setAttribute("role", "menuitem");
+      button.dataset.threadId = item.threadId;
+      button.disabled = running;
+      if (item.active) {
+        button.className += " is-active";
+        button.setAttribute("aria-current", "true");
+      }
+      button.appendChild(createPanelElement(
+        doc,
+        "span",
+        "roam-codex-chat-history-title",
+        item.title,
+      ));
+      button.appendChild(createPanelElement(
+        doc,
+        "span",
+        "roam-codex-chat-history-date",
+        conversationDateLabel(item.updatedAt),
+      ));
+      button.addEventListener("click", () => void selectConversation(item.threadId));
+      historyPopover.appendChild(button);
+    }
+    if (historyError) {
+      historyPopover.appendChild(createPanelElement(
+        doc,
+        "div",
+        "roam-codex-chat-history-error",
+        historyError,
+      ));
+    }
+  };
+
+  const loadHistory = async () => {
+    const loadVersion = ++historyLoadVersion;
+    historyError = "";
+    const threadIds = historyItems().map((item) => item.threadId);
+    if (!threadIds.length) {
+      renderConversationButton();
+      if (historyOpen) renderHistory();
+      return;
+    }
+
+    try {
+      const batches = [];
+      for (let index = 0; index < threadIds.length; index += 100) {
+        batches.push(requestHistoryImpl(threadIds.slice(index, index + 100)));
+      }
+      const results = await Promise.all(batches);
+      if (closed || loadVersion !== historyLoadVersion) return;
+      for (const result of results) {
+        for (const summary of result.threads || []) {
+          if (
+            validThreadId(summary?.id) &&
+            state.conversations[summary.id]
+          ) {
+            threadSummaries.set(summary.id, summary);
+          }
+        }
+        for (const threadId of result.missingThreadIds || []) {
+          if (state.conversations[threadId]) markMissingConversation(threadId);
+        }
+      }
+    } catch (error) {
+      if (closed || loadVersion !== historyLoadVersion) return;
+      historyError = error.message || "Conversation history is unavailable.";
+    }
+    renderConversationButton();
+    if (historyOpen) renderHistory();
+  };
+
+  const setRunning = (value) => {
+    if (value && !running) {
+      idlePromise = new Promise((resolve) => {
+        resolveIdle = resolve;
+      });
+      runStartedAt = now();
+      progressTimer.textContent = formatRunningElapsed(0);
+      progressMeta.hidden = false;
+      if (setIntervalImpl && clearIntervalImpl && elapsedIntervalId === null) {
+        elapsedIntervalId = setIntervalImpl(() => {
+          progressTimer.textContent = formatRunningElapsed(now() - runStartedAt);
+        }, 1000);
+      }
+    } else if (!value && running) {
+      resolveIdle?.();
+      resolveIdle = null;
+    }
+    if (!value) {
+      progressMeta.hidden = true;
+      if (clearIntervalImpl && elapsedIntervalId !== null) {
+        clearIntervalImpl(elapsedIntervalId);
+      }
+      elapsedIntervalId = null;
+    }
+    progress.hidden = !progressText.textContent && progressMeta.hidden;
+    running = value;
+    modelSelect.disabled = value || !models.length;
+    effortSelect.disabled = value || !models.length;
+    sendButton.disabled = value || !modelsReady;
+    sendButton.hidden = value;
+    conversationButton.disabled = value;
+    stopButton.hidden = !value;
+    stopButton.disabled = false;
+    if (historyOpen) renderHistory();
+  };
+
+  const send = async () => {
+    if (running) return null;
+    setRunning(true);
+    let prompt;
+    try {
+      prompt = await readPromptImpl();
+    } catch (error) {
+      setProgress(error.message || "Focus a Roam block before sending.", "error");
+      setRunning(false);
+      return null;
+    }
+    const startingNewConversation = !state.activeThreadId;
+    const catalogDefaultModel = models.find((model) => model.isDefault) ||
+      models[0];
+    const modelOverride = modelChanged
+      ? modelSelect.value || catalogDefaultModel?.id || null
+      : null;
+    const effortOverride = effortChanged ? effortSelect.value || null : null;
+
+    const shouldClearPrompt = shouldClearChatPrompt(prompt.uid, {
+      scratchPrompt,
+      protectedPromptUids,
+    });
+    const resetBlockUid = scratchPrompt ? rootBlockUid : prompt.uid;
+    let composerCleared = false;
+    if (shouldClearPrompt) {
+      try {
+        composerCleared = await clearScratchPromptImpl(prompt);
+      } catch (error) {
+        try {
+          await restorePromptImpl(prompt);
+        } catch {
+          // The original reset error is more useful than a secondary recovery
+          // error. The composer remains visible for manual recovery.
+        }
+        setProgress(
+          error.message || "The composer could not be cleared safely.",
+          "error",
+        );
+        setRunning(false);
+        return null;
+      }
+      if (!composerCleared) {
+        setProgress(
+          "The composer changed before it could be sent. Review it and try again.",
+          "error",
+        );
+        setRunning(false);
+        return null;
+      }
+      resetPromptUids.add(resetBlockUid);
+      try {
+        const sidebarWindow = findSidebarBlockWindow(rootBlockUid, { api });
+        if (sidebarWindow?.["window-id"]) {
+          await api.ui.setBlockFocusAndSelection({
+            location: {
+              "block-uid": resetBlockUid,
+              "window-id": sidebarWindow["window-id"],
+            },
+          });
+        }
+      } catch {
+        // The outline has already reset successfully. A focus failure should
+        // not turn a valid send into a failed one.
+      }
+    }
+
+    messages.push({ role: "user", text: prompt.text });
+    renderMessages();
+    runId = null;
+    setProgress("Starting", "activity");
+
+    try {
+      const result = await requestChatImpl(prompt.text, {
+        promptBlockUid: prompt.uid,
+        threadId: state.activeThreadId,
+        model: modelOverride,
+        effort: effortOverride,
+        onStarted: ({ runId: startedRunId }) => {
+          runId = startedRunId;
+        },
+        onThread: ({ threadId }) => {
+          rememberThread(threadId);
+          modelChanged = false;
+          effortChanged = false;
+        },
+        onProgress: ({ kind, text: progressText }) => {
+          setProgress(progressText, kind);
+        },
+      });
+
+      rememberThread(result.threadId);
+      if (typeof result.reply !== "string" || !result.reply.trim()) {
+        throw new Error("Codex completed without a reply.");
+      }
+      messages.push({ role: "assistant", text: result.reply.trim() });
+      renderMessages();
+      const existingSummary = threadSummaries.get(result.threadId) || {};
+      threadSummaries.set(result.threadId, {
+        ...existingSummary,
+        id: result.threadId,
+        name: existingSummary.name || null,
+        preview: startingNewConversation
+          ? prompt.text
+          : existingSummary.preview || "",
+        createdAt: existingSummary.createdAt || now(),
+        updatedAt: now(),
+      });
+      renderConversationButton();
+      if (historyOpen) renderHistory();
+      void loadHistory();
+      setProgress("", "");
+      return result;
+    } catch (error) {
+      let restored = false;
+      let restoreFailed = false;
+      if (composerCleared) {
+        try {
+          restored = await restorePromptImpl(prompt);
+          if (restored) {
+            const sidebarWindow = findSidebarBlockWindow(rootBlockUid, { api });
+            if (sidebarWindow?.["window-id"]) {
+              await api.ui.setBlockFocusAndSelection({
+                location: {
+                  "block-uid": prompt.uid,
+                  "window-id": sidebarWindow["window-id"],
+                },
+              });
+            }
+          }
+        } catch {
+          restoreFailed = true;
+        }
+      }
+      if (error.code === "TURN_INTERRUPTED") {
+        setProgress(
+          restoreFailed
+            ? "Stopped · submitted outline could not be restored"
+            : restored
+              ? "Stopped · draft restored"
+              : composerCleared
+                ? "Stopped · current draft preserved"
+                : "Stopped",
+          restoreFailed ? "error" : "stopped",
+        );
+        return null;
+      }
+      const failureText = error.message || "Codex could not finish.";
+      setProgress(
+        restoreFailed
+          ? `${failureText} The submitted outline could not be restored.`
+          : restored
+            ? `${failureText} · Draft restored.`
+            : composerCleared
+              ? `${failureText} · The current draft was preserved.`
+              : failureText,
+        "error",
+      );
+      return null;
+    } finally {
+      runId = null;
+      setRunning(false);
+    }
+  };
+
+  const handleSendShortcut = (event) => {
+    if (!event.defaultPrevented && event.key === "Escape" && historyOpen) {
+      event.preventDefault();
+      event.stopPropagation?.();
+      closeHistory({ restoreFocus: true });
+      return;
+    }
+    if (
+      !event.defaultPrevented &&
+      event.altKey &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      event.key === "Enter"
+    ) {
+      const focused = api.ui?.getFocusedBlock?.();
+      const sidebarWindow = findSidebarBlockWindow(rootBlockUid, { api });
+      if (
+        focused?.["window-id"] &&
+        focused["window-id"] === sidebarWindow?.["window-id"]
+      ) {
+        event.preventDefault();
+        event.stopPropagation?.();
+        void send();
+      }
+    }
+  };
+
+  const handleDocumentClick = (event) => {
+    if (!historyOpen) return;
+    if (header.contains?.(event.target)) return;
+    closeHistory();
+  };
+
+  const close = () => {
+    if (closed) return closePromise || Promise.resolve();
+    closed = true;
+    stopTranscriptResize();
+    if (clearIntervalImpl && elapsedIntervalId !== null) {
+      clearIntervalImpl(elapsedIntervalId);
+    }
+    elapsedIntervalId = null;
+    doc.removeEventListener?.("keydown", handleSendShortcut, true);
+    doc.removeEventListener?.("click", handleDocumentClick, true);
+    for (const timer of copyFeedbackTimers.values()) clearTimeoutImpl(timer);
+    copyFeedbackTimers.clear();
+    disposeRenderedMessages();
+    panel.remove();
+    controls.remove();
+    closePromise = Promise.resolve(onClose({
+      whenIdle: () => idlePromise,
+      resetPromptUids,
+    }));
+    return closePromise;
+  };
+
+  sendButton.addEventListener("click", () => void send());
+  closeButton.addEventListener("click", () => {
+    const removeWindow = api.ui?.rightSidebar?.removeWindow;
+    const removal = typeof removeWindow === "function"
+      ? Promise.resolve(removeWindow({
+        window: { type: "block", "block-uid": rootBlockUid },
+      })).catch(() => {})
+      : Promise.resolve();
+    void removal.then(() => close());
+  });
+  conversationButton.addEventListener("click", () => {
+    if (running) return;
+    if (historyOpen) {
+      closeHistory();
+      return;
+    }
+    historyOpen = true;
+    historyPopover.hidden = false;
+    renderConversationButton();
+    renderHistory();
+    void loadHistory();
+  });
+  doc.addEventListener?.("keydown", handleSendShortcut, true);
+  doc.addEventListener?.("click", handleDocumentClick, true);
+  modelSelect.addEventListener("change", () => {
+    modelChanged = true;
+    effortChanged = true;
+    renderEfforts();
+    savePreferences();
+  });
+  effortSelect.addEventListener("change", () => {
+    effortChanged = true;
+    savePreferences();
+  });
+  stopButton.addEventListener("click", () => {
+    if (!runId) return;
+    stopButton.disabled = true;
+    setProgress("Stopping", "activity");
+    void cancelRequest(runId).catch((error) => {
+      stopButton.disabled = false;
+      setProgress(error.message || "Could not stop the turn.", "error");
+    });
+  });
+
+  renderMessages();
+  setProgress();
+  renderConversationButton();
+  setRunning(false);
+
+  void requestModelsImpl()
+    .then((availableModels) => {
+      if (closed) return;
+      models = Array.isArray(availableModels) ? availableModels : [];
+      modelsReady = true;
+      renderModels();
+      setRunning(false);
+    })
+    .catch((error) => {
+      if (closed) return;
+      modelSelect.replaceChildren();
+      const unavailable = createPanelElement(
+        doc,
+        "option",
+        "",
+        "Models unavailable",
+      );
+      unavailable.value = "";
+      modelSelect.appendChild(unavailable);
+      setProgress(error.message, "error");
+    });
+
+  void loadHistory();
+  if (state.activeThreadId) {
+    void selectConversation(state.activeThreadId, { reload: true });
+  }
+
+  return {
+    element: panel,
+    controlsElement: controls,
+    rootBlockUid,
+    close,
+    focus: () => {
+      const sidebarWindow = findSidebarBlockWindow(rootBlockUid, { api });
+      if (!sidebarWindow?.["window-id"]) return Promise.resolve();
+      return api.ui.setBlockFocusAndSelection({
+        location: {
+          "block-uid": rootBlockUid,
+          "window-id": sidebarWindow["window-id"],
+        },
+      });
+    },
+    send,
+  };
+}
+
+export async function openChatPanel({
+  api = getRoamApi(),
+  doc = globalThis.document,
+  storage = window.localStorage,
+  blockUid,
+  waitOptions,
+  resolvePromptBlock = resolveChatPromptBlock,
+  openPromptBlock = openPromptBlockInSidebar,
+  createPanel = createChatPanel,
+  removeScratchPrompt = removeScratchPromptBlock,
+  removeResetPrompts = removeResetChatPromptBlocks,
+  readOutlineUids = readPromptOutlineUids,
+} = {}) {
+  const prompt = await resolvePromptBlock(blockUid, { api });
+  const promptBlockUid = prompt.uid;
+  let protectedPromptUids = new Set();
+  if (!prompt.scratch) {
+    try {
+      protectedPromptUids = await readOutlineUids(promptBlockUid, { api });
+    } catch {
+      // If the initial outline cannot be read, preserve every user-owned
+      // prompt rather than risk clearing material that predated the chat.
+      protectedPromptUids = null;
+    }
+  }
+
+  if (ACTIVE_CHAT_PANEL?.element?.isConnected) {
+    if (ACTIVE_CHAT_PANEL.rootBlockUid === promptBlockUid) {
+      await ACTIVE_CHAT_PANEL.focus();
+      return ACTIVE_CHAT_PANEL;
+    }
+    void ACTIVE_CHAT_PANEL.close();
+  }
+
+  let controller;
+  let nativeWindowObserver = null;
+  let host = null;
+  let nativeHeader = null;
+  try {
+    const sidebarWindow = await openPromptBlock(
+      promptBlockUid,
+      { api, waitOptions },
+    );
+    host = await waitForChatPanelHost(doc, sidebarWindow, waitOptions);
+    doc.getElementById?.(CHAT_PANEL_ID)?.remove?.();
+    doc.getElementById?.(CHAT_CONTROLS_ID)?.remove?.();
+
+    controller = createPanel({
+      doc,
+      storage,
+      api,
+      rootBlockUid: promptBlockUid,
+      protectedPromptUids,
+      scratchPrompt: prompt.scratch,
+      onClose: ({ whenIdle, resetPromptUids }) => {
+        nativeWindowObserver?.disconnect?.();
+        nativeHeader?.classList?.remove?.(NATIVE_WINDOW_HEADER_CLASS);
+        host?.classList?.remove?.("roam-codex-chat-window");
+        if (ACTIVE_CHAT_PANEL === controller) ACTIVE_CHAT_PANEL = null;
+        return whenIdle()
+          .then(() => prompt.scratch
+            ? removeScratchPrompt(promptBlockUid, { api })
+            : removeResetPrompts(resetPromptUids, { api }))
+          .catch((error) => {
+            notify(
+              `The temporary Codex composer could not be removed: ${error.message}`,
+              "warning",
+            );
+        });
+      },
+    });
+    host.classList?.add?.("roam-codex-chat-window");
+    nativeHeader = host.firstElementChild || null;
+    host.insertBefore(
+      controller.element,
+      nativeHeader?.nextSibling || null,
+    );
+    nativeHeader?.classList?.add?.(NATIVE_WINDOW_HEADER_CLASS);
+    host.appendChild(controller.controlsElement);
+    ACTIVE_CHAT_PANEL = controller;
+
+    const MutationObserverImpl = doc.defaultView?.MutationObserver ||
+      globalThis.MutationObserver;
+    if (MutationObserverImpl && host.parentNode) {
+      nativeWindowObserver = new MutationObserverImpl(() => {
+        if (!host.isConnected) void controller.close();
+      });
+      nativeWindowObserver.observe(host.parentNode, { childList: true });
+    }
+
+    await controller.focus();
+    return controller;
+  } catch (error) {
+    if (controller) {
+      await controller.close();
+    } else if (prompt.scratch) {
+      try {
+        await removeScratchPrompt(promptBlockUid, { api });
+      } catch {
+        // Preserve the original opening failure; normal cleanup reports its
+        // own failure once a panel has taken ownership of the scratch block.
+      }
+    }
+    throw error;
+  }
+}
+
+export function closeChatPanel() {
+  const closePromise = ACTIVE_CHAT_PANEL?.close();
+  ACTIVE_CHAT_PANEL = null;
+  return closePromise || Promise.resolve();
+}
+
+export function sendActiveChatMessage({
+  api = getRoamApi(),
+  panel = ACTIVE_CHAT_PANEL,
+} = {}) {
+  if (!panel?.element?.isConnected) return null;
+  const focused = api.ui?.getFocusedBlock?.();
+  const sidebarWindow = findSidebarBlockWindow(panel.rootBlockUid, { api });
+  if (
+    !focused?.["window-id"] ||
+    focused["window-id"] !== sidebarWindow?.["window-id"]
+  ) {
+    return null;
+  }
+  return panel.send();
+}
+
 export async function pairBridge({
   fetchImpl = window.fetch.bind(window),
   storage = window.localStorage,
@@ -726,6 +2894,43 @@ export default {
       const focused = getRoamApi().ui.getFocusedBlock();
       void workOnBlock(focused?.["block-uid"]).catch(() => {});
     };
+    const openChat = () => openChatPanel();
+
+    SIDEBAR_CHAT_LAUNCHER?.dispose?.();
+    SIDEBAR_CHAT_LAUNCHER = installSidebarChatLauncher({
+      openChatImpl: openChat,
+    });
+
+    extensionAPI.ui.commandPalette.addCommand({
+      label: "Codex: Send chat message",
+      "default-hotkey": "alt-enter",
+      callback: () => {
+        void sendActiveChatMessage();
+      },
+    });
+
+    extensionAPI.ui.commandPalette.addCommand({
+      label: "Codex: Toggle chat",
+      "default-hotkey": "defmod-j",
+      callback: () => {
+        if (activeChatPanelIsOpen()) {
+          void closeChatPanel();
+          return;
+        }
+        void openChat().catch((error) => {
+          notify(`Codex chat could not open: ${error.message}`, "danger");
+        });
+      },
+    });
+
+    extensionAPI.ui.commandPalette.addCommand({
+      label: "Codex: Open chat",
+      callback: () => {
+        void openChat().catch((error) => {
+          notify(`Codex chat could not open: ${error.message}`, "danger");
+        });
+      },
+    });
 
     for (const label of [
       "Codex: Work on this block",
@@ -763,5 +2968,10 @@ export default {
       callback: () => void checkBridge(),
     });
   },
-  onunload: () => stopAllRunningPresentations(),
+  onunload: () => {
+    SIDEBAR_CHAT_LAUNCHER?.dispose?.();
+    SIDEBAR_CHAT_LAUNCHER = null;
+    closeChatPanel();
+    stopAllRunningPresentations();
+  },
 };
