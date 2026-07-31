@@ -722,6 +722,7 @@ export class AppServerClient extends EventEmitter {
     threadId: requestedThreadId = null,
     model = null,
     effort = null,
+    serviceTier = null,
     timeoutMs = DEFAULT_TIMEOUT_MS,
     onProgress = () => {},
     onThread = () => {},
@@ -735,7 +736,7 @@ export class AppServerClient extends EventEmitter {
       );
     }
 
-    if (model || effort) {
+    if (model || effort || serviceTier) {
       const models = await this.listModels();
       const selectedModel = model
         ? models.find((entry) => entry.id === model)
@@ -753,6 +754,17 @@ export class AppServerClient extends EventEmitter {
           throw rpcError(
             "The selected reasoning effort is unavailable for that model.",
             "EFFORT_INVALID",
+          );
+        }
+      }
+      if (serviceTier) {
+        const tiers = Array.isArray(selectedModel.serviceTiers)
+          ? selectedModel.serviceTiers.map((tier) => tier?.id)
+          : [];
+        if (!tiers.includes(serviceTier)) {
+          throw rpcError(
+            "The selected speed is unavailable for that model.",
+            "SERVICE_TIER_INVALID",
           );
         }
       }
@@ -850,6 +862,7 @@ export class AppServerClient extends EventEmitter {
       };
       if (model) turnParams.model = model;
       if (effort) turnParams.effort = effort;
+      if (serviceTier) turnParams.serviceTier = serviceTier;
 
       const turnResult = await this.request("turn/start", turnParams);
       turnId = turnResult?.turn?.id;
@@ -1452,6 +1465,13 @@ export function createBridgeServer({
                 description: option.description || "",
               }))
             : [],
+          defaultServiceTier: model.defaultServiceTier || null,
+          serviceTiers: Array.isArray(model.serviceTiers)
+            ? model.serviceTiers.map((tier) => ({
+                id: tier.id,
+                name: tier.name || tier.id,
+              }))
+            : [],
         }));
         sendJson(response, 200, { models }, origin);
       } catch (error) {
@@ -1598,9 +1618,10 @@ export function createBridgeServer({
         sendJson(response, 400, { error: "Invalid Codex thread ID." }, origin);
         return;
       }
-      for (const field of ["model", "effort"]) {
+      for (const field of ["model", "effort", "serviceTier"]) {
         if (
           body[field] !== undefined &&
+          body[field] !== null &&
           (typeof body[field] !== "string" || body[field].length > 100)
         ) {
           sendJson(response, 400, { error: `Invalid ${field}.` }, origin);
@@ -1654,6 +1675,7 @@ export function createBridgeServer({
           threadId: requestedThreadId,
           model: body.model || null,
           effort: body.effort || null,
+          serviceTier: body.serviceTier || null,
           onProgress: (progress) => {
             writeNdjson(response, { type: "progress", ...progress });
           },

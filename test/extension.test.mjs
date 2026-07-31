@@ -238,6 +238,8 @@ function createFakePanelDocument() {
       value: "",
       removed: false,
       scrollHeight: 0,
+      scrollTop: 0,
+      clientHeight: 0,
       appendChild(child) {
         child.parentNode = this;
         this.children.push(child);
@@ -252,6 +254,9 @@ function createFakePanelDocument() {
       },
       addEventListener(name, handler) {
         this.listeners[name] = handler;
+      },
+      removeEventListener(name, handler) {
+        if (this.listeners[name] === handler) delete this.listeners[name];
       },
       remove() {
         this.removed = true;
@@ -326,6 +331,7 @@ test("chat state keeps versioned conversation records without a parallel draft",
         updatedAt: 20,
         model: "model-from-list",
         effort: "medium",
+        speed: null,
         threadPageUid: null,
       },
     },
@@ -1551,26 +1557,42 @@ test("chat clears a scratch composer before requesting a reply", async () => {
     ).hidden,
     true,
   );
-  const modelSelect = allElements.find(
-    (element) => element["aria-label"] === "Codex model",
+  const pickerButton = allElements.find(
+    (element) => element.className === "roam-codex-chat-picker-button",
   );
-  const effortSelect = allElements.find(
-    (element) => element["aria-label"] === "Reasoning effort",
+  const pickerMenu = allElements.find(
+    (element) => element.className === "roam-codex-chat-picker-menu",
   );
-  assert.equal(modelSelect.value, "gpt-5.6-sol");
+  assert.equal(pickerButton.textContent, "GPT-5.6-Sol · Low");
+  assert.equal(pickerMenu.hidden, true);
+  pickerButton.listeners.click();
+  assert.equal(pickerMenu.hidden, false);
   assert.deepEqual(
-    modelSelect.children.map((option) => [option.value, option.textContent]),
-    [["gpt-5.6-sol", "GPT-5.6-Sol (Default)"]],
+    pickerMenu.children.map((row) => row.children?.[0]?.textContent),
+    ["Model", "Effort"],
   );
-  assert.equal(effortSelect.value, "low");
   assert.deepEqual(
-    effortSelect.children.map((option) => [option.value, option.textContent]),
-    [
-      ["low", "Low (Default)"],
-      ["medium", "Medium"],
-      ["high", "High"],
-    ],
+    pickerMenu.children.map((row) => row.children?.[1]?.textContent),
+    ["GPT-5.6-Sol", "Low"],
   );
+  pickerMenu.children[1].listeners.click();
+  assert.deepEqual(
+    pickerMenu.children.map((option) => option.textContent),
+    ["‹ Effort", "Low (Default)", "Medium", "High"],
+  );
+  assert.deepEqual(
+    pickerMenu.children
+      .slice(1)
+      .map((option) => option.className.includes("is-active")),
+    [true, false, false],
+  );
+  pickerMenu.children[0].listeners.click();
+  assert.deepEqual(
+    pickerMenu.children.map((row) => row.children?.[0]?.textContent),
+    ["Model", "Effort"],
+  );
+  pickerButton.listeners.click();
+  assert.equal(pickerMenu.hidden, true);
   assert.equal(chatRequests, 0);
   assert.equal(readChatState({ storage }).activeThreadId, null);
 
@@ -1607,6 +1629,7 @@ test("chat clears a scratch composer before requesting a reply", async () => {
   assert.deepEqual(readChatState({ storage }).newConversationPreferences, {
     model: "gpt-5.6-sol",
     effort: "low",
+    speed: null,
   });
   assert.equal(chatRequests, 1);
   assert.equal(
@@ -2069,6 +2092,74 @@ test("the transcript resize handle drags, clamps, and persists its height", asyn
   await controller.close();
 });
 
+test("the transcript offers a reduced-motion scroll-to-latest control", async () => {
+  const doc = createFakePanelDocument();
+  const controller = createChatPanel({
+    doc,
+    api: {},
+    storage: {
+      getItem: () => null,
+      setItem: () => {},
+    },
+    rootBlockUid: "root123",
+    matchMediaImpl: () => ({ matches: true }),
+    readPromptImpl: async () => ({ uid: "root123", text: "Question" }),
+    requestChatImpl: async () => ({
+      threadId: "thread_scroll_1234",
+      turnId: "turn-scroll",
+      reply: "A sufficiently long answer",
+    }),
+    requestModelsImpl: async () => [],
+    requestMessagesImpl: async () => [],
+    requestHistoryImpl: async () => ({
+      threads: [],
+      missingThreadIds: [],
+      unavailableThreadIds: [],
+    }),
+  });
+
+  await controller.send();
+  const elements = panelElements(controller);
+  const transcript = elements.find(
+    (element) => element.className === "roam-codex-chat-transcript",
+  );
+  const scrollLatest = elements.find(
+    (element) => element.className === "roam-codex-chat-scroll-latest",
+  );
+  assert.equal(scrollLatest.hidden, true);
+  assert.equal(scrollLatest["aria-label"], "Scroll to latest message");
+
+  transcript.scrollHeight = 1_000;
+  transcript.clientHeight = 200;
+  transcript.scrollTop = 400;
+  transcript.listeners.scroll();
+  assert.equal(scrollLatest.hidden, false);
+
+  let scrollOptions;
+  transcript.scrollTo = (options) => {
+    scrollOptions = options;
+    transcript.scrollTop = options.top;
+  };
+  scrollLatest.listeners.click();
+  assert.deepEqual(scrollOptions, { top: 1_000, behavior: "auto" });
+  assert.equal(scrollLatest.hidden, true);
+
+  transcript.scrollTop = 775;
+  transcript.listeners.scroll();
+  assert.equal(scrollLatest.hidden, false);
+  transcript.scrollTop = 776;
+  transcript.listeners.scroll();
+  assert.equal(scrollLatest.hidden, true);
+
+  transcript.clientHeight = 1_000;
+  transcript.scrollTop = 0;
+  transcript.listeners.scroll();
+  assert.equal(scrollLatest.hidden, true);
+
+  await controller.close();
+  assert.equal(transcript.listeners.scroll, undefined);
+});
+
 test("the panel close control removes the native window before closing", async () => {
   const removals = [];
   const doc = createFakePanelDocument();
@@ -2151,6 +2242,78 @@ test("the send command acts only when focus is inside the chat window", () => {
   assert.equal(sends.length, 1);
 });
 
+test("the picker offers Speed from serviceTiers and sends the chosen tier", async () => {
+  const doc = createFakePanelDocument();
+  const sent = [];
+  const controller = createChatPanel({
+    doc,
+    api: {},
+    storage: {
+      getItem: () => null,
+      setItem: () => {},
+    },
+    rootBlockUid: "root123",
+    readPromptImpl: async () => ({ uid: "root123", text: "Hi" }),
+    requestChatImpl: async (message, options) => {
+      sent.push({
+        model: options.model,
+        effort: options.effort,
+        serviceTier: options.serviceTier,
+      });
+      return { threadId: "thread_speed_123", turnId: "turn-1", reply: "ok" };
+    },
+    requestModelsImpl: async () => [{
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6-Sol",
+      isDefault: true,
+      defaultReasoningEffort: "low",
+      supportedReasoningEfforts: [{ reasoningEffort: "low" }],
+      defaultServiceTier: "standard",
+      serviceTiers: [
+        { id: "standard", name: "Standard" },
+        { id: "priority", name: "Fast" },
+      ],
+    }],
+    requestMessagesImpl: async () => [],
+    requestHistoryImpl: async () => ({
+      threads: [],
+      missingThreadIds: [],
+      unavailableThreadIds: [],
+    }),
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+
+  const elements = panelElements(controller);
+  const pickerButton = elements.find(
+    (element) => element.className === "roam-codex-chat-picker-button",
+  );
+  const pickerMenu = elements.find(
+    (element) => element.className === "roam-codex-chat-picker-menu",
+  );
+  assert.equal(pickerButton.textContent, "GPT-5.6-Sol · Low");
+
+  pickerButton.listeners.click();
+  assert.deepEqual(
+    pickerMenu.children.map((row) => row.children?.[0]?.textContent),
+    ["Model", "Effort", "Speed"],
+  );
+  pickerMenu.children[2].listeners.click();
+  assert.deepEqual(
+    pickerMenu.children.map((option) => option.textContent),
+    ["‹ Speed", "Standard (Default)", "Fast"],
+  );
+  pickerMenu.children[2].listeners.click();
+  assert.equal(pickerMenu.hidden, true);
+  assert.equal(pickerButton.textContent, "GPT-5.6-Sol · Low · Fast");
+
+  await controller.send();
+  assert.deepEqual(sent, [
+    { model: null, effort: null, serviceTier: "priority" },
+  ]);
+  await controller.close();
+});
+
 test("missing history is removed while unavailable history is retained", async () => {
   const values = new Map();
   const storage = {
@@ -2203,6 +2366,7 @@ test("missing history is removed while unavailable history is retained", async (
   assert.deepEqual(saved.newConversationPreferences, {
     model: "gpt-5.6-sol",
     effort: "low",
+    speed: null,
   });
   await controller.close();
 });

@@ -19,6 +19,7 @@ const CHAT_STATE_KEY = `roam-codex-lab.chat-state.v${CHAT_STATE_VERSION}.${GRAPH
 const CHAT_TRANSCRIPT_HEIGHT_KEY = `roam-codex-lab.chat-transcript-height.${GRAPH}`;
 const CHAT_TRANSCRIPT_MIN_HEIGHT = 140;
 const CHAT_TRANSCRIPT_MAX_HEIGHT = 640;
+const CHAT_SCROLL_BOTTOM_THRESHOLD = 24;
 const NATIVE_WINDOW_HEADER_CLASS = "roam-codex-native-window-header";
 let ACTIVE_CHAT_PANEL = null;
 let SIDEBAR_CHAT_LAUNCHER = null;
@@ -30,7 +31,7 @@ function emptyChatState() {
   return {
     version: CHAT_STATE_VERSION,
     activeThreadId: null,
-    newConversationPreferences: { model: null, effort: null },
+    newConversationPreferences: { model: null, effort: null, speed: null },
     conversations: {},
   };
 }
@@ -67,6 +68,7 @@ export function readChatState({
       updatedAt: Number.isFinite(record.updatedAt) ? record.updatedAt : Date.now(),
       model: typeof record.model === "string" ? record.model : null,
       effort: typeof record.effort === "string" ? record.effort : null,
+      speed: typeof record.speed === "string" ? record.speed : null,
       threadPageUid: typeof record.threadPageUid === "string"
         ? record.threadPageUid
         : null,
@@ -87,6 +89,9 @@ export function readChatState({
         : null,
       effort: typeof value.newConversationPreferences?.effort === "string"
         ? value.newConversationPreferences.effort
+        : null,
+      speed: typeof value.newConversationPreferences?.speed === "string"
+        ? value.newConversationPreferences.speed
         : null,
     },
     conversations,
@@ -337,6 +342,7 @@ export async function requestPanelChat(message, {
   threadId = null,
   model = null,
   effort = null,
+  serviceTier = null,
   onProgress = () => {},
   onStarted = () => {},
   onThread = () => {},
@@ -358,6 +364,7 @@ export async function requestPanelChat(message, {
   if (threadId) body.threadId = threadId;
   if (model) body.model = model;
   if (effort) body.effort = effort;
+  if (serviceTier) body.serviceTier = serviceTier;
 
   const response = await fetchImpl(`${BRIDGE_URL}/chat`, {
     method: "POST",
@@ -1121,7 +1128,6 @@ export function mountSidebarChatLauncher({
     doc,
     "span",
     "roam-codex-sidebar-chat-launcher-icon",
-    "✦",
   );
   icon.setAttribute("aria-hidden", "true");
   button.appendChild(icon);
@@ -1162,7 +1168,10 @@ export function mountSidebarChatLauncher({
     }
   });
 
-  placement.header.insertBefore(button, placement.nativeToggle);
+  placement.header.insertBefore(
+    button,
+    placement.header.firstChild || placement.nativeToggle,
+  );
   return button;
 }
 
@@ -1229,6 +1238,12 @@ function modelEfforts(model) {
     ? model.supportedReasoningEfforts
         .map((option) => option?.reasoningEffort)
         .filter((effort) => typeof effort === "string")
+    : [];
+}
+
+function modelTiers(model) {
+  return Array.isArray(model?.serviceTiers)
+    ? model.serviceTiers.filter((tier) => typeof tier?.id === "string")
     : [];
 }
 
@@ -1681,6 +1696,7 @@ export function createChatPanel({
   clearTimeoutImpl = globalThis.clearTimeout,
   setIntervalImpl = globalThis.setInterval?.bind(globalThis),
   clearIntervalImpl = globalThis.clearInterval?.bind(globalThis),
+  matchMediaImpl = globalThis.matchMedia?.bind(globalThis),
   navigatorImpl = globalThis.navigator,
   readPromptImpl = () => readFocusedPromptBlock(rootBlockUid, { api }),
   clearScratchPromptImpl = (prompt) =>
@@ -1733,6 +1749,14 @@ export function createChatPanel({
   let effortChanged = !state.activeThreadId && Boolean(
     state.newConversationPreferences.effort,
   );
+  let speedChanged = !state.activeThreadId && Boolean(
+    state.newConversationPreferences.speed,
+  );
+  let pickerModel = "";
+  let pickerEffort = "";
+  let pickerSpeed = "";
+  let pickerOpen = false;
+  let pickerLevel = null;
   let messageRenderVersion = 0;
   const renderedMessageNodes = new Set();
   const copyFeedbackTimers = new Map();
@@ -1743,9 +1767,13 @@ export function createChatPanel({
 
   const header = createPanelElement(doc, "header", "roam-codex-chat-header");
   const heading = createPanelElement(doc, "div", "roam-codex-chat-heading");
-  heading.appendChild(
-    createPanelElement(doc, "strong", "roam-codex-chat-title", "Codex chat"),
+  const headerIcon = createPanelElement(
+    doc,
+    "span",
+    "roam-codex-chat-header-icon",
   );
+  headerIcon.setAttribute("aria-hidden", "true");
+  heading.appendChild(headerIcon);
   const conversationButton = panelButton(
     doc,
     "roam-codex-chat-conversation",
@@ -1777,10 +1805,65 @@ export function createChatPanel({
 
   const body = createPanelElement(doc, "div", "roam-codex-chat-body");
 
+  const transcriptWrap = createPanelElement(
+    doc,
+    "div",
+    "roam-codex-chat-transcript-wrap",
+  );
   const transcript = createPanelElement(doc, "div", "roam-codex-chat-transcript");
   transcript.setAttribute("role", "log");
   transcript.setAttribute("aria-live", "polite");
-  body.appendChild(transcript);
+  transcriptWrap.appendChild(transcript);
+  const scrollLatestButton = panelButton(
+    doc,
+    "roam-codex-chat-scroll-latest",
+    "",
+    "Scroll to latest message",
+  );
+  scrollLatestButton.setAttribute("aria-label", "Scroll to latest message");
+  const scrollLatestIcon = createPanelElement(
+    doc,
+    "span",
+    "roam-codex-chat-scroll-latest-icon",
+    "↓",
+  );
+  scrollLatestIcon.setAttribute("aria-hidden", "true");
+  scrollLatestButton.appendChild(scrollLatestIcon);
+  scrollLatestButton.hidden = true;
+  transcriptWrap.appendChild(scrollLatestButton);
+  body.appendChild(transcriptWrap);
+
+  const updateScrollLatestButton = () => {
+    const scrollHeight = Number(transcript.scrollHeight) || 0;
+    const clientHeight = Number(transcript.clientHeight) || 0;
+    const scrollTop = Number(transcript.scrollTop) || 0;
+    const overflowing = clientHeight > 0 && scrollHeight > clientHeight + 1;
+    const distanceFromBottom = Math.max(
+      0,
+      scrollHeight - clientHeight - scrollTop,
+    );
+    scrollLatestButton.hidden =
+      !messages.length ||
+      !overflowing ||
+      distanceFromBottom <= CHAT_SCROLL_BOTTOM_THRESHOLD;
+  };
+  const scrollToLatest = () => {
+    const reduceMotion = Boolean(
+      matchMediaImpl?.("(prefers-reduced-motion: reduce)")?.matches,
+    );
+    const top = Number(transcript.scrollHeight) || 0;
+    if (typeof transcript.scrollTo === "function") {
+      transcript.scrollTo({
+        top,
+        behavior: reduceMotion ? "auto" : "smooth",
+      });
+    } else {
+      transcript.scrollTop = top;
+    }
+    scrollLatestButton.hidden = true;
+  };
+  transcript.addEventListener("scroll", updateScrollLatestButton);
+  scrollLatestButton.addEventListener("click", scrollToLatest);
 
   const transcriptHandle = createPanelElement(
     doc,
@@ -1846,6 +1929,7 @@ export function createChatPanel({
       transcriptResize.startHeight + (event.clientY - transcriptResize.startY),
     );
     applyTranscriptHeight(transcriptHeight);
+    updateScrollLatestButton();
     event.preventDefault?.();
   };
   const stopTranscriptResize = () => {
@@ -1875,21 +1959,28 @@ export function createChatPanel({
   });
 
   const modelRow = createPanelElement(doc, "div", "roam-codex-chat-model-row");
-  const modelSelect = createPanelElement(doc, "select", "roam-codex-chat-select");
-  modelSelect.setAttribute("aria-label", "Codex model");
-  modelSelect.disabled = true;
-  const loadingModel = createPanelElement(doc, "option", "", "Loading models…");
-  loadingModel.value = "";
-  modelSelect.appendChild(loadingModel);
-  modelRow.appendChild(modelSelect);
-
-  const effortSelect = createPanelElement(doc, "select", "roam-codex-chat-select");
-  effortSelect.setAttribute("aria-label", "Reasoning effort");
-  effortSelect.disabled = true;
-  const loadingEffort = createPanelElement(doc, "option", "", "Loading efforts…");
-  loadingEffort.value = "";
-  effortSelect.appendChild(loadingEffort);
-  modelRow.appendChild(effortSelect);
+  const pickerWrap = createPanelElement(doc, "div", "roam-codex-chat-picker");
+  const pickerButton = panelButton(
+    doc,
+    "roam-codex-chat-picker-button",
+    "Loading models…",
+    "Choose the model, reasoning effort, and speed",
+  );
+  pickerButton.setAttribute("aria-label", "Model, effort, and speed");
+  pickerButton.setAttribute("aria-haspopup", "menu");
+  pickerButton.setAttribute("aria-expanded", "false");
+  pickerButton.disabled = true;
+  pickerWrap.appendChild(pickerButton);
+  const pickerMenu = createPanelElement(
+    doc,
+    "div",
+    "roam-codex-chat-picker-menu",
+  );
+  pickerMenu.setAttribute("role", "menu");
+  pickerMenu.setAttribute("aria-label", "Model, effort, and speed options");
+  pickerMenu.hidden = true;
+  pickerWrap.appendChild(pickerMenu);
+  modelRow.appendChild(pickerWrap);
   const actions = createPanelElement(doc, "div", "roam-codex-chat-actions");
   const stopButton = panelButton(
     doc,
@@ -1938,15 +2029,17 @@ export function createChatPanel({
     currentRecord() || state.newConversationPreferences;
 
   const savePreferences = () => {
-    const model = modelSelect.value || null;
-    const effort = effortSelect.value || null;
+    const model = pickerModel || null;
+    const effort = pickerEffort || null;
+    const speed = pickerSpeed || null;
     const record = currentRecord();
     if (record) {
       record.model = model;
       record.effort = effort;
+      record.speed = speed;
       record.updatedAt = now();
     } else {
-      state.newConversationPreferences = { model, effort };
+      state.newConversationPreferences = { model, effort, speed };
     }
     persist();
   };
@@ -1959,12 +2052,13 @@ export function createChatPanel({
       threadId,
       createdAt: previous?.createdAt || timestamp,
       updatedAt: timestamp,
-      model: modelSelect.value || previous?.model || null,
-      effort: effortSelect.value || previous?.effort || null,
+      model: pickerModel || previous?.model || null,
+      effort: pickerEffort || previous?.effort || null,
+      speed: pickerSpeed || previous?.speed || null,
       threadPageUid: previous?.threadPageUid || null,
     };
     state.activeThreadId = threadId;
-    state.newConversationPreferences = { model: null, effort: null };
+    state.newConversationPreferences = { model: null, effort: null, speed: null };
     persist();
   };
 
@@ -1983,6 +2077,7 @@ export function createChatPanel({
     transcript.hidden = !messages.length;
     transcriptHandle.hidden = !messages.length;
     if (!messages.length) {
+      scrollLatestButton.hidden = true;
       return;
     }
 
@@ -2057,6 +2152,7 @@ export function createChatPanel({
       transcript.appendChild(article);
     }
     transcript.scrollTop = transcript.scrollHeight;
+    updateScrollLatestButton();
   };
 
   const setProgress = (text = "", kind = "") => {
@@ -2065,64 +2161,219 @@ export function createChatPanel({
     progress.hidden = !progressText.textContent && progressMeta.hidden;
   };
 
-  const renderEfforts = () => {
-    const preferred = currentPreferences().effort || "";
-    const selectedModel = models.find((model) => model.id === modelSelect.value) ||
-      models.find((model) => model.isDefault) ||
-      models[0];
-    const efforts = modelEfforts(selectedModel);
-    const defaultEffort = efforts.includes(selectedModel?.defaultReasoningEffort)
-      ? selectedModel.defaultReasoningEffort
-      : null;
-    effortSelect.replaceChildren();
-    if (!efforts.length) {
-      const unavailable = createPanelElement(
-        doc,
-        "option",
-        "",
-        "No effort choices",
-      );
-      unavailable.value = "";
-      effortSelect.appendChild(unavailable);
-      effortSelect.value = "";
-      effortSelect.disabled = true;
-      return;
-    }
-    for (const effort of efforts) {
-      const label = effort === defaultEffort
-        ? `${effortLabel(effort)} (Default)`
-        : effortLabel(effort);
-      const option = createPanelElement(doc, "option", "", label);
-      option.value = effort;
-      effortSelect.appendChild(option);
-    }
-    effortSelect.value = efforts.includes(preferred)
-      ? preferred
-      : defaultEffort || efforts[0];
-    effortSelect.disabled = false;
+  const currentModelEntry = () =>
+    models.find((model) => model.id === pickerModel) ||
+    models.find((model) => model.isDefault) ||
+    models[0] || null;
+
+  const defaultTierIdFor = (model) => {
+    const tiers = modelTiers(model);
+    return tiers.some((tier) => tier.id === model?.defaultServiceTier)
+      ? model.defaultServiceTier
+      : tiers[0]?.id || "";
   };
 
-  const renderModels = () => {
-    const preferred = currentPreferences().model || "";
-    modelSelect.replaceChildren();
-    for (const model of models) {
-      if (!model || typeof model.id !== "string") continue;
-      const displayName = model.displayName || model.id;
-      const option = createPanelElement(
-        doc,
-        "option",
-        "",
-        model.isDefault ? `${displayName} (Default)` : displayName,
-      );
-      option.value = model.id;
-      modelSelect.appendChild(option);
-    }
+  const initPicker = () => {
+    const preferred = currentPreferences();
     const defaultModel = models.find((model) => model.isDefault) || models[0];
-    modelSelect.value = models.some((model) => model.id === preferred)
-      ? preferred
+    pickerModel = models.some((model) => model.id === preferred.model)
+      ? preferred.model
       : defaultModel?.id || "";
-    modelSelect.disabled = !models.length;
-    renderEfforts();
+    const selected = currentModelEntry();
+    const efforts = modelEfforts(selected);
+    const defaultEffort = efforts.includes(selected?.defaultReasoningEffort)
+      ? selected.defaultReasoningEffort
+      : null;
+    pickerEffort = efforts.includes(preferred.effort)
+      ? preferred.effort
+      : defaultEffort || efforts[0] || "";
+    const tiers = modelTiers(selected);
+    pickerSpeed = tiers.some((tier) => tier.id === preferred.speed)
+      ? preferred.speed
+      : defaultTierIdFor(selected);
+  };
+
+  const pickerLabel = () => {
+    if (!models.length) return "No models available";
+    const selected = currentModelEntry();
+    const parts = [selected?.displayName || selected?.id || "Model"];
+    if (pickerEffort) parts.push(effortLabel(pickerEffort));
+    const tier = modelTiers(selected).find((entry) => entry.id === pickerSpeed);
+    if (tier && tier.id !== defaultTierIdFor(selected)) {
+      parts.push(tier.name || tier.id);
+    }
+    return parts.join(" · ");
+  };
+
+  const renderPickerButton = () => {
+    if (!modelsReady) return;
+    pickerButton.textContent = pickerLabel();
+    pickerButton.setAttribute("aria-expanded", String(pickerOpen));
+  };
+
+  const closePicker = ({ restoreFocus = false } = {}) => {
+    pickerOpen = false;
+    pickerLevel = null;
+    pickerMenu.hidden = true;
+    pickerButton.setAttribute("aria-expanded", "false");
+    if (restoreFocus) pickerButton.focus?.();
+  };
+
+  const renderPickerMenu = () => {
+    pickerMenu.replaceChildren();
+    const selected = currentModelEntry();
+
+    const addBack = (label) => {
+      const back = panelButton(
+        doc,
+        "roam-codex-chat-picker-back",
+        `‹ ${label}`,
+        "Back to all options",
+      );
+      back.setAttribute("role", "menuitem");
+      back.addEventListener("click", () => {
+        pickerLevel = null;
+        renderPickerMenu();
+      });
+      pickerMenu.appendChild(back);
+    };
+
+    const addOption = (label, active, onPick) => {
+      const option = panelButton(
+        doc,
+        `roam-codex-chat-picker-option${active ? " is-active" : ""}`,
+        label,
+        "",
+      );
+      option.setAttribute("role", "menuitemradio");
+      option.setAttribute("aria-checked", String(active));
+      option.addEventListener("click", () => {
+        onPick();
+        closePicker({ restoreFocus: true });
+        renderPickerButton();
+      });
+      pickerMenu.appendChild(option);
+    };
+
+    if (pickerLevel === "model") {
+      addBack("Model");
+      for (const model of models) {
+        if (!model || typeof model.id !== "string") continue;
+        const displayName = model.displayName || model.id;
+        addOption(
+          model.isDefault ? `${displayName} (Default)` : displayName,
+          model.id === pickerModel,
+          () => {
+            if (model.id === pickerModel) return;
+            pickerModel = model.id;
+            modelChanged = true;
+            effortChanged = true;
+            speedChanged = true;
+            const next = currentModelEntry();
+            const efforts = modelEfforts(next);
+            if (!efforts.includes(pickerEffort)) {
+              const defaultEffort = efforts.includes(
+                next?.defaultReasoningEffort,
+              )
+                ? next.defaultReasoningEffort
+                : null;
+              pickerEffort = defaultEffort || efforts[0] || "";
+            }
+            if (!modelTiers(next).some((tier) => tier.id === pickerSpeed)) {
+              pickerSpeed = defaultTierIdFor(next);
+            }
+            savePreferences();
+          },
+        );
+      }
+      return;
+    }
+
+    if (pickerLevel === "effort") {
+      addBack("Effort");
+      const efforts = modelEfforts(selected);
+      const defaultEffort = efforts.includes(selected?.defaultReasoningEffort)
+        ? selected.defaultReasoningEffort
+        : null;
+      for (const effort of efforts) {
+        addOption(
+          effort === defaultEffort
+            ? `${effortLabel(effort)} (Default)`
+            : effortLabel(effort),
+          effort === pickerEffort,
+          () => {
+            if (effort === pickerEffort) return;
+            pickerEffort = effort;
+            effortChanged = true;
+            savePreferences();
+          },
+        );
+      }
+      return;
+    }
+
+    if (pickerLevel === "speed") {
+      addBack("Speed");
+      const defaultTier = defaultTierIdFor(selected);
+      for (const tier of modelTiers(selected)) {
+        const name = tier.name || tier.id;
+        addOption(
+          tier.id === defaultTier ? `${name} (Default)` : name,
+          tier.id === pickerSpeed,
+          () => {
+            if (tier.id === pickerSpeed) return;
+            pickerSpeed = tier.id;
+            speedChanged = true;
+            savePreferences();
+          },
+        );
+      }
+      return;
+    }
+
+    const tiers = modelTiers(selected);
+    const currentTier = tiers.find((tier) => tier.id === pickerSpeed);
+    const rows = [
+      ["Model", selected?.displayName || selected?.id || "—", "model"],
+      ["Effort", pickerEffort ? effortLabel(pickerEffort) : "—", "effort"],
+    ];
+    if (tiers.length) {
+      rows.push(["Speed", currentTier?.name || currentTier?.id || "—", "speed"]);
+    }
+    for (const [label, value, level] of rows) {
+      const row = panelButton(
+        doc,
+        "roam-codex-chat-picker-item",
+        "",
+        `Choose ${label.toLowerCase()}`,
+      );
+      row.setAttribute("role", "menuitem");
+      row.appendChild(createPanelElement(
+        doc,
+        "span",
+        "roam-codex-chat-picker-item-label",
+        label,
+      ));
+      row.appendChild(createPanelElement(
+        doc,
+        "span",
+        "roam-codex-chat-picker-item-value",
+        value,
+      ));
+      const chevron = createPanelElement(
+        doc,
+        "span",
+        "roam-codex-chat-picker-item-chevron",
+        "›",
+      );
+      chevron.setAttribute("aria-hidden", "true");
+      row.appendChild(chevron);
+      row.addEventListener("click", () => {
+        pickerLevel = level;
+        renderPickerMenu();
+      });
+      pickerMenu.appendChild(row);
+    }
   };
 
   const historyItems = () => buildConversationHistory(
@@ -2150,17 +2401,22 @@ export function createChatPanel({
   const beginNewConversation = () => {
     if (running) return;
     const preferences = currentPreferences();
-    const model = modelSelect.value || preferences.model || null;
-    const effort = effortSelect.value || preferences.effort || null;
+    const model = pickerModel || preferences.model || null;
+    const effort = pickerEffort || preferences.effort || null;
+    const speed = pickerSpeed || preferences.speed || null;
     selectionLoadVersion += 1;
     state.activeThreadId = null;
-    state.newConversationPreferences = { model, effort };
+    state.newConversationPreferences = { model, effort, speed };
     messages = [];
     modelChanged = Boolean(model);
     effortChanged = Boolean(effort);
+    speedChanged = Boolean(speed);
     persist();
     renderMessages();
-    if (modelsReady) renderModels();
+    if (modelsReady) {
+      initPicker();
+      renderPickerButton();
+    }
     renderConversationButton();
     closeHistory();
     setProgress();
@@ -2174,14 +2430,19 @@ export function createChatPanel({
       selectionLoadVersion += 1;
       state.activeThreadId = null;
       state.newConversationPreferences = {
-        model: modelSelect.value || missingRecord?.model || null,
-        effort: effortSelect.value || missingRecord?.effort || null,
+        model: pickerModel || missingRecord?.model || null,
+        effort: pickerEffort || missingRecord?.effort || null,
+        speed: pickerSpeed || missingRecord?.speed || null,
       };
       messages = [];
       modelChanged = Boolean(state.newConversationPreferences.model);
       effortChanged = Boolean(state.newConversationPreferences.effort);
+      speedChanged = Boolean(state.newConversationPreferences.speed);
       renderMessages();
-      if (modelsReady) renderModels();
+      if (modelsReady) {
+        initPicker();
+        renderPickerButton();
+      }
       setProgress(
         "The saved conversation is no longer available. A new one will start.",
         "error",
@@ -2201,9 +2462,13 @@ export function createChatPanel({
     messages = [];
     modelChanged = false;
     effortChanged = false;
+    speedChanged = false;
     persist();
     renderMessages();
-    if (modelsReady) renderModels();
+    if (modelsReady) {
+      initPicker();
+      renderPickerButton();
+    }
     renderConversationButton();
     closeHistory();
     setProgress("Loading conversation", "activity");
@@ -2372,8 +2637,8 @@ export function createChatPanel({
     }
     progress.hidden = !progressText.textContent && progressMeta.hidden;
     running = value;
-    modelSelect.disabled = value || !models.length;
-    effortSelect.disabled = value || !models.length;
+    if (value && pickerOpen) closePicker();
+    pickerButton.disabled = value || !modelsReady;
     sendButton.disabled = value || !modelsReady;
     sendButton.hidden = value;
     conversationButton.disabled = value;
@@ -2397,9 +2662,10 @@ export function createChatPanel({
     const catalogDefaultModel = models.find((model) => model.isDefault) ||
       models[0];
     const modelOverride = modelChanged
-      ? modelSelect.value || catalogDefaultModel?.id || null
+      ? pickerModel || catalogDefaultModel?.id || null
       : null;
-    const effortOverride = effortChanged ? effortSelect.value || null : null;
+    const effortOverride = effortChanged ? pickerEffort || null : null;
+    const speedOverride = speedChanged ? pickerSpeed || null : null;
 
     const shouldClearPrompt = shouldClearChatPrompt(prompt.uid, {
       scratchPrompt,
@@ -2460,6 +2726,7 @@ export function createChatPanel({
         threadId: state.activeThreadId,
         model: modelOverride,
         effort: effortOverride,
+        serviceTier: speedOverride,
         onStarted: ({ runId: startedRunId }) => {
           runId = startedRunId;
         },
@@ -2467,6 +2734,7 @@ export function createChatPanel({
           rememberThread(threadId);
           modelChanged = false;
           effortChanged = false;
+          speedChanged = false;
         },
         onProgress: ({ kind, text: progressText }) => {
           setProgress(progressText, kind);
@@ -2548,10 +2816,15 @@ export function createChatPanel({
   };
 
   const handleSendShortcut = (event) => {
-    if (!event.defaultPrevented && event.key === "Escape" && historyOpen) {
+    if (
+      !event.defaultPrevented &&
+      event.key === "Escape" &&
+      (historyOpen || pickerOpen)
+    ) {
       event.preventDefault();
       event.stopPropagation?.();
-      closeHistory({ restoreFocus: true });
+      if (historyOpen) closeHistory({ restoreFocus: true });
+      if (pickerOpen) closePicker({ restoreFocus: true });
       return;
     }
     if (
@@ -2575,9 +2848,8 @@ export function createChatPanel({
   };
 
   const handleDocumentClick = (event) => {
-    if (!historyOpen) return;
-    if (header.contains?.(event.target)) return;
-    closeHistory();
+    if (historyOpen && !header.contains?.(event.target)) closeHistory();
+    if (pickerOpen && !pickerWrap.contains?.(event.target)) closePicker();
   };
 
   const close = () => {
@@ -2590,6 +2862,7 @@ export function createChatPanel({
     elapsedIntervalId = null;
     doc.removeEventListener?.("keydown", handleSendShortcut, true);
     doc.removeEventListener?.("click", handleDocumentClick, true);
+    transcript.removeEventListener?.("scroll", updateScrollLatestButton);
     for (const timer of copyFeedbackTimers.values()) clearTimeoutImpl(timer);
     copyFeedbackTimers.clear();
     disposeRenderedMessages();
@@ -2626,15 +2899,17 @@ export function createChatPanel({
   });
   doc.addEventListener?.("keydown", handleSendShortcut, true);
   doc.addEventListener?.("click", handleDocumentClick, true);
-  modelSelect.addEventListener("change", () => {
-    modelChanged = true;
-    effortChanged = true;
-    renderEfforts();
-    savePreferences();
-  });
-  effortSelect.addEventListener("change", () => {
-    effortChanged = true;
-    savePreferences();
+  pickerButton.addEventListener("click", () => {
+    if (running || !modelsReady) return;
+    if (pickerOpen) {
+      closePicker();
+      return;
+    }
+    pickerOpen = true;
+    pickerLevel = null;
+    pickerMenu.hidden = false;
+    pickerButton.setAttribute("aria-expanded", "true");
+    renderPickerMenu();
   });
   stopButton.addEventListener("click", () => {
     if (!runId) return;
@@ -2656,20 +2931,13 @@ export function createChatPanel({
       if (closed) return;
       models = Array.isArray(availableModels) ? availableModels : [];
       modelsReady = true;
-      renderModels();
+      initPicker();
+      renderPickerButton();
       setRunning(false);
     })
     .catch((error) => {
       if (closed) return;
-      modelSelect.replaceChildren();
-      const unavailable = createPanelElement(
-        doc,
-        "option",
-        "",
-        "Models unavailable",
-      );
-      unavailable.value = "";
-      modelSelect.appendChild(unavailable);
+      pickerButton.textContent = "Models unavailable";
       setProgress(error.message, "error");
     });
 

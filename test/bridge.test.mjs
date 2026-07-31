@@ -666,6 +666,7 @@ test("bridge exposes models, recent messages, and panel-only chat", async (t) =>
         threadId: null,
         model: "model-from-list",
         effort: "medium",
+        serviceTier: null,
       });
       onProgress({ kind: "summary", text: "Thinking" });
       onThread({ threadId: "thread_12345678" });
