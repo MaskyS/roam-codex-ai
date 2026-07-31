@@ -57,9 +57,17 @@ Branch `react-panel`, worktree `../roam-better-ai-react`. Plan block on
 
 ## Remaining steps
 
-1. Write store (port logic from the verbatim panel in git history for
-   reference: `git show HEAD:src/chat-panel.jsx`).
-2. Write components + createChatPanel shell; build; fix.
-3. Port tests; `npm run check` green.
-4. Honest review vs main for the user (what got cleaner, what did not, line
-   counts, risks); no merge without their sign-off.
+Store + components done (through 3bbb47e): ordinary react/react-dom imports
+via lazy proxy-shim aliases, automatic JSX runtime, useSyncExternalStore
+shim, context instead of prop threading, derived picker view-model,
+transient drag. Bundle expects window.React at import time (Roam provides).
+Verbatim vanilla panel reference: `git show 394474a:src/chat-panel.jsx`.
+
+1. TypeScript for src/chat-panel.tsx + src/chat-panel-store.ts (esbuild
+   compiles free; add typescript devDep + `tsc --noEmit` to check). Types:
+   Model, ThreadRecord, Snapshot, store actions.
+2. Port panel tests to jsdom + real React; use node:test mock timers instead
+   of injected timer impls (the DI was removed). Mirror main's newest
+   expectations (data-speed, wrap heights, ⌥↵).
+3. Live smoke in Roam (point dev extension at this worktree or merge first).
+4. Final review with the user; delete this file before merge.
