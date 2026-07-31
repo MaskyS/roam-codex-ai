@@ -1,4 +1,13 @@
-import { createContext, useContext, useEffect, useRef, useState } from "react";
+import {
+  createContext,
+  memo,
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
 import { createPortal, render, unmountComponentAtNode } from "react-dom";
 import { useSyncExternalStore } from "use-sync-external-store/shim/index.js";
 import { createChatPanelStore } from "./chat-panel-store.js";
@@ -48,12 +57,16 @@ function RoamString({ text, className }) {
 function CopyButton({ roleLabel, text }) {
   const { store } = usePanel();
   const [copyState, setCopyState] = useState("idle");
-  const timerRef = useRef(null);
   const mountedRef = useRef(true);
   useEffect(() => () => {
     mountedRef.current = false;
-    if (timerRef.current !== null) clearTimeout(timerRef.current);
   }, []);
+  // Feedback states expire on their own; cleanup covers unmount and restarts.
+  useEffect(() => {
+    if (copyState !== "copied" && copyState !== "error") return undefined;
+    const timer = setTimeout(() => setCopyState("idle"), 1_400);
+    return () => clearTimeout(timer);
+  }, [copyState]);
 
   const title = copyState === "copied"
     ? "Copied"
@@ -69,8 +82,6 @@ function CopyButton({ roleLabel, text }) {
   const onClick = async (event) => {
     event?.preventDefault?.();
     event?.stopPropagation?.();
-    if (timerRef.current !== null) clearTimeout(timerRef.current);
-    timerRef.current = null;
     setCopyState("copying");
     let next;
     try {
@@ -79,12 +90,7 @@ function CopyButton({ roleLabel, text }) {
     } catch {
       next = "error";
     }
-    if (!mountedRef.current) return;
-    setCopyState(next);
-    timerRef.current = setTimeout(() => {
-      timerRef.current = null;
-      if (mountedRef.current) setCopyState("idle");
-    }, 1_400);
+    if (mountedRef.current) setCopyState(next);
   };
 
   return (
@@ -102,15 +108,14 @@ function CopyButton({ roleLabel, text }) {
 function ProgressRow() {
   const { store, snapshot } = usePanel();
   const { running, runStartedAt, progress } = snapshot;
-  const [elapsedMs, setElapsedMs] = useState(0);
+  // The interval only invalidates; elapsed time derives during render.
+  const [, tick] = useReducer((count) => count + 1, 0);
   useEffect(() => {
     if (!running) return undefined;
-    setElapsedMs(0);
-    const intervalId = setInterval(() => {
-      setElapsedMs(store.now() - runStartedAt);
-    }, 1000);
+    const intervalId = setInterval(tick, 1000);
     return () => clearInterval(intervalId);
-  }, [running, runStartedAt, store]);
+  }, [running]);
+  const elapsedMs = running ? Math.max(0, store.now() - runStartedAt) : 0;
 
   return (
     <div
@@ -121,13 +126,31 @@ function ProgressRow() {
     >
       <span className="roam-codex-chat-progress-meta" hidden={!running}>
         <span className="roam-codex-chat-progress-timer">
-          {formatRunningElapsed(running ? elapsedMs : 0)}
+          {formatRunningElapsed(elapsedMs)}
         </span>
       </span>
       <span className="roam-codex-chat-progress-text">{progress.text}</span>
     </div>
   );
 }
+
+// Memoized so streaming progress emits don't re-render settled messages;
+// message objects keep their identity in the store's append-only array.
+const ChatMessage = memo(function ChatMessage({ message }) {
+  if (!message || !["user", "assistant"].includes(message.role)) return null;
+  const roleLabel = message.role === "user" ? "You" : "Codex";
+  return (
+    <article
+      className={`roam-codex-chat-message roam-codex-chat-message-${message.role}`}
+    >
+      <CopyButton roleLabel={roleLabel} text={message.text} />
+      <RoamString
+        text={message.text}
+        className="roam-codex-chat-message-text"
+      />
+    </article>
+  );
+});
 
 function Transcript({ transcriptRef }) {
   const { store, snapshot } = usePanel();
@@ -150,7 +173,8 @@ function Transcript({ transcriptRef }) {
     );
   };
 
-  useEffect(() => {
+  // Layout effect so new content is scrolled into place before paint.
+  useLayoutEffect(() => {
     const el = transcriptRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
@@ -188,24 +212,9 @@ function Transcript({ transcriptRef }) {
         style={heightStyle}
         onScroll={measureLatest}
       >
-        {messages.map((message, index) => {
-          if (!message || !["user", "assistant"].includes(message.role)) {
-            return null;
-          }
-          const roleLabel = message.role === "user" ? "You" : "Codex";
-          return (
-            <article
-              key={`${index}-${message.role}`}
-              className={`roam-codex-chat-message roam-codex-chat-message-${message.role}`}
-            >
-              <CopyButton roleLabel={roleLabel} text={message.text} />
-              <RoamString
-                text={message.text}
-                className="roam-codex-chat-message-text"
-              />
-            </article>
-          );
-        })}
+        {messages.map((message, index) => (
+          <ChatMessage key={`${index}-${message?.role}`} message={message} />
+        ))}
         <ProgressRow />
       </div>
       <button
@@ -444,14 +453,14 @@ function PickerMenu({ view }) {
   );
 }
 
-function ControlsBar({ pickerWrapRef }) {
+function ControlsBar() {
   const { store, snapshot } = usePanel();
   const { running, modelsReady, stopping, pickerOpen, pickerLabel } = snapshot;
   const view = pickerModelView(snapshot);
   const shortcutIsMac = snapshot.sendShortcutIsMac;
   return (
     <div className="roam-codex-chat-model-row">
-      <div className="roam-codex-chat-picker" ref={pickerWrapRef}>
+      <div className="roam-codex-chat-picker">
         <button
           type="button"
           className="roam-codex-chat-picker-button"
@@ -597,72 +606,6 @@ function HeaderContent({ onCloseRequested }) {
 function ChatPanelRoot({ store, doc, api, headerEl, controlsEl, onCloseRequested }) {
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const transcriptRef = useRef(null);
-  const pickerWrapRef = useRef(null);
-  useEffect(() => {
-    void store.loadModels();
-    void store.loadInitialConversation();
-  }, [store]);
-
-  useEffect(() => {
-    const handleKeydown = (event) => {
-      const current = store.getSnapshot();
-      if (
-        !event.defaultPrevented &&
-        event.key === "Escape" &&
-        (current.history.open || current.pickerOpen)
-      ) {
-        event.preventDefault();
-        event.stopPropagation?.();
-        if (current.history.open) store.closeHistory();
-        if (current.pickerOpen) store.closePicker();
-        return;
-      }
-      if (
-        !event.defaultPrevented &&
-        event.altKey &&
-        !event.metaKey &&
-        !event.ctrlKey &&
-        event.key === "Enter"
-      ) {
-        if (store.maybeSendFromShortcut()) {
-          event.preventDefault();
-          event.stopPropagation?.();
-        }
-      }
-    };
-    const handleClick = (event) => {
-      const current = store.getSnapshot();
-      if (current.history.open && !headerEl.contains?.(event.target)) {
-        store.closeHistory();
-      }
-      if (
-        current.pickerOpen &&
-        !pickerWrapRef.current?.contains?.(event.target)
-      ) {
-        store.closePicker();
-      }
-    };
-    const handleWindowFocus = () => {
-      const current = store.getSnapshot();
-      if (!current.closed && !current.running) {
-        void store.loadHistory({ reconcileActive: true });
-      }
-    };
-    const handleVisibilityChange = () => {
-      if (doc.visibilityState === "visible") handleWindowFocus();
-    };
-    doc.addEventListener?.("keydown", handleKeydown, true);
-    doc.addEventListener?.("click", handleClick, true);
-    doc.addEventListener?.("visibilitychange", handleVisibilityChange);
-    doc.defaultView?.addEventListener?.("focus", handleWindowFocus);
-    return () => {
-      doc.removeEventListener?.("keydown", handleKeydown, true);
-      doc.removeEventListener?.("click", handleClick, true);
-      doc.removeEventListener?.("visibilitychange", handleVisibilityChange);
-      doc.defaultView?.removeEventListener?.("focus", handleWindowFocus);
-    };
-  }, [store, doc, headerEl]);
-
   const Context = getPanelContext();
   return (
     <Context.Provider value={{ store, snapshot, api, doc }}>
@@ -674,12 +617,69 @@ function ChatPanelRoot({ store, doc, api, headerEl, controlsEl, onCloseRequested
         <Transcript transcriptRef={transcriptRef} />
         <ResizeHandle transcriptRef={transcriptRef} />
       </div>
-      {createPortal(
-        <ControlsBar pickerWrapRef={pickerWrapRef} />,
-        controlsEl,
-      )}
+      {createPortal(<ControlsBar />, controlsEl)}
     </Context.Provider>
   );
+}
+
+// Document-level behavior reads the store imperatively and never touches
+// component state, so it lives beside the store rather than in an effect.
+function attachDocumentBehavior({ store, doc, headerEl, controlsEl }) {
+  const handleKeydown = (event) => {
+    const current = store.getSnapshot();
+    if (
+      !event.defaultPrevented &&
+      event.key === "Escape" &&
+      (current.history.open || current.pickerOpen)
+    ) {
+      event.preventDefault();
+      event.stopPropagation?.();
+      if (current.history.open) store.closeHistory();
+      if (current.pickerOpen) store.closePicker();
+      return;
+    }
+    if (
+      !event.defaultPrevented &&
+      event.altKey &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      event.key === "Enter"
+    ) {
+      if (store.maybeSendFromShortcut()) {
+        event.preventDefault();
+        event.stopPropagation?.();
+      }
+    }
+  };
+  const handleClick = (event) => {
+    const current = store.getSnapshot();
+    if (current.history.open && !headerEl.contains?.(event.target)) {
+      store.closeHistory();
+    }
+    const pickerWrap = controlsEl.querySelector?.(".roam-codex-chat-picker");
+    if (current.pickerOpen && !pickerWrap?.contains?.(event.target)) {
+      store.closePicker();
+    }
+  };
+  const handleWindowFocus = () => {
+    const current = store.getSnapshot();
+    if (!current.closed && !current.running) {
+      void store.loadHistory({ reconcileActive: true });
+    }
+  };
+  const handleVisibilityChange = () => {
+    if (doc.visibilityState === "visible") handleWindowFocus();
+  };
+  doc.addEventListener?.("keydown", handleKeydown, true);
+  doc.addEventListener?.("click", handleClick, true);
+  doc.addEventListener?.("visibilitychange", handleVisibilityChange);
+  doc.defaultView?.addEventListener?.("focus", handleWindowFocus);
+  return () => {
+    doc.removeEventListener?.("keydown", handleKeydown, true);
+    doc.removeEventListener?.("click", handleClick, true);
+    doc.removeEventListener?.("visibilitychange", handleVisibilityChange);
+    doc.defaultView?.removeEventListener?.("focus", handleWindowFocus);
+  };
 }
 
 export function createChatPanel(options = {}) {
@@ -712,6 +712,7 @@ export function createChatPanel(options = {}) {
     const result = store.close();
     if (!unmounted) {
       unmounted = true;
+      detachDocument();
       unmountComponentAtNode(panel);
     }
     header.remove();
@@ -741,6 +742,14 @@ export function createChatPanel(options = {}) {
     />,
     panel,
   );
+  const detachDocument = attachDocumentBehavior({
+    store,
+    doc,
+    headerEl: header,
+    controlsEl: controls,
+  });
+  void store.loadModels();
+  void store.loadInitialConversation();
 
   return {
     element: panel,

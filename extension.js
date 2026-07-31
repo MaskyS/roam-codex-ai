@@ -69,7 +69,7 @@ var require_use_sync_external_store_shim_development = __commonJS({
           inst: { value, getSnapshot }
         });
         var inst = cachedValue[0].inst, forceUpdate = cachedValue[1];
-        useLayoutEffect(
+        useLayoutEffect2(
           function() {
             inst.value = value;
             inst.getSnapshot = getSnapshot;
@@ -103,7 +103,7 @@ var require_use_sync_external_store_shim_development = __commonJS({
         return getSnapshot();
       }
       "undefined" !== typeof __REACT_DEVTOOLS_GLOBAL_HOOK__ && "function" === typeof __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStart && __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStart(Error());
-      var React = require_react_shim(), objectIs = "function" === typeof Object.is ? Object.is : is, useState2 = React.useState, useEffect2 = React.useEffect, useLayoutEffect = React.useLayoutEffect, useDebugValue = React.useDebugValue, didWarnOld18Alpha = false, didWarnUncachedGetSnapshot = false, shim = "undefined" === typeof window || "undefined" === typeof window.document || "undefined" === typeof window.document.createElement ? useSyncExternalStore$1 : useSyncExternalStore$2;
+      var React = require_react_shim(), objectIs = "function" === typeof Object.is ? Object.is : is, useState2 = React.useState, useEffect2 = React.useEffect, useLayoutEffect2 = React.useLayoutEffect, useDebugValue = React.useDebugValue, didWarnOld18Alpha = false, didWarnUncachedGetSnapshot = false, shim = "undefined" === typeof window || "undefined" === typeof window.document || "undefined" === typeof window.document.createElement ? useSyncExternalStore$1 : useSyncExternalStore$2;
       exports.useSyncExternalStore = void 0 !== React.useSyncExternalStore ? React.useSyncExternalStore : shim;
       "undefined" !== typeof __REACT_DEVTOOLS_GLOBAL_HOOK__ && "function" === typeof __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStop && __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStop(Error());
     })();
@@ -1888,19 +1888,20 @@ function RoamString({ text, className }) {
 function CopyButton({ roleLabel, text }) {
   const { store } = usePanel();
   const [copyState, setCopyState] = (0, import_react.useState)("idle");
-  const timerRef = (0, import_react.useRef)(null);
   const mountedRef = (0, import_react.useRef)(true);
   (0, import_react.useEffect)(() => () => {
     mountedRef.current = false;
-    if (timerRef.current !== null) clearTimeout(timerRef.current);
   }, []);
+  (0, import_react.useEffect)(() => {
+    if (copyState !== "copied" && copyState !== "error") return void 0;
+    const timer = setTimeout(() => setCopyState("idle"), 1400);
+    return () => clearTimeout(timer);
+  }, [copyState]);
   const title = copyState === "copied" ? "Copied" : copyState === "error" ? "Could not copy Roam text" : "Copy Roam text";
   const ariaLabel = copyState === "copied" ? "Copied Roam text" : copyState === "error" ? "Could not copy Roam text" : `Copy ${roleLabel} message as Roam text`;
   const onClick = async (event) => {
     event?.preventDefault?.();
     event?.stopPropagation?.();
-    if (timerRef.current !== null) clearTimeout(timerRef.current);
-    timerRef.current = null;
     setCopyState("copying");
     let next;
     try {
@@ -1909,12 +1910,7 @@ function CopyButton({ roleLabel, text }) {
     } catch {
       next = "error";
     }
-    if (!mountedRef.current) return;
-    setCopyState(next);
-    timerRef.current = setTimeout(() => {
-      timerRef.current = null;
-      if (mountedRef.current) setCopyState("idle");
-    }, 1400);
+    if (mountedRef.current) setCopyState(next);
   };
   return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
     "button",
@@ -1931,15 +1927,13 @@ function CopyButton({ roleLabel, text }) {
 function ProgressRow() {
   const { store, snapshot } = usePanel();
   const { running, runStartedAt, progress } = snapshot;
-  const [elapsedMs, setElapsedMs] = (0, import_react.useState)(0);
+  const [, tick] = (0, import_react.useReducer)((count) => count + 1, 0);
   (0, import_react.useEffect)(() => {
     if (!running) return void 0;
-    setElapsedMs(0);
-    const intervalId = setInterval(() => {
-      setElapsedMs(store.now() - runStartedAt);
-    }, 1e3);
+    const intervalId = setInterval(tick, 1e3);
     return () => clearInterval(intervalId);
-  }, [running, runStartedAt, store]);
+  }, [running]);
+  const elapsedMs = running ? Math.max(0, store.now() - runStartedAt) : 0;
   return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
     "div",
     {
@@ -1948,12 +1942,32 @@ function ProgressRow() {
       "data-kind": progress.kind,
       hidden: !progress.text && !running,
       children: [
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "roam-codex-chat-progress-meta", hidden: !running, children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "roam-codex-chat-progress-timer", children: formatRunningElapsed(running ? elapsedMs : 0) }) }),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "roam-codex-chat-progress-meta", hidden: !running, children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "roam-codex-chat-progress-timer", children: formatRunningElapsed(elapsedMs) }) }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "roam-codex-chat-progress-text", children: progress.text })
       ]
     }
   );
 }
+var ChatMessage = (0, import_react.memo)(function ChatMessage2({ message }) {
+  if (!message || !["user", "assistant"].includes(message.role)) return null;
+  const roleLabel = message.role === "user" ? "You" : "Codex";
+  return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
+    "article",
+    {
+      className: `roam-codex-chat-message roam-codex-chat-message-${message.role}`,
+      children: [
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)(CopyButton, { roleLabel, text: message.text }),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+          RoamString,
+          {
+            text: message.text,
+            className: "roam-codex-chat-message-text"
+          }
+        )
+      ]
+    }
+  );
+});
 function Transcript({ transcriptRef }) {
   const { store, snapshot } = usePanel();
   const { messages, transcriptHeight, running, progress } = snapshot;
@@ -1971,7 +1985,7 @@ function Transcript({ transcriptRef }) {
       messages.length > 0 && overflowing && fromBottom > CHAT_SCROLL_BOTTOM_THRESHOLD
     );
   };
-  (0, import_react.useEffect)(() => {
+  (0, import_react.useLayoutEffect)(() => {
     const el = transcriptRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
@@ -2007,29 +2021,7 @@ function Transcript({ transcriptRef }) {
         style: heightStyle,
         onScroll: measureLatest,
         children: [
-          messages.map((message, index) => {
-            if (!message || !["user", "assistant"].includes(message.role)) {
-              return null;
-            }
-            const roleLabel = message.role === "user" ? "You" : "Codex";
-            return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
-              "article",
-              {
-                className: `roam-codex-chat-message roam-codex-chat-message-${message.role}`,
-                children: [
-                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)(CopyButton, { roleLabel, text: message.text }),
-                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
-                    RoamString,
-                    {
-                      text: message.text,
-                      className: "roam-codex-chat-message-text"
-                    }
-                  )
-                ]
-              },
-              `${index}-${message.role}`
-            );
-          }),
+          messages.map((message, index) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)(ChatMessage, { message }, `${index}-${message?.role}`)),
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)(ProgressRow, {})
         ]
       }
@@ -2249,13 +2241,13 @@ function PickerMenu({ view }) {
     )
   ] });
 }
-function ControlsBar({ pickerWrapRef }) {
+function ControlsBar() {
   const { store, snapshot } = usePanel();
   const { running, modelsReady, stopping, pickerOpen, pickerLabel } = snapshot;
   const view = pickerModelView(snapshot);
   const shortcutIsMac = snapshot.sendShortcutIsMac;
   return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "roam-codex-chat-model-row", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "roam-codex-chat-picker", ref: pickerWrapRef, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "roam-codex-chat-picker", children: [
       /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
         "button",
         {
@@ -2387,57 +2379,6 @@ function HeaderContent({ onCloseRequested }) {
 function ChatPanelRoot({ store, doc, api, headerEl, controlsEl, onCloseRequested }) {
   const snapshot = (0, import_shim.useSyncExternalStore)(store.subscribe, store.getSnapshot);
   const transcriptRef = (0, import_react.useRef)(null);
-  const pickerWrapRef = (0, import_react.useRef)(null);
-  (0, import_react.useEffect)(() => {
-    void store.loadModels();
-    void store.loadInitialConversation();
-  }, [store]);
-  (0, import_react.useEffect)(() => {
-    const handleKeydown = (event) => {
-      const current = store.getSnapshot();
-      if (!event.defaultPrevented && event.key === "Escape" && (current.history.open || current.pickerOpen)) {
-        event.preventDefault();
-        event.stopPropagation?.();
-        if (current.history.open) store.closeHistory();
-        if (current.pickerOpen) store.closePicker();
-        return;
-      }
-      if (!event.defaultPrevented && event.altKey && !event.metaKey && !event.ctrlKey && event.key === "Enter") {
-        if (store.maybeSendFromShortcut()) {
-          event.preventDefault();
-          event.stopPropagation?.();
-        }
-      }
-    };
-    const handleClick = (event) => {
-      const current = store.getSnapshot();
-      if (current.history.open && !headerEl.contains?.(event.target)) {
-        store.closeHistory();
-      }
-      if (current.pickerOpen && !pickerWrapRef.current?.contains?.(event.target)) {
-        store.closePicker();
-      }
-    };
-    const handleWindowFocus = () => {
-      const current = store.getSnapshot();
-      if (!current.closed && !current.running) {
-        void store.loadHistory({ reconcileActive: true });
-      }
-    };
-    const handleVisibilityChange = () => {
-      if (doc.visibilityState === "visible") handleWindowFocus();
-    };
-    doc.addEventListener?.("keydown", handleKeydown, true);
-    doc.addEventListener?.("click", handleClick, true);
-    doc.addEventListener?.("visibilitychange", handleVisibilityChange);
-    doc.defaultView?.addEventListener?.("focus", handleWindowFocus);
-    return () => {
-      doc.removeEventListener?.("keydown", handleKeydown, true);
-      doc.removeEventListener?.("click", handleClick, true);
-      doc.removeEventListener?.("visibilitychange", handleVisibilityChange);
-      doc.defaultView?.removeEventListener?.("focus", handleWindowFocus);
-    };
-  }, [store, doc, headerEl]);
   const Context = getPanelContext();
   return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(Context.Provider, { value: { store, snapshot, api, doc }, children: [
     (0, import_react_dom.createPortal)(
@@ -2448,11 +2389,55 @@ function ChatPanelRoot({ store, doc, api, headerEl, controlsEl, onCloseRequested
       /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Transcript, { transcriptRef }),
       /* @__PURE__ */ (0, import_jsx_runtime.jsx)(ResizeHandle, { transcriptRef })
     ] }),
-    (0, import_react_dom.createPortal)(
-      /* @__PURE__ */ (0, import_jsx_runtime.jsx)(ControlsBar, { pickerWrapRef }),
-      controlsEl
-    )
+    (0, import_react_dom.createPortal)(/* @__PURE__ */ (0, import_jsx_runtime.jsx)(ControlsBar, {}), controlsEl)
   ] });
+}
+function attachDocumentBehavior({ store, doc, headerEl, controlsEl }) {
+  const handleKeydown = (event) => {
+    const current = store.getSnapshot();
+    if (!event.defaultPrevented && event.key === "Escape" && (current.history.open || current.pickerOpen)) {
+      event.preventDefault();
+      event.stopPropagation?.();
+      if (current.history.open) store.closeHistory();
+      if (current.pickerOpen) store.closePicker();
+      return;
+    }
+    if (!event.defaultPrevented && event.altKey && !event.metaKey && !event.ctrlKey && event.key === "Enter") {
+      if (store.maybeSendFromShortcut()) {
+        event.preventDefault();
+        event.stopPropagation?.();
+      }
+    }
+  };
+  const handleClick = (event) => {
+    const current = store.getSnapshot();
+    if (current.history.open && !headerEl.contains?.(event.target)) {
+      store.closeHistory();
+    }
+    const pickerWrap = controlsEl.querySelector?.(".roam-codex-chat-picker");
+    if (current.pickerOpen && !pickerWrap?.contains?.(event.target)) {
+      store.closePicker();
+    }
+  };
+  const handleWindowFocus = () => {
+    const current = store.getSnapshot();
+    if (!current.closed && !current.running) {
+      void store.loadHistory({ reconcileActive: true });
+    }
+  };
+  const handleVisibilityChange = () => {
+    if (doc.visibilityState === "visible") handleWindowFocus();
+  };
+  doc.addEventListener?.("keydown", handleKeydown, true);
+  doc.addEventListener?.("click", handleClick, true);
+  doc.addEventListener?.("visibilitychange", handleVisibilityChange);
+  doc.defaultView?.addEventListener?.("focus", handleWindowFocus);
+  return () => {
+    doc.removeEventListener?.("keydown", handleKeydown, true);
+    doc.removeEventListener?.("click", handleClick, true);
+    doc.removeEventListener?.("visibilitychange", handleVisibilityChange);
+    doc.defaultView?.removeEventListener?.("focus", handleWindowFocus);
+  };
 }
 function createChatPanel(options = {}) {
   const {
@@ -2482,6 +2467,7 @@ function createChatPanel(options = {}) {
     const result = store.close();
     if (!unmounted) {
       unmounted = true;
+      detachDocument();
       (0, import_react_dom.unmountComponentAtNode)(panel);
     }
     header.remove();
@@ -2511,6 +2497,14 @@ function createChatPanel(options = {}) {
     ),
     panel
   );
+  const detachDocument = attachDocumentBehavior({
+    store,
+    doc,
+    headerEl: header,
+    controlsEl: controls
+  });
+  void store.loadModels();
+  void store.loadInitialConversation();
   return {
     element: panel,
     headerElement: header,
