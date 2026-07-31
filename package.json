@@ -1,0 +1,17 @@
+{
+  "name": "roam-codex-lab",
+  "version": "0.8.0",
+  "private": true,
+  "type": "module",
+  "description": "A minimal Roam-to-Codex app-server development loop.",
+  "scripts": {
+    "dev": "node --watch bridge.mjs",
+    "start": "node bridge.mjs",
+    "show-token": "node bridge.mjs --show-token",
+    "test": "node --test",
+    "check": "node --check bridge.mjs && node --check extension.js && node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

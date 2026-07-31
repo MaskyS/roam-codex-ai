@@ -1,0 +1,12 @@
+# Builder tasks in this repository inherit the user's normal Roam connection
+# and can use every tool exposed by the Roam MCP. `bridge.mjs` applies a
+# separate, explicit read-only tool override when it launches the runtime agent.
+web_search = "live"
+
+[mcp_servers.roam]
+command = "npx"
+args = ["-y", "@roam-research/roam-mcp@0.9.1"]
+required = true
+startup_timeout_sec = 30
+tool_timeout_sec = 60
+default_tools_approval_mode = "approve"
