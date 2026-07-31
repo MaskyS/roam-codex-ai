@@ -21,10 +21,12 @@ const useRef = (...args) => React.useRef(...args);
 
 function useStoreSnapshot(store) {
   const [snapshot, setSnapshot] = useState(store.getSnapshot);
-  useEffect(
-    () => store.subscribe(() => setSnapshot(store.getSnapshot())),
-    [store],
-  );
+  useEffect(() => {
+    const unsubscribe = store.subscribe(() => setSnapshot(store.getSnapshot()));
+    // Catch emissions that happened between first render and subscription.
+    setSnapshot(store.getSnapshot());
+    return unsubscribe;
+  }, [store]);
   return snapshot;
 }
 
@@ -57,7 +59,9 @@ function CopyButton({
 }) {
   const [copyState, setCopyState] = useState("idle");
   const timerRef = useRef(null);
+  const mountedRef = useRef(true);
   useEffect(() => () => {
+    mountedRef.current = false;
     if (timerRef.current !== null) clearTimeoutImpl(timerRef.current);
   }, [clearTimeoutImpl]);
 
@@ -86,10 +90,11 @@ function CopyButton({
     } catch {
       next = "error";
     }
+    if (!mountedRef.current) return;
     setCopyState(next);
     timerRef.current = setTimeoutImpl(() => {
       timerRef.current = null;
-      setCopyState("idle");
+      if (mountedRef.current) setCopyState("idle");
     }, 1_400);
   };
 
@@ -198,7 +203,7 @@ function Transcript({
   const transcriptHidden = !messages.length && !progressVisible;
 
   return (
-    <div className="roam-codex-chat-transcript-wrap">
+    <div className="roam-codex-chat-transcript-wrap" style={heightStyle}>
       <div
         className="roam-codex-chat-transcript"
         role="log"
@@ -292,7 +297,6 @@ function ResizeHandle({ snapshot, store, doc, transcriptRef }) {
       role="separator"
       aria-orientation="horizontal"
       aria-label="Resize the conversation area"
-      hidden={!snapshot.messages.length}
       onPointerDown={onPointerDown}
     />
   );
@@ -441,6 +445,9 @@ function ControlsBar({ snapshot, store, pickerWrapRef }) {
           aria-label="Model, effort, and speed"
           aria-haspopup="menu"
           aria-expanded={picker.open}
+          data-speed={modelsReady
+            ? (picker.currentTier?.id === "priority" ? "fast" : "standard")
+            : undefined}
           disabled={running || !modelsReady}
           onClick={() => store.togglePicker()}
         >
@@ -454,8 +461,8 @@ function ControlsBar({ snapshot, store, pickerWrapRef }) {
           className="roam-codex-chat-stop"
           title="Stop the current Codex turn"
           hidden={!running}
-          onClick={(event) => {
-            event.currentTarget.disabled = true;
+          disabled={snapshot.stopping}
+          onClick={() => {
             void store.stop().catch(() => {
               // The store surfaces the failure in the progress row.
             });
@@ -479,7 +486,7 @@ function ControlsBar({ snapshot, store, pickerWrapRef }) {
         >
           Send
           <kbd className="roam-codex-chat-send-kbd" aria-hidden="true">
-            {sendShortcutIsMac ? "⌥⏎" : "Alt ⏎"}
+            {sendShortcutIsMac ? "⌥↵" : "Alt ↵"}
           </kbd>
         </button>
       </div>
@@ -591,7 +598,6 @@ function ChatPanelRoot({
   const snapshot = useStoreSnapshot(store);
   const transcriptRef = useRef(null);
   const pickerWrapRef = useRef(null);
-  const headerElRef = useRef(headerEl);
 
   useEffect(() => {
     void store.loadModels();
@@ -627,10 +633,7 @@ function ChatPanelRoot({
     };
     const handleClick = (event) => {
       const current = store.getSnapshot();
-      if (
-        current.history.open &&
-        !headerElRef.current?.contains?.(event.target)
-      ) {
+      if (current.history.open && !headerEl.contains?.(event.target)) {
         store.closeHistory();
       }
       if (

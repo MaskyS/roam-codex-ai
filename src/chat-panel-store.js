@@ -117,6 +117,9 @@ export function createChatPanelStore({
   let pickerSpeed = "";
   let pickerOpen = false;
   let pickerLevel = null;
+  let stopRequested = false;
+  let modelsRequested = false;
+  let initialLoadStarted = false;
 
   const clampTranscriptHeight = (value) => Math.min(
     CHAT_TRANSCRIPT_MAX_HEIGHT,
@@ -343,12 +346,6 @@ export function createChatPanelStore({
     const selected = currentModelEntry();
     const parts = [selected?.displayName || selected?.id || "Model"];
     if (pickerEffort) parts.push(effortLabel(pickerEffort));
-    const tier = modelTierChoices(selected).find(
-      (entry) => entry.id === pickerSpeed,
-    );
-    if (tier && tier.id !== defaultTierIdFor(selected)) {
-      parts.push(tier.name || tier.id);
-    }
     return parts.join(" · ");
   };
 
@@ -584,6 +581,7 @@ export function createChatPanelStore({
       resolveIdle = null;
     }
     running = value;
+    stopRequested = false;
     if (value && pickerOpen) {
       pickerOpen = false;
       pickerLevel = null;
@@ -775,8 +773,10 @@ export function createChatPanelStore({
 
   const stop = () => {
     if (!runId) return Promise.resolve();
+    stopRequested = true;
     setProgress("Stopping", "activity");
     return cancelRequest(runId).catch((error) => {
+      stopRequested = false;
       setProgress(error.message || "Could not stop the turn.", "error");
       throw error;
     });
@@ -831,6 +831,7 @@ export function createChatPanelStore({
       modelsReady,
       models,
       progress: { text: progressTextValue, kind: progressKind },
+      stopping: stopRequested,
       picker: {
         open: pickerOpen,
         level: pickerLevel,
@@ -952,6 +953,8 @@ export function createChatPanelStore({
       }
     },
     loadModels() {
+      if (modelsRequested) return Promise.resolve();
+      modelsRequested = true;
       return requestModelsImpl()
         .then((availableModels) => {
           if (closed) return;
@@ -967,6 +970,8 @@ export function createChatPanelStore({
         });
     },
     loadInitialConversation() {
+      if (initialLoadStarted) return Promise.resolve();
+      initialLoadStarted = true;
       const initialThreadId = state.activeThreadId;
       return loadHistory().then(() => {
         if (

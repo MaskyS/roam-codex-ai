@@ -86,6 +86,9 @@ function createChatPanelStore({
   let pickerSpeed = "";
   let pickerOpen = false;
   let pickerLevel = null;
+  let stopRequested = false;
+  let modelsRequested = false;
+  let initialLoadStarted = false;
   const clampTranscriptHeight = (value) => Math.min(
     CHAT_TRANSCRIPT_MAX_HEIGHT,
     Math.max(CHAT_TRANSCRIPT_MIN_HEIGHT, Math.round(value))
@@ -269,12 +272,6 @@ ${name}`);
     const selected = currentModelEntry();
     const parts = [selected?.displayName || selected?.id || "Model"];
     if (pickerEffort) parts.push(effortLabel(pickerEffort));
-    const tier = modelTierChoices(selected).find(
-      (entry) => entry.id === pickerSpeed
-    );
-    if (tier && tier.id !== defaultTierIdFor(selected)) {
-      parts.push(tier.name || tier.id);
-    }
     return parts.join(" \xB7 ");
   };
   const historyItems = () => buildConversationHistory(
@@ -475,6 +472,7 @@ ${name}`);
       resolveIdle = null;
     }
     running = value;
+    stopRequested = false;
     if (value && pickerOpen) {
       pickerOpen = false;
       pickerLevel = null;
@@ -640,8 +638,10 @@ ${name}`);
   };
   const stop = () => {
     if (!runId) return Promise.resolve();
+    stopRequested = true;
     setProgress("Stopping", "activity");
     return cancelRequest(runId).catch((error) => {
+      stopRequested = false;
       setProgress(error.message || "Could not stop the turn.", "error");
       throw error;
     });
@@ -689,6 +689,7 @@ ${name}`);
       modelsReady,
       models,
       progress: { text: progressTextValue, kind: progressKind },
+      stopping: stopRequested,
       picker: {
         open: pickerOpen,
         level: pickerLevel,
@@ -804,6 +805,8 @@ ${name}`);
       }
     },
     loadModels() {
+      if (modelsRequested) return Promise.resolve();
+      modelsRequested = true;
       return requestModelsImpl().then((availableModels) => {
         if (closed) return;
         models = Array.isArray(availableModels) ? availableModels : [];
@@ -817,6 +820,8 @@ ${name}`);
       });
     },
     loadInitialConversation() {
+      if (initialLoadStarted) return Promise.resolve();
+      initialLoadStarted = true;
       const initialThreadId = state.activeThreadId;
       return loadHistory().then(() => {
         if (!closed && initialThreadId && state.activeThreadId === initialThreadId && !["missing", "unavailable"].includes(
@@ -835,10 +840,11 @@ var useEffect = (...args) => React.useEffect(...args);
 var useRef = (...args) => React.useRef(...args);
 function useStoreSnapshot(store) {
   const [snapshot, setSnapshot] = useState(store.getSnapshot);
-  useEffect(
-    () => store.subscribe(() => setSnapshot(store.getSnapshot())),
-    [store]
-  );
+  useEffect(() => {
+    const unsubscribe = store.subscribe(() => setSnapshot(store.getSnapshot()));
+    setSnapshot(store.getSnapshot());
+    return unsubscribe;
+  }, [store]);
   return snapshot;
 }
 function RoamString({ api, text, className }) {
@@ -868,7 +874,9 @@ function CopyButton({
 }) {
   const [copyState, setCopyState] = useState("idle");
   const timerRef = useRef(null);
+  const mountedRef = useRef(true);
   useEffect(() => () => {
+    mountedRef.current = false;
     if (timerRef.current !== null) clearTimeoutImpl(timerRef.current);
   }, [clearTimeoutImpl]);
   const idleLabel = `Copy ${roleLabel} message as Roam text`;
@@ -887,10 +895,11 @@ function CopyButton({
     } catch {
       next = "error";
     }
+    if (!mountedRef.current) return;
     setCopyState(next);
     timerRef.current = setTimeoutImpl(() => {
       timerRef.current = null;
-      setCopyState("idle");
+      if (mountedRef.current) setCopyState("idle");
     }, 1400);
   };
   return /* @__PURE__ */ React.createElement(
@@ -984,7 +993,7 @@ function Transcript({
     maxHeight: `${transcriptHeight}px`
   };
   const transcriptHidden = !messages.length && !progressVisible;
-  return /* @__PURE__ */ React.createElement("div", { className: "roam-codex-chat-transcript-wrap" }, /* @__PURE__ */ React.createElement(
+  return /* @__PURE__ */ React.createElement("div", { className: "roam-codex-chat-transcript-wrap", style: heightStyle }, /* @__PURE__ */ React.createElement(
     "div",
     {
       className: "roam-codex-chat-transcript",
@@ -1081,7 +1090,6 @@ function ResizeHandle({ snapshot, store, doc, transcriptRef }) {
       role: "separator",
       "aria-orientation": "horizontal",
       "aria-label": "Resize the conversation area",
-      hidden: !snapshot.messages.length,
       onPointerDown
     }
   );
@@ -1215,6 +1223,7 @@ function ControlsBar({ snapshot, store, pickerWrapRef }) {
       "aria-label": "Model, effort, and speed",
       "aria-haspopup": "menu",
       "aria-expanded": picker.open,
+      "data-speed": modelsReady ? picker.currentTier?.id === "priority" ? "fast" : "standard" : void 0,
       disabled: running || !modelsReady,
       onClick: () => store.togglePicker()
     },
@@ -1226,8 +1235,8 @@ function ControlsBar({ snapshot, store, pickerWrapRef }) {
       className: "roam-codex-chat-stop",
       title: "Stop the current Codex turn",
       hidden: !running,
-      onClick: (event) => {
-        event.currentTarget.disabled = true;
+      disabled: snapshot.stopping,
+      onClick: () => {
         void store.stop().catch(() => {
         });
       }
@@ -1247,7 +1256,7 @@ function ControlsBar({ snapshot, store, pickerWrapRef }) {
       onClick: () => void store.send()
     },
     "Send",
-    /* @__PURE__ */ React.createElement("kbd", { className: "roam-codex-chat-send-kbd", "aria-hidden": "true" }, sendShortcutIsMac ? "\u2325\u23CE" : "Alt \u23CE")
+    /* @__PURE__ */ React.createElement("kbd", { className: "roam-codex-chat-send-kbd", "aria-hidden": "true" }, sendShortcutIsMac ? "\u2325\u21B5" : "Alt \u21B5")
   )));
 }
 function HeaderContent({ snapshot, store, onCloseRequested }) {
@@ -1335,7 +1344,6 @@ function ChatPanelRoot({
   const snapshot = useStoreSnapshot(store);
   const transcriptRef = useRef(null);
   const pickerWrapRef = useRef(null);
-  const headerElRef = useRef(headerEl);
   useEffect(() => {
     void store.loadModels();
     void store.loadInitialConversation();
@@ -1359,7 +1367,7 @@ function ChatPanelRoot({
     };
     const handleClick = (event) => {
       const current = store.getSnapshot();
-      if (current.history.open && !headerElRef.current?.contains?.(event.target)) {
+      if (current.history.open && !headerEl.contains?.(event.target)) {
         store.closeHistory();
       }
       if (current.picker.open && !pickerWrapRef.current?.contains?.(event.target)) {

@@ -488,7 +488,7 @@ test("app-server chat starts and resumes a persistent panel conversation", async
         "Prompt block UID: prompt123",
         "Read this block and useful descendants with Roam MCP before answering.",
         "Treat its page and block references as part of the user's instruction.",
-        "Format for Roam renderString: use **bold** and __italic__ (never single-asterisk emphasis), and use • instead of Markdown - bullets.",
+        "Format for Roam renderString: use **bold** and __italic__, never single-asterisk emphasis.",
       ].join("\n"),
     },
   });
@@ -515,10 +515,6 @@ test("app-server chat starts and resumes a persistent panel conversation", async
   assert.match(
     threadStart.params.developerInstructions,
     /`\*\*bold\*\*` and `__italic__`/,
-  );
-  assert.match(
-    threadStart.params.developerInstructions,
-    /visible `•` character/,
   );
   assert.deepEqual(
     threadStart.params.config.mcp_servers.roam.enabled_tools,
