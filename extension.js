@@ -16,11 +16,18 @@ const CHAT_PANEL_CLASS = "roam-codex-chat-panel";
 const SIDEBAR_CHAT_LAUNCHER_ID = "roam-codex-sidebar-chat-launcher";
 const CHAT_STATE_VERSION = 2;
 const CHAT_STATE_KEY = `roam-codex-lab.chat-state.v${CHAT_STATE_VERSION}.${GRAPH}`;
+const INSTALLATION_ID_KEY = `roam-codex-lab.installation-id.${GRAPH}`;
+const THREAD_PAGE_PREFIX = "Codex/thread/";
+const THREAD_ID_FIELD = "Codex thread::";
+const THREAD_ORIGIN_FIELD = "Origin installation::";
+const THREAD_CREATED_FIELD = "Created at::";
+const THREAD_ACTIVE_FIELD = "Last active at::";
 const CHAT_TRANSCRIPT_HEIGHT_KEY = `roam-codex-lab.chat-transcript-height.${GRAPH}`;
 const CHAT_TRANSCRIPT_MIN_HEIGHT = 140;
 const CHAT_TRANSCRIPT_MAX_HEIGHT = 640;
 const CHAT_SCROLL_BOTTOM_THRESHOLD = 24;
 const NATIVE_WINDOW_HEADER_CLASS = "roam-codex-native-window-header";
+const NATIVE_COMPOSER_CLASS = "roam-codex-native-composer";
 let ACTIVE_CHAT_PANEL = null;
 let SIDEBAR_CHAT_LAUNCHER = null;
 
@@ -72,6 +79,22 @@ export function readChatState({
       threadPageUid: typeof record.threadPageUid === "string"
         ? record.threadPageUid
         : null,
+      threadPageTitle: typeof record.threadPageTitle === "string" &&
+          record.threadPageTitle.startsWith(THREAD_PAGE_PREFIX)
+        ? record.threadPageTitle
+        : null,
+      originInstallationId: typeof record.originInstallationId === "string"
+        ? record.originInstallationId
+        : null,
+      lastSeenUpdatedAt: Number.isFinite(record.lastSeenUpdatedAt)
+        ? record.lastSeenUpdatedAt
+        : 0,
+      availability: ["available", "missing", "unavailable", "pending"].includes(
+          record.availability,
+        )
+        ? record.availability
+        : "pending",
+      pendingGraphIndex: record.pendingGraphIndex === true,
     };
   }
 
@@ -335,6 +358,40 @@ export async function requestPanelMessages(threadId, options = {}) {
   return Array.isArray(result.messages) ? result.messages : [];
 }
 
+export async function requestPanelThreadName(threadId, name, {
+  fetchImpl = window.fetch.bind(window),
+  token = getToken(),
+} = {}) {
+  if (!token) {
+    throw new Error('No bridge token. Run "Codex: Pair local bridge" first.');
+  }
+  const cleanName = singleLine(name);
+  if (!validThreadId(threadId) || !cleanName || cleanName.length > 100) {
+    throw new Error("A valid conversation and name are required.");
+  }
+  const response = await fetchImpl(
+    `${BRIDGE_URL}/threads/${encodeURIComponent(threadId)}/name`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ graph: GRAPH, name: cleanName }),
+    },
+  );
+  let result = {};
+  try {
+    result = await response.json();
+  } catch {
+    // A useful status error is emitted below.
+  }
+  if (!response.ok) {
+    throw new Error(result.error || `Bridge returned HTTP ${response.status}.`);
+  }
+  return result;
+}
+
 export async function requestPanelChat(message, {
   fetchImpl = window.fetch.bind(window),
   token = getToken(),
@@ -430,6 +487,319 @@ function singleLine(value) {
   return String(value).replace(/\s+/g, " ").trim();
 }
 
+function threadPageLabel(title) {
+  return typeof title === "string" && title.startsWith(THREAD_PAGE_PREFIX)
+    ? singleLine(title.slice(THREAD_PAGE_PREFIX.length))
+    : "";
+}
+
+function readableThreadLabel(value, timestamp = Date.now()) {
+  const cleaned = singleLine(value)
+    .replace(/\[\[|\]\]/g, "")
+    .replace(/[\r\n/#]+/g, " · ")
+    .replace(/\s*·\s*/g, " · ")
+    .slice(0, 80)
+    .trim();
+  return cleaned || `Untitled · ${conversationDateLabel(timestamp)}`;
+}
+
+function storageInstallationId({
+  storage = window.localStorage,
+  key = INSTALLATION_ID_KEY,
+  cryptoImpl = globalThis.crypto,
+} = {}) {
+  const existing = storage.getItem(key)?.trim();
+  if (/^[A-Za-z0-9_-]{8,128}$/.test(existing || "")) return existing;
+  const random = cryptoImpl?.randomUUID?.() || [
+    Date.now().toString(36),
+    Math.random().toString(36).slice(2),
+    Math.random().toString(36).slice(2),
+  ].join("-");
+  const installationId = `install_${random}`.replace(/[^A-Za-z0-9_-]/g, "_");
+  storage.setItem(key, installationId);
+  return installationId;
+}
+
+function fieldChildren(page, label) {
+  return (page?.[":block/children"] || page?.children || [])
+    .filter((child) => typeof (child?.[":block/string"] ?? child?.string) === "string")
+    .filter((child) =>
+      (child[":block/string"] ?? child.string).startsWith(`${label} `)
+    )
+    .map((child) => ({
+      uid: child[":block/uid"] ?? child.uid,
+      value: singleLine(
+        (child[":block/string"] ?? child.string).slice(label.length),
+      ),
+    }));
+}
+
+async function pullThreadPage(api, pageUid) {
+  const pattern = [
+    "[:block/uid :node/title",
+    "{:block/children [:block/uid :block/string :block/order]}]",
+  ].join(" ");
+  if (api.data?.async?.pull) {
+    return api.data.async.pull(pattern, [":block/uid", pageUid]);
+  }
+  return api.data?.pull?.(pattern, [":block/uid", pageUid]) || null;
+}
+
+async function threadPageRows(api) {
+  if (typeof api.q !== "function") return [];
+  try {
+    return api.q(
+      "[:find ?uid ?title :in $ ?prefix :where " +
+        "[?page :block/uid ?uid] [?page :node/title ?title] " +
+        "[(clojure.string/starts-with? ?title ?prefix)]]",
+      THREAD_PAGE_PREFIX,
+    ) || [];
+  } catch {
+    const rows = api.q(
+      "[:find ?uid ?title :where " +
+        "[?page :block/uid ?uid] [?page :node/title ?title]]",
+    ) || [];
+    return rows.filter((row) =>
+      Array.isArray(row) && String(row[1] || "").startsWith(THREAD_PAGE_PREFIX)
+    );
+  }
+}
+
+export async function readGraphThreadIndex({ api = getRoamApi() } = {}) {
+  const rows = await Promise.resolve(threadPageRows(api));
+  const uniqueRows = [...new Map(
+    rows
+      .filter((row) =>
+        Array.isArray(row) &&
+        typeof row[0] === "string" &&
+        typeof row[1] === "string" &&
+        row[1].startsWith(THREAD_PAGE_PREFIX)
+      )
+      .map((row) => [row[0], row]),
+  ).values()].slice(0, 500);
+  const pages = (await Promise.all(
+    uniqueRows.map(async ([pageUid, title]) => {
+      const page = await pullThreadPage(api, pageUid);
+      if (!page) return null;
+      return { page, pageUid, title };
+    }),
+  )).filter(Boolean);
+
+  const records = [];
+  const errors = [];
+  for (const entry of pages) {
+    const ids = fieldChildren(entry.page, THREAD_ID_FIELD);
+    if (ids.length !== 1 || !validThreadId(ids[0]?.value)) {
+      errors.push({
+        pageUid: entry.pageUid,
+        title: entry.title,
+        error: ids.length > 1
+          ? "Thread page contains multiple Codex thread IDs."
+          : "Thread page does not contain one valid Codex thread ID.",
+      });
+      continue;
+    }
+    const origins = fieldChildren(entry.page, THREAD_ORIGIN_FIELD);
+    const created = fieldChildren(entry.page, THREAD_CREATED_FIELD);
+    const active = fieldChildren(entry.page, THREAD_ACTIVE_FIELD);
+    if (origins.length > 1 || created.length > 1 || active.length > 1) {
+      errors.push({
+        pageUid: entry.pageUid,
+        title: entry.title,
+        threadId: ids[0].value,
+        error: "Thread page contains duplicate metadata fields.",
+      });
+      continue;
+    }
+    records.push({
+      threadId: ids[0].value,
+      threadPageUid: entry.pageUid,
+      threadPageTitle: entry.title,
+      originInstallationId: origins[0]?.value || null,
+      createdAt: Date.parse(created[0]?.value || "") || 0,
+      lastActiveAt: Date.parse(active[0]?.value || "") || 0,
+      metadataUids: {
+        threadId: ids[0].uid,
+        origin: origins[0]?.uid || null,
+        createdAt: created[0]?.uid || null,
+        lastActiveAt: active[0]?.uid || null,
+      },
+    });
+  }
+
+  const byThreadId = new Map();
+  for (const record of records) {
+    const group = byThreadId.get(record.threadId) || [];
+    group.push(record);
+    byThreadId.set(record.threadId, group);
+  }
+  const duplicateIds = new Set();
+  for (const [threadId, group] of byThreadId) {
+    if (group.length < 2) continue;
+    duplicateIds.add(threadId);
+    for (const record of group) {
+      errors.push({
+        pageUid: record.threadPageUid,
+        title: record.threadPageTitle,
+        threadId,
+        error: "Codex thread ID is indexed by more than one thread page.",
+      });
+    }
+  }
+  return {
+    records: records.filter((record) => !duplicateIds.has(record.threadId)),
+    errors,
+  };
+}
+
+async function exactPageUid(api, title) {
+  if (typeof api.q !== "function") return null;
+  return api.q(
+    "[:find ?uid . :in $ ?title :where " +
+      "[?page :node/title ?title] [?page :block/uid ?uid]]",
+    title,
+  ) || null;
+}
+
+function generatedRoamUid(api) {
+  return api.util?.generateUID?.() || Math.random().toString(36).slice(2, 11);
+}
+
+async function createMetadataBlock(api, pageUid, order, string) {
+  const uid = generatedRoamUid(api);
+  await api.data.block.create({
+    location: { "parent-uid": pageUid, order },
+    block: { uid, string },
+  });
+  return uid;
+}
+
+export async function ensureGraphThreadRecord({
+  api = getRoamApi(),
+  storage = window.localStorage,
+  threadId,
+  title,
+  timestamp = Date.now(),
+} = {}) {
+  if (!validThreadId(threadId)) {
+    throw new Error("Cannot index a conversation without a valid thread ID.");
+  }
+  if (!api.data?.page?.create || !api.data?.block?.create) {
+    throw new Error("Roam graph writes are unavailable for the thread index.");
+  }
+
+  const index = await readGraphThreadIndex({ api });
+  const existing = index.records.find((record) => record.threadId === threadId);
+  if (existing) {
+    const installationId = existing.originInstallationId ||
+      storageInstallationId({ storage });
+    const createdAt = existing.createdAt || timestamp;
+    const lastActiveAt = existing.lastActiveAt || createdAt;
+    const metadataUids = { ...existing.metadataUids };
+    if (!metadataUids.origin) {
+      metadataUids.origin = await createMetadataBlock(
+        api,
+        existing.threadPageUid,
+        1,
+        `${THREAD_ORIGIN_FIELD} ${installationId}`,
+      );
+    }
+    if (!metadataUids.createdAt) {
+      metadataUids.createdAt = await createMetadataBlock(
+        api,
+        existing.threadPageUid,
+        2,
+        `${THREAD_CREATED_FIELD} ${new Date(createdAt).toISOString()}`,
+      );
+    }
+    if (!metadataUids.lastActiveAt) {
+      metadataUids.lastActiveAt = await createMetadataBlock(
+        api,
+        existing.threadPageUid,
+        3,
+        `${THREAD_ACTIVE_FIELD} ${new Date(lastActiveAt).toISOString()}`,
+      );
+    }
+    return {
+      ...existing,
+      originInstallationId: installationId,
+      createdAt,
+      lastActiveAt,
+      metadataUids,
+    };
+  }
+  if (index.errors.some((error) => error.threadId === threadId)) {
+    throw new Error("The graph contains an ambiguous record for this Codex thread.");
+  }
+
+  const installationId = storageInstallationId({ storage });
+  const iso = new Date(timestamp).toISOString();
+  const baseTitle = `${THREAD_PAGE_PREFIX}${readableThreadLabel(title, timestamp)}`;
+  let pageTitle = baseTitle;
+  let suffix = 2;
+  while (await Promise.resolve(exactPageUid(api, pageTitle))) {
+    pageTitle = `${baseTitle} · ${suffix}`;
+    suffix += 1;
+  }
+  const pageUid = generatedRoamUid(api);
+  await api.data.page.create({ page: { uid: pageUid, title: pageTitle } });
+  const metadataUids = {
+    threadId: await createMetadataBlock(
+      api,
+      pageUid,
+      0,
+      `${THREAD_ID_FIELD} ${threadId}`,
+    ),
+    origin: await createMetadataBlock(
+      api,
+      pageUid,
+      1,
+      `${THREAD_ORIGIN_FIELD} ${installationId}`,
+    ),
+    createdAt: await createMetadataBlock(
+      api,
+      pageUid,
+      2,
+      `${THREAD_CREATED_FIELD} ${iso}`,
+    ),
+    lastActiveAt: await createMetadataBlock(
+      api,
+      pageUid,
+      3,
+      `${THREAD_ACTIVE_FIELD} ${iso}`,
+    ),
+  };
+  return {
+    threadId,
+    threadPageUid: pageUid,
+    threadPageTitle: pageTitle,
+    originInstallationId: installationId,
+    createdAt: timestamp,
+    lastActiveAt: timestamp,
+    metadataUids,
+  };
+}
+
+export async function updateGraphThreadActivity(
+  record,
+  timestamp,
+  { api = getRoamApi() } = {},
+) {
+  if (!record?.metadataUids?.lastActiveAt || !api.data?.block?.update) {
+    return record;
+  }
+  if (Number.isFinite(record.lastActiveAt) && record.lastActiveAt >= timestamp) {
+    return record;
+  }
+  await api.data.block.update({
+    block: {
+      uid: record.metadataUids.lastActiveAt,
+      string: `${THREAD_ACTIVE_FIELD} ${new Date(timestamp).toISOString()}`,
+    },
+  });
+  return { ...record, lastActiveAt: timestamp };
+}
+
 function serverTimestampMs(value) {
   if (!Number.isFinite(value)) return 0;
   return value < 1_000_000_000_000 ? value * 1_000 : value;
@@ -455,6 +825,7 @@ export function buildConversationHistory(state, summaries = []) {
     .filter((record) => validThreadId(record?.threadId))
     .map((record) => {
       const summary = summaryByThreadId.get(record.threadId) || null;
+      const graphTitle = threadPageLabel(record.threadPageTitle);
       const name = singleLine(summary?.name || "");
       const preview = singleLine(summary?.preview || "");
       const createdAt = serverTimestampMs(summary?.createdAt) ||
@@ -465,11 +836,12 @@ export function buildConversationHistory(state, summaries = []) {
       );
       return {
         threadId: record.threadId,
-        title: name || preview ||
+        title: graphTitle || name || preview ||
           `Untitled${createdAt ? ` · ${conversationDateLabel(createdAt)}` : ""}`,
         createdAt,
         updatedAt,
         active: state.activeThreadId === record.threadId,
+        availability: record.availability || "pending",
       };
     })
     .sort((left, right) =>
@@ -1691,6 +2063,15 @@ export function createChatPanel({
   requestModelsImpl = requestPanelModels,
   requestMessagesImpl = requestPanelMessages,
   requestHistoryImpl = requestPanelThreadSummaries,
+  requestThreadNameImpl = requestPanelThreadName,
+  requestGraphIndexImpl = () => readGraphThreadIndex({ api }),
+  ensureGraphThreadImpl = (input) => ensureGraphThreadRecord({
+    ...input,
+    api,
+    storage,
+  }),
+  updateGraphActivityImpl = (record, timestamp) =>
+    updateGraphThreadActivity(record, timestamp, { api }),
   copyTextImpl = copyRoamText,
   setTimeoutImpl = globalThis.setTimeout,
   clearTimeoutImpl = globalThis.clearTimeout,
@@ -1739,6 +2120,9 @@ export function createChatPanel({
   let closePromise = null;
   const resetPromptUids = new Set();
   const threadSummaries = new Map();
+  const graphThreadRecords = new Map();
+  const threadIndexPromises = new Map();
+  const mirroredThreadNames = new Set();
   let historyOpen = false;
   let historyLoadVersion = 0;
   let selectionLoadVersion = 0;
@@ -1767,13 +2151,6 @@ export function createChatPanel({
 
   const header = createPanelElement(doc, "header", "roam-codex-chat-header");
   const heading = createPanelElement(doc, "div", "roam-codex-chat-heading");
-  const headerIcon = createPanelElement(
-    doc,
-    "span",
-    "roam-codex-chat-header-icon",
-  );
-  headerIcon.setAttribute("aria-hidden", "true");
-  heading.appendChild(headerIcon);
   const conversationButton = panelButton(
     doc,
     "roam-codex-chat-conversation",
@@ -1801,7 +2178,6 @@ export function createChatPanel({
   );
   closeButton.setAttribute("aria-label", "Close Codex chat");
   header.appendChild(closeButton);
-  panel.appendChild(header);
 
   const body = createPanelElement(doc, "div", "roam-codex-chat-body");
 
@@ -2044,22 +2420,132 @@ export function createChatPanel({
     persist();
   };
 
-  const rememberThread = (threadId) => {
+  const rememberThread = (threadId, { completed = false } = {}) => {
     if (!validThreadId(threadId)) return;
     const timestamp = now();
     const previous = state.conversations[threadId];
     state.conversations[threadId] = {
       threadId,
       createdAt: previous?.createdAt || timestamp,
-      updatedAt: timestamp,
+      updatedAt: completed ? timestamp : previous?.updatedAt || timestamp,
       model: pickerModel || previous?.model || null,
       effort: pickerEffort || previous?.effort || null,
       speed: pickerSpeed || previous?.speed || null,
       threadPageUid: previous?.threadPageUid || null,
+      threadPageTitle: previous?.threadPageTitle || null,
+      originInstallationId: previous?.originInstallationId || null,
+      lastSeenUpdatedAt: completed
+        ? Math.max(previous?.lastSeenUpdatedAt || 0, timestamp)
+        : previous?.lastSeenUpdatedAt || 0,
+      availability: "available",
+      pendingGraphIndex: previous?.pendingGraphIndex || false,
     };
     state.activeThreadId = threadId;
     state.newConversationPreferences = { model: null, effort: null, speed: null };
     persist();
+  };
+
+  const applyGraphRecord = (graphRecord) => {
+    if (!validThreadId(graphRecord?.threadId)) return null;
+    const previous = state.conversations[graphRecord.threadId] || {};
+    const record = {
+      threadId: graphRecord.threadId,
+      createdAt: graphRecord.createdAt || previous.createdAt || now(),
+      updatedAt: Math.max(
+        graphRecord.lastActiveAt || 0,
+        previous.updatedAt || 0,
+        graphRecord.createdAt || 0,
+      ),
+      model: previous.model || null,
+      effort: previous.effort || null,
+      speed: previous.speed || null,
+      threadPageUid: graphRecord.threadPageUid,
+      threadPageTitle: graphRecord.threadPageTitle,
+      originInstallationId: graphRecord.originInstallationId || null,
+      lastSeenUpdatedAt: previous.lastSeenUpdatedAt || 0,
+      availability: previous.availability === "available"
+        ? "available"
+        : "pending",
+      pendingGraphIndex: false,
+    };
+    state.conversations[graphRecord.threadId] = record;
+    graphThreadRecords.set(graphRecord.threadId, graphRecord);
+    return record;
+  };
+
+  const mirrorThreadName = async (graphRecord) => {
+    const name = threadPageLabel(graphRecord?.threadPageTitle);
+    if (!name || mirroredThreadNames.has(`${graphRecord.threadId}\n${name}`)) {
+      return;
+    }
+    await requestThreadNameImpl(graphRecord.threadId, name);
+    mirroredThreadNames.add(`${graphRecord.threadId}\n${name}`);
+    const summary = threadSummaries.get(graphRecord.threadId);
+    if (summary) threadSummaries.set(graphRecord.threadId, { ...summary, name });
+  };
+
+  const ensureThreadIndexed = async (
+    threadId,
+    title,
+    { completedAt = null } = {},
+  ) => {
+    if (!validThreadId(threadId) || !api.data?.page?.create) return null;
+    let pending = threadIndexPromises.get(threadId);
+    if (!pending) {
+      pending = (async () => {
+        try {
+          let graphRecord = graphThreadRecords.get(threadId);
+          if (
+            !graphRecord ||
+            !graphRecord.metadataUids?.origin ||
+            !graphRecord.metadataUids?.createdAt ||
+            !graphRecord.metadataUids?.lastActiveAt
+          ) {
+            graphRecord = await ensureGraphThreadImpl({
+              threadId,
+              title,
+              timestamp: now(),
+            });
+          }
+          applyGraphRecord(graphRecord);
+          if (completedAt) {
+            graphRecord = await updateGraphActivityImpl(
+              graphRecord,
+              completedAt,
+            );
+            graphThreadRecords.set(threadId, graphRecord);
+            applyGraphRecord(graphRecord);
+          }
+          persist();
+          try {
+            await mirrorThreadName(graphRecord);
+          } catch {
+            // The graph page remains authoritative and the next refresh retries.
+          }
+          return graphRecord;
+        } catch (error) {
+          const record = state.conversations[threadId];
+          if (record) {
+            record.pendingGraphIndex = true;
+            record.availability = "pending";
+            persist();
+          }
+          throw error;
+        } finally {
+          threadIndexPromises.delete(threadId);
+        }
+      })();
+      threadIndexPromises.set(threadId, pending);
+    }
+    const graphRecord = await pending;
+    if (completedAt && graphRecord?.lastActiveAt < completedAt) {
+      const updated = await updateGraphActivityImpl(graphRecord, completedAt);
+      graphThreadRecords.set(threadId, updated);
+      applyGraphRecord(updated);
+      persist();
+      return updated;
+    }
+    return graphRecord;
   };
 
   const disposeRenderedMessages = () => {
@@ -2424,27 +2910,14 @@ export function createChatPanel({
 
   const markMissingConversation = (threadId) => {
     const missingRecord = state.conversations[threadId];
-    delete state.conversations[threadId];
+    if (!missingRecord) return;
+    missingRecord.availability = "missing";
     threadSummaries.delete(threadId);
     if (state.activeThreadId === threadId) {
-      selectionLoadVersion += 1;
-      state.activeThreadId = null;
-      state.newConversationPreferences = {
-        model: pickerModel || missingRecord?.model || null,
-        effort: pickerEffort || missingRecord?.effort || null,
-        speed: pickerSpeed || missingRecord?.speed || null,
-      };
       messages = [];
-      modelChanged = Boolean(state.newConversationPreferences.model);
-      effortChanged = Boolean(state.newConversationPreferences.effort);
-      speedChanged = Boolean(state.newConversationPreferences.speed);
       renderMessages();
-      if (modelsReady) {
-        initPicker();
-        renderPickerButton();
-      }
       setProgress(
-        "The saved conversation is no longer available. A new one will start.",
+        "Unavailable on this device. The graph thread record was kept.",
         "error",
       );
     }
@@ -2487,6 +2960,16 @@ export function createChatPanel({
           ["user", "assistant"].includes(message?.role) &&
           typeof message.text === "string",
       );
+      const record = state.conversations[threadId];
+      const summary = threadSummaries.get(threadId);
+      if (record) {
+        record.availability = "available";
+        record.lastSeenUpdatedAt = Math.max(
+          record.lastSeenUpdatedAt || 0,
+          serverTimestampMs(summary?.updatedAt),
+        );
+        persist();
+      }
       renderMessages();
       setProgress();
     } catch (error) {
@@ -2543,6 +3026,7 @@ export function createChatPanel({
       );
       button.setAttribute("role", "menuitem");
       button.dataset.threadId = item.threadId;
+      button.dataset.availability = item.availability;
       button.disabled = running;
       if (item.active) {
         button.className += " is-active";
@@ -2558,7 +3042,9 @@ export function createChatPanel({
         doc,
         "span",
         "roam-codex-chat-history-date",
-        conversationDateLabel(item.updatedAt),
+        ["missing", "unavailable"].includes(item.availability)
+          ? "Unavailable"
+          : conversationDateLabel(item.updatedAt),
       ));
       button.addEventListener("click", () => void selectConversation(item.threadId));
       historyPopover.appendChild(button);
@@ -2573,9 +3059,24 @@ export function createChatPanel({
     }
   };
 
-  const loadHistory = async () => {
+  const loadHistory = async ({ reconcileActive = false } = {}) => {
     const loadVersion = ++historyLoadVersion;
     historyError = "";
+    try {
+      const graphIndex = await requestGraphIndexImpl();
+      if (closed || loadVersion !== historyLoadVersion) return;
+      for (const graphRecord of graphIndex?.records || []) {
+        applyGraphRecord(graphRecord);
+      }
+      if (graphIndex?.errors?.length) {
+        historyError = `${graphIndex.errors.length} thread page${
+          graphIndex.errors.length === 1 ? " has" : "s have"
+        } invalid or duplicate metadata.`;
+      }
+      persist();
+    } catch (error) {
+      historyError = error.message || "The graph thread index is unavailable.";
+    }
     const threadIds = historyItems().map((item) => item.threadId);
     if (!threadIds.length) {
       renderConversationButton();
@@ -2590,6 +3091,7 @@ export function createChatPanel({
       }
       const results = await Promise.all(batches);
       if (closed || loadVersion !== historyLoadVersion) return;
+      let reloadActive = false;
       for (const result of results) {
         for (const summary of result.threads || []) {
           if (
@@ -2597,15 +3099,63 @@ export function createChatPanel({
             state.conversations[summary.id]
           ) {
             threadSummaries.set(summary.id, summary);
+            const record = state.conversations[summary.id];
+            const serverUpdatedAt = serverTimestampMs(summary.updatedAt);
+            reloadActive ||= Boolean(
+              reconcileActive &&
+              summary.id === state.activeThreadId &&
+              !running &&
+              serverUpdatedAt > (record.lastSeenUpdatedAt || 0)
+            );
+            record.updatedAt = Math.max(record.updatedAt || 0, serverUpdatedAt);
+            record.availability = "available";
           }
         }
         for (const threadId of result.missingThreadIds || []) {
           if (state.conversations[threadId]) markMissingConversation(threadId);
         }
+        for (const threadId of result.unavailableThreadIds || []) {
+          if (state.conversations[threadId]) {
+            state.conversations[threadId].availability = "unavailable";
+          }
+        }
+      }
+      const backfills = [];
+      for (const threadId of threadIds) {
+        const record = state.conversations[threadId];
+        if (!record?.threadPageUid && api.data?.page?.create) {
+          const summary = threadSummaries.get(threadId);
+          backfills.push(
+            ensureThreadIndexed(
+              threadId,
+              summary?.name || summary?.preview || "",
+            ).catch(() => null),
+          );
+        } else if (record?.threadPageUid) {
+          const graphRecord = graphThreadRecords.get(threadId);
+          if (
+            graphRecord &&
+            (!graphRecord.metadataUids?.origin ||
+              !graphRecord.metadataUids?.createdAt ||
+              !graphRecord.metadataUids?.lastActiveAt)
+          ) {
+            backfills.push(
+              ensureThreadIndexed(threadId, record.threadPageTitle || "")
+                .catch(() => null),
+            );
+          } else if (graphRecord) {
+            void mirrorThreadName(graphRecord).catch(() => {});
+          }
+        }
+      }
+      await Promise.all(backfills);
+      persist();
+      if (reloadActive && state.activeThreadId) {
+        await selectConversation(state.activeThreadId, { reload: true });
       }
     } catch (error) {
       if (closed || loadVersion !== historyLoadVersion) return;
-      historyError = error.message || "Conversation history is unavailable.";
+      historyError ||= error.message || "Conversation history is unavailable.";
     }
     renderConversationButton();
     if (historyOpen) renderHistory();
@@ -2650,6 +3200,18 @@ export function createChatPanel({
   const send = async () => {
     if (running) return null;
     setRunning(true);
+    if (state.activeThreadId) {
+      await loadHistory({ reconcileActive: true });
+      const activeSummary = threadSummaries.get(state.activeThreadId);
+      if (activeSummary?.status === "active") {
+        setProgress(
+          "This conversation is active in Codex. Wait for it to finish, then try again.",
+          "error",
+        );
+        setRunning(false);
+        return null;
+      }
+    }
     let prompt;
     try {
       prompt = await readPromptImpl();
@@ -2732,6 +3294,7 @@ export function createChatPanel({
         },
         onThread: ({ threadId }) => {
           rememberThread(threadId);
+          void ensureThreadIndexed(threadId, prompt.text).catch(() => {});
           modelChanged = false;
           effortChanged = false;
           speedChanged = false;
@@ -2741,7 +3304,11 @@ export function createChatPanel({
         },
       });
 
-      rememberThread(result.threadId);
+      const completedAt = now();
+      rememberThread(result.threadId, { completed: true });
+      await ensureThreadIndexed(result.threadId, prompt.text, {
+        completedAt,
+      }).catch(() => null);
       if (typeof result.reply !== "string" || !result.reply.trim()) {
         throw new Error("Codex completed without a reply.");
       }
@@ -2755,12 +3322,13 @@ export function createChatPanel({
         preview: startingNewConversation
           ? prompt.text
           : existingSummary.preview || "",
-        createdAt: existingSummary.createdAt || now(),
-        updatedAt: now(),
+        createdAt: existingSummary.createdAt || completedAt,
+        updatedAt: completedAt,
+        status: "idle",
       });
       renderConversationButton();
       if (historyOpen) renderHistory();
-      void loadHistory();
+      void loadHistory({ reconcileActive: false });
       setProgress("", "");
       return result;
     } catch (error) {
@@ -2862,10 +3430,13 @@ export function createChatPanel({
     elapsedIntervalId = null;
     doc.removeEventListener?.("keydown", handleSendShortcut, true);
     doc.removeEventListener?.("click", handleDocumentClick, true);
+    doc.removeEventListener?.("visibilitychange", handleVisibilityChange);
+    doc.defaultView?.removeEventListener?.("focus", handleWindowFocus);
     transcript.removeEventListener?.("scroll", updateScrollLatestButton);
     for (const timer of copyFeedbackTimers.values()) clearTimeoutImpl(timer);
     copyFeedbackTimers.clear();
     disposeRenderedMessages();
+    header.remove();
     panel.remove();
     controls.remove();
     closePromise = Promise.resolve(onClose({
@@ -2895,10 +3466,18 @@ export function createChatPanel({
     historyPopover.hidden = false;
     renderConversationButton();
     renderHistory();
-    void loadHistory();
+    void loadHistory({ reconcileActive: true });
   });
+  const handleWindowFocus = () => {
+    if (!closed && !running) void loadHistory({ reconcileActive: true });
+  };
+  const handleVisibilityChange = () => {
+    if (doc.visibilityState === "visible") handleWindowFocus();
+  };
   doc.addEventListener?.("keydown", handleSendShortcut, true);
   doc.addEventListener?.("click", handleDocumentClick, true);
+  doc.addEventListener?.("visibilitychange", handleVisibilityChange);
+  doc.defaultView?.addEventListener?.("focus", handleWindowFocus);
   pickerButton.addEventListener("click", () => {
     if (running || !modelsReady) return;
     if (pickerOpen) {
@@ -2941,13 +3520,23 @@ export function createChatPanel({
       setProgress(error.message, "error");
     });
 
-  void loadHistory();
-  if (state.activeThreadId) {
-    void selectConversation(state.activeThreadId, { reload: true });
-  }
+  const initialThreadId = state.activeThreadId;
+  void loadHistory().then(() => {
+    if (
+      !closed &&
+      initialThreadId &&
+      state.activeThreadId === initialThreadId &&
+      !["missing", "unavailable"].includes(
+        state.conversations[initialThreadId]?.availability,
+      )
+    ) {
+      return selectConversation(initialThreadId, { reload: true });
+    }
+  });
 
   return {
     element: panel,
+    headerElement: header,
     controlsElement: controls,
     rootBlockUid,
     close,
@@ -3003,6 +3592,7 @@ export async function openChatPanel({
   let nativeWindowObserver = null;
   let host = null;
   let nativeHeader = null;
+  let nativeComposer = null;
   try {
     const sidebarWindow = await openPromptBlock(
       promptBlockUid,
@@ -3022,6 +3612,7 @@ export async function openChatPanel({
       onClose: ({ whenIdle, resetPromptUids }) => {
         nativeWindowObserver?.disconnect?.();
         nativeHeader?.classList?.remove?.(NATIVE_WINDOW_HEADER_CLASS);
+        nativeComposer?.classList?.remove?.(NATIVE_COMPOSER_CLASS);
         host?.classList?.remove?.("roam-codex-chat-window");
         if (ACTIVE_CHAT_PANEL === controller) ACTIVE_CHAT_PANEL = null;
         return whenIdle()
@@ -3043,7 +3634,21 @@ export async function openChatPanel({
       nativeHeader?.nextSibling || null,
     );
     nativeHeader?.classList?.add?.(NATIVE_WINDOW_HEADER_CLASS);
+    nativeComposer = controller.element.nextElementSibling || null;
+    nativeComposer?.classList?.add?.(NATIVE_COMPOSER_CLASS);
     host.appendChild(controller.controlsElement);
+    if (controller.headerElement) {
+      const launcherPlacement = findSidebarChatLauncherPlacement(doc);
+      const launcher = doc.getElementById?.(SIDEBAR_CHAT_LAUNCHER_ID);
+      if (launcherPlacement?.header && launcher?.parentNode === launcherPlacement.header) {
+        launcherPlacement.header.insertBefore(
+          controller.headerElement,
+          launcher.nextSibling || null,
+        );
+      } else {
+        host.insertBefore(controller.headerElement, controller.element);
+      }
+    }
     ACTIVE_CHAT_PANEL = controller;
 
     const MutationObserverImpl = doc.defaultView?.MutationObserver ||

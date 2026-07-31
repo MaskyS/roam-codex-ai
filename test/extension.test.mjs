@@ -26,6 +26,7 @@ const {
   cleanupStaleRunningStatuses,
   copyRoamText,
   createChatPanel,
+  ensureGraphThreadRecord,
   findChatPanelHost,
   findSidebarBlockWindow,
   findSidebarChatLauncherPlacement,
@@ -34,6 +35,7 @@ const {
   openPromptBlockInSidebar,
   pairBridge,
   readChatState,
+  readGraphThreadIndex,
   readFocusedPromptBlock,
   readPromptOutlineUids,
   removeResetChatPromptBlocks,
@@ -41,6 +43,7 @@ const {
   resolveChatPromptBlock,
   requestPanelChat,
   requestPanelThreadSummaries,
+  requestPanelThreadName,
   requestProbe,
   requestRunCancellation,
   renderRoamMarkdown,
@@ -195,7 +198,7 @@ test("the chat transcript renders every message with Roam and unmounts it", asyn
     "Question about [[Project]]",
     "See **bold** and ((block123))",
   ]);
-  assert.equal(unmounted.length, 2);
+  assert.equal(unmounted.length, 1);
   const copyButtons = panelElements(controller).filter(
     (element) => element.className === "roam-codex-chat-copy",
   );
@@ -306,6 +309,7 @@ function panelElements(controller) {
     elements.push(element);
     for (const child of element.children || []) visit(child);
   };
+  if (controller.headerElement) visit(controller.headerElement);
   visit(controller.element);
   visit(controller.controlsElement);
   return elements;
@@ -333,6 +337,11 @@ test("chat state keeps versioned conversation records without a parallel draft",
         effort: "medium",
         speed: null,
         threadPageUid: null,
+        threadPageTitle: null,
+        originInstallationId: null,
+        lastSeenUpdatedAt: 0,
+        availability: "pending",
+        pendingGraphIndex: false,
       },
     },
   };
@@ -401,6 +410,125 @@ test("conversation history is graph-record scoped, labeled, and newest first", (
   ]);
 });
 
+test("graph thread pages are validated, created once, and label history", async () => {
+  const pages = new Map();
+  let nextUid = 1;
+  const api = {
+    util: { generateUID: () => `graphuid${nextUid++}` },
+    q(query, input) {
+      if (query.includes(":find ?uid .")) {
+        return [...pages.values()].find(
+          (page) => page[":node/title"] === input,
+        )?.[":block/uid"] || null;
+      }
+      return [...pages.values()]
+        .filter((page) => page[":node/title"].startsWith(input || ""))
+        .map((page) => [page[":block/uid"], page[":node/title"]]);
+    },
+    data: {
+      async: {
+        pull: async (_pattern, [_attribute, uid]) => pages.get(uid) || null,
+      },
+      page: {
+        create: async ({ page }) => {
+          pages.set(page.uid, {
+            ":block/uid": page.uid,
+            ":node/title": page.title,
+            ":block/children": [],
+          });
+        },
+      },
+      block: {
+        create: async ({ location, block }) => {
+          pages.get(location["parent-uid"])[":block/children"].push({
+            ":block/uid": block.uid,
+            ":block/string": block.string,
+            ":block/order": location.order,
+          });
+        },
+      },
+    },
+  };
+  const stored = new Map();
+  const storage = {
+    getItem: (key) => stored.get(key) ?? null,
+    setItem: (key, value) => stored.set(key, value),
+  };
+
+  const created = await ensureGraphThreadRecord({
+    api,
+    storage,
+    threadId: "thread_graph_123",
+    title: "Plan / next experiment",
+    timestamp: Date.parse("2026-07-31T18:00:00.000Z"),
+  });
+  const repeated = await ensureGraphThreadRecord({
+    api,
+    storage,
+    threadId: "thread_graph_123",
+    title: "Ignored second title",
+    timestamp: Date.parse("2026-07-31T18:05:00.000Z"),
+  });
+  const index = await readGraphThreadIndex({ api });
+
+  assert.equal(pages.size, 1);
+  assert.equal(created.threadPageUid, repeated.threadPageUid);
+  assert.equal(created.threadPageTitle, "Codex/thread/Plan · next experiment");
+  assert.deepEqual(
+    pages.get(created.threadPageUid)[":block/children"].map(
+      (child) => child[":block/string"].split("::")[0],
+    ),
+    ["Codex thread", "Origin installation", "Created at", "Last active at"],
+  );
+  assert.equal(index.records.length, 1);
+  const history = buildConversationHistory({
+    activeThreadId: created.threadId,
+    conversations: {
+      [created.threadId]: {
+        ...created,
+        updatedAt: created.lastActiveAt,
+      },
+    },
+  }, [{
+    id: created.threadId,
+    name: "App-server name",
+    preview: "Prompt preview",
+  }]);
+  assert.equal(history[0].title, "Plan · next experiment");
+});
+
+test("duplicate graph pages never guess which Codex thread record to use", async () => {
+  const makePage = (uid, title) => ({
+    ":block/uid": uid,
+    ":node/title": title,
+    ":block/children": [{
+      ":block/uid": `${uid}-field`,
+      ":block/string": "Codex thread:: thread_duplicate_1",
+      ":block/order": 0,
+    }],
+  });
+  const pages = new Map([
+    ["page-one", makePage("page-one", "Codex/thread/One")],
+    ["page-two", makePage("page-two", "Codex/thread/Two")],
+  ]);
+  const result = await readGraphThreadIndex({
+    api: {
+      q: () => [...pages.values()].map((page) => [
+        page[":block/uid"],
+        page[":node/title"],
+      ]),
+      data: {
+        async: {
+          pull: async (_pattern, [_attribute, uid]) => pages.get(uid),
+        },
+      },
+    },
+  });
+  assert.deepEqual(result.records, []);
+  assert.equal(result.errors.length, 2);
+  assert.match(result.errors[0].error, /more than one thread page/);
+});
+
 test("panel summary request sends only exact graph-scoped thread IDs", async () => {
   let captured;
   const result = await requestPanelThreadSummaries(
@@ -434,6 +562,40 @@ test("panel summary request sends only exact graph-scoped thread IDs", async () 
     threads: [],
     missingThreadIds: ["thread_old_123"],
     unavailableThreadIds: ["thread_new_456"],
+  });
+});
+
+test("panel mirrors a graph thread title through the exact name endpoint", async () => {
+  let captured;
+  const result = await requestPanelThreadName(
+    "thread_graph_123",
+    "Readable graph title",
+    {
+      token: "local-token",
+      fetchImpl: async (url, init) => {
+        captured = { url, init };
+        return new Response(JSON.stringify({
+          threadId: "thread_graph_123",
+          name: "Readable graph title",
+        }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    },
+  );
+  assert.equal(
+    captured.url,
+    "http://127.0.0.1:47321/threads/thread_graph_123/name",
+  );
+  assert.equal(captured.init.method, "POST");
+  assert.deepEqual(JSON.parse(captured.init.body), {
+    graph: "maskys",
+    name: "Readable graph title",
+  });
+  assert.deepEqual(result, {
+    threadId: "thread_graph_123",
+    name: "Readable graph title",
   });
 });
 
@@ -1208,6 +1370,82 @@ test("open chat defers scratch cleanup until an active turn is idle", async () =
   assert.deepEqual(removed, ["scratch789"]);
 });
 
+test("open chat puts its title beside the single sidebar launcher", async () => {
+  const nativeToggle = { tagName: "button", id: "native-toggle" };
+  const launcher = {
+    id: "roam-codex-sidebar-chat-launcher",
+    tagName: "button",
+    nextSibling: nativeToggle,
+  };
+  const sidebarHeader = {
+    className: "flex-h-box",
+    children: [launcher, nativeToggle],
+    insertBefore(element, before) {
+      this.inserted = { element, before };
+      element.parentNode = this;
+    },
+  };
+  launcher.parentNode = sidebarHeader;
+  const sidebar = {
+    children: [sidebarHeader],
+    getBoundingClientRect: () => ({ width: 500 }),
+  };
+  const content = {};
+  const nativeContent = { classList: { add() {}, remove() {} } };
+  const nativeHeader = {
+    nextSibling: nativeContent,
+    classList: { add() {}, remove() {} },
+  };
+  const host = {
+    firstElementChild: nativeHeader,
+    insertBefore(element) {
+      this.panel = element;
+    },
+    appendChild(element) {
+      this.controls = element;
+    },
+    classList: { add() {}, remove() {} },
+  };
+  const doc = {
+    getElementById(id) {
+      if (id === "right-sidebar") return sidebar;
+      if (id === "roam-right-sidebar-content") return content;
+      if (id === "roam-codex-sidebar-chat-launcher") return launcher;
+      if (id === "sidebar-window-sidebar-block-prompt123") return host;
+      return null;
+    },
+  };
+  const headerElement = { remove() {} };
+  const controller = await openChatPanel({
+    api: {},
+    doc,
+    storage: {},
+    resolvePromptBlock: async () => ({ uid: "prompt123", scratch: false }),
+    readOutlineUids: async () => new Set(["prompt123"]),
+    openPromptBlock: async () => ({
+      type: "block",
+      "block-uid": "prompt123",
+      "window-id": "sidebar-block-prompt123",
+    }),
+    createPanel: (options) => ({
+      element: { isConnected: true, nextElementSibling: nativeContent },
+      headerElement,
+      controlsElement: {},
+      rootBlockUid: options.rootBlockUid,
+      focus: async () => {},
+      close: () => options.onClose({
+        whenIdle: () => Promise.resolve(),
+        resetPromptUids: new Set(),
+      }),
+    }),
+  });
+  assert.deepEqual(sidebarHeader.inserted, {
+    element: headerElement,
+    before: nativeToggle,
+  });
+  await controller.close();
+});
+
 test("open chat removes a newly created scratch block when sidebar opening fails", async () => {
   const removed = [];
   await assert.rejects(
@@ -1533,8 +1771,15 @@ test("chat clears a scratch composer before requesting a reply", async () => {
     allElements.push(element);
     for (const child of element.children || []) visit(child);
   };
+  visit(controller.headerElement);
   visit(controller.element);
   visit(controller.controlsElement);
+  assert.equal(
+    allElements.some(
+      (element) => element.className === "roam-codex-chat-header-icon",
+    ),
+    false,
+  );
   assert.equal(allElements.some((element) => element.tagName === "textarea"), false);
   assert.equal(
     allElements.some((element) => element.className === "roam-codex-chat-empty"),
@@ -1608,8 +1853,7 @@ test("chat clears a scratch composer before requesting a reply", async () => {
     },
   });
 
-  await Promise.resolve();
-  await Promise.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
   const conversationButton = allElements.find(
     (element) => element.className === "roam-codex-chat-conversation",
   );
@@ -2194,7 +2438,6 @@ test("the panel close control removes the native window before closing", async (
   closeButton.listeners.click();
   await Promise.resolve();
   await Promise.resolve();
-  await Promise.resolve();
   assert.deepEqual(removals, [
     { window: { type: "block", "block-uid": "root123" } },
   ]);
@@ -2314,7 +2557,7 @@ test("the picker offers Speed from serviceTiers and sends the chosen tier", asyn
   await controller.close();
 });
 
-test("missing history is removed while unavailable history is retained", async () => {
+test("missing and unavailable graph history are retained", async () => {
   const values = new Map();
   const storage = {
     getItem: (key) => values.get(key) ?? null,
@@ -2355,19 +2598,17 @@ test("missing history is removed while unavailable history is retained", async (
       unavailableThreadIds: ["thread_unavailable_2"],
     }),
   });
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
 
   const saved = readChatState({ storage });
-  assert.equal(saved.activeThreadId, null);
-  assert.equal(Object.hasOwn(saved.conversations, "thread_missing_1"), false);
+  assert.equal(saved.activeThreadId, "thread_missing_1");
+  assert.equal(Object.hasOwn(saved.conversations, "thread_missing_1"), true);
   assert.equal(Object.hasOwn(saved.conversations, "thread_unavailable_2"), true);
-  assert.deepEqual(saved.newConversationPreferences, {
-    model: "gpt-5.6-sol",
-    effort: "low",
-    speed: null,
-  });
+  assert.equal(saved.conversations.thread_missing_1.availability, "missing");
+  assert.equal(
+    saved.conversations.thread_unavailable_2.availability,
+    "unavailable",
+  );
   await controller.close();
 });
 

@@ -624,6 +624,24 @@ test("app-server reads exact thread summaries without resuming them", async () =
   assert.equal(calls.some((call) => call.method === "thread/resume"), false);
 });
 
+test("app-server mirrors the graph page label into the Codex thread name", async () => {
+  const client = new AppServerClient();
+  client.start = async () => {};
+  const calls = [];
+  client.request = async (method, params) => calls.push({ method, params });
+  assert.deepEqual(
+    await client.setThreadName("thread_graph_123", "Readable graph title"),
+    { threadId: "thread_graph_123", name: "Readable graph title" },
+  );
+  assert.deepEqual(calls, [{
+    method: "thread/name/set",
+    params: {
+      threadId: "thread_graph_123",
+      name: "Readable graph title",
+    },
+  }]);
+});
+
 test("bridge exposes models, recent messages, and panel-only chat", async (t) => {
   const client = {
     ready: false,
@@ -657,6 +675,11 @@ test("bridge exposes models, recent messages, and panel-only chat", async (t) =>
         missingThreadIds: [],
         unavailableThreadIds: [],
       };
+    },
+    async setThreadName(threadId, name) {
+      assert.equal(threadId, "thread_12345678");
+      assert.equal(name, "Readable graph title");
+      return { threadId, name };
     },
     async runChat({ onProgress, onThread, onStarted, ...input }) {
       assert.deepEqual(input, {
@@ -728,6 +751,23 @@ test("bridge exposes models, recent messages, and panel-only chat", async (t) =>
     }],
     missingThreadIds: [],
     unavailableThreadIds: [],
+  });
+
+  const nameResponse = await fetch(
+    `${base}/threads/thread_12345678/name`,
+    {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({
+        graph: "maskys",
+        name: "Readable graph title",
+      }),
+    },
+  );
+  assert.equal(nameResponse.status, 200);
+  assert.deepEqual(await nameResponse.json(), {
+    threadId: "thread_12345678",
+    name: "Readable graph title",
   });
 
   const chatResponse = await fetch(`${base}/chat`, {

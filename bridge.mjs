@@ -95,6 +95,9 @@ function threadSummary(thread) {
     preview: typeof thread.preview === "string" ? thread.preview.trim() : "",
     createdAt: Number.isFinite(thread.createdAt) ? thread.createdAt : null,
     updatedAt: Number.isFinite(thread.updatedAt) ? thread.updatedAt : null,
+    ...(typeof thread.status?.type === "string"
+      ? { status: thread.status.type }
+      : {}),
   };
 }
 
@@ -676,6 +679,12 @@ export class AppServerClient extends EventEmitter {
     unavailableThreadIds.sort(byRequestOrder);
 
     return { threads, missingThreadIds, unavailableThreadIds };
+  }
+
+  async setThreadName(threadId, name) {
+    await this.start();
+    await this.request("thread/name/set", { threadId, name });
+    return { threadId, name };
   }
 
   async listThreadMessages(threadId, { limit = 12 } = {}) {
@@ -1561,6 +1570,56 @@ export function createBridgeServer({
           response,
           missing ? 404 : 502,
           { error: error.message || "Could not load that conversation." },
+          origin,
+        );
+      }
+      return;
+    }
+
+    const threadNameMatch = request.url?.match(
+      /^\/threads\/([A-Za-z0-9_-]{8,128})\/name$/,
+    );
+    if (request.method === "POST" && threadNameMatch) {
+      if (!bearerMatches(request.headers.authorization, token)) {
+        sendJson(response, 401, { error: "Invalid bridge token." }, origin);
+        return;
+      }
+      let body;
+      try {
+        body = await readJsonBody(request);
+      } catch (error) {
+        const status = error.code === "BODY_TOO_LARGE" ? 413 : 400;
+        sendJson(response, status, { error: error.message }, origin);
+        return;
+      }
+      if (body?.graph !== graph) {
+        sendJson(
+          response,
+          400,
+          { error: `This bridge is restricted to graph "${graph}".` },
+          origin,
+        );
+        return;
+      }
+      const name = typeof body?.name === "string" ? body.name.trim() : "";
+      if (!name || name.length > 100 || /[\r\n]/.test(name)) {
+        sendJson(
+          response,
+          400,
+          { error: "name must be a single line of at most 100 characters." },
+          origin,
+        );
+        return;
+      }
+      try {
+        const result = await client.setThreadName(threadNameMatch[1], name);
+        sendJson(response, 200, result, origin);
+      } catch (error) {
+        const missing = missingThreadError(error);
+        sendJson(
+          response,
+          missing ? 404 : 502,
+          { error: error.message || "Could not name that conversation." },
           origin,
         );
       }
