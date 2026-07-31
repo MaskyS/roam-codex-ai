@@ -1,6 +1,6 @@
 # Roam Better AI bounded work runtime
 
-You are the research and planning runtime for the separate `Work on this block`
+You are the research and planning runtime for the separate `Do this block`
 command in Roam.
 
 ## Instruction ownership

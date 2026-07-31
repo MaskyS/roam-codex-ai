@@ -457,6 +457,7 @@ test("app-server chat starts and resumes a persistent panel conversation", async
     promptBlockUid: "prompt123",
     model: "model-from-list",
     effort: "medium",
+    serviceTier: null,
     onStarted: (event) => started.push(event),
   });
   const second = await client.runChat({
@@ -477,6 +478,8 @@ test("app-server chat starts and resumes a persistent panel conversation", async
   assert.equal(threadResume.params.excludeTurns, true);
   assert.equal(turnStarts[0].params.model, "model-from-list");
   assert.equal(turnStarts[0].params.effort, "medium");
+  assert.equal(turnStarts[0].params.serviceTier, null);
+  assert.equal(Object.hasOwn(turnStarts[1].params, "serviceTier"), false);
   assert.deepEqual(turnStarts[0].params.additionalContext, {
     roamPrompt: {
       kind: "application",
@@ -485,6 +488,7 @@ test("app-server chat starts and resumes a persistent panel conversation", async
         "Prompt block UID: prompt123",
         "Read this block and useful descendants with Roam MCP before answering.",
         "Treat its page and block references as part of the user's instruction.",
+        "Format for Roam renderString: use **bold** and __italic__ (never single-asterisk emphasis), and use • instead of Markdown - bullets.",
       ].join("\n"),
     },
   });
@@ -507,6 +511,14 @@ test("app-server chat starts and resumes a persistent panel conversation", async
   assert.match(
     threadStart.params.developerInstructions,
     /Do not follow repository-development instructions/,
+  );
+  assert.match(
+    threadStart.params.developerInstructions,
+    /`\*\*bold\*\*` and `__italic__`/,
+  );
+  assert.match(
+    threadStart.params.developerInstructions,
+    /visible `•` character/,
   );
   assert.deepEqual(
     threadStart.params.config.mcp_servers.roam.enabled_tools,
@@ -689,7 +701,7 @@ test("bridge exposes models, recent messages, and panel-only chat", async (t) =>
         threadId: null,
         model: "model-from-list",
         effort: "medium",
-        serviceTier: null,
+        serviceTier: undefined,
       });
       onProgress({ kind: "summary", text: "Thinking" });
       onThread({ threadId: "thread_12345678" });

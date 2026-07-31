@@ -14,7 +14,7 @@ prototype.
 ## First vertical slice
 
 The prototype is successful when a focused block in the `maskys` graph can run
-`Codex: Work on this block`, briefly show a `[[Codex/running]]` child, and
+`Codex: Do this block`, briefly show a `[[Codex/running]]` child, and
 receive useful appended outline blocks beneath the focused block. When the run
 finishes, the temporary running child must be deleted.
 

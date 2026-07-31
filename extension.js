@@ -30,9 +30,16 @@ const NATIVE_WINDOW_HEADER_CLASS = "roam-codex-native-window-header";
 const NATIVE_COMPOSER_CLASS = "roam-codex-native-composer";
 let ACTIVE_CHAT_PANEL = null;
 let SIDEBAR_CHAT_LAUNCHER = null;
+let CHAT_PANEL_OPEN_PROMISE = null;
+let CHAT_PANEL_CLOSE_PROMISE = null;
+let CHAT_TOGGLE_HOTKEY_DISPOSE = null;
+const CHAT_TOGGLE_HOTKEY_KEY = "__roamCodexToggleHotkeyDispose";
 
 export const RUNNING_BLOCK_TEXT = "[[Codex/running]]";
-export const CHAT_COMPOSER_PLACEHOLDER = "\u200B";
+// Roam sometimes records a zero-width-only block as an open sidebar window
+// without rendering a corresponding React host. A non-breaking space remains
+// visually empty while ensuring the temporary composer block is renderable.
+export const CHAT_COMPOSER_PLACEHOLDER = "\u00A0";
 
 function emptyChatState() {
   return {
@@ -399,7 +406,7 @@ export async function requestPanelChat(message, {
   threadId = null,
   model = null,
   effort = null,
-  serviceTier = null,
+  serviceTier,
   onProgress = () => {},
   onStarted = () => {},
   onThread = () => {},
@@ -421,7 +428,7 @@ export async function requestPanelChat(message, {
   if (threadId) body.threadId = threadId;
   if (model) body.model = model;
   if (effort) body.effort = effort;
-  if (serviceTier) body.serviceTier = serviceTier;
+  if (serviceTier !== undefined) body.serviceTier = serviceTier;
 
   const response = await fetchImpl(`${BRIDGE_URL}/chat`, {
     method: "POST",
@@ -1349,7 +1356,7 @@ async function waitForChatPanelHost(
   doc,
   sidebarWindow,
   {
-    attempts = 40,
+    attempts = 80,
     waitImpl = (resolveWait) => setTimeout(resolveWait, 50),
   } = {},
 ) {
@@ -1451,6 +1458,33 @@ function activeChatPanelIsOpen() {
   return Boolean(ACTIVE_CHAT_PANEL?.element?.isConnected);
 }
 
+export function cleanupStaleChatUi(doc = globalThis.document) {
+  doc?.getElementById?.(CHAT_PANEL_ID)?.remove?.();
+  doc?.getElementById?.(CHAT_CONTROLS_ID)?.remove?.();
+  for (const element of doc?.querySelectorAll?.(".roam-codex-chat-header") || []) {
+    element.remove?.();
+  }
+  for (const element of doc?.querySelectorAll?.(".roam-codex-chat-toolbar") || []) {
+    element.classList?.remove?.("roam-codex-chat-toolbar");
+  }
+  for (const element of doc?.querySelectorAll?.(".roam-codex-chat-window") || []) {
+    element.classList?.remove?.("roam-codex-chat-window");
+  }
+  for (const element of doc?.querySelectorAll?.(`.${NATIVE_WINDOW_HEADER_CLASS}`) || []) {
+    element.classList?.remove?.(NATIVE_WINDOW_HEADER_CLASS);
+  }
+  for (const shell of doc?.querySelectorAll?.(".roam-codex-chat-composer-shell") || []) {
+    const nativeComposer = shell.querySelector?.(".roam-codex-native-composer");
+    if (nativeComposer && shell.parentNode) {
+      shell.parentNode.insertBefore?.(nativeComposer, shell);
+    }
+    shell.remove?.();
+  }
+  for (const element of doc?.querySelectorAll?.(`.${NATIVE_COMPOSER_CLASS}`) || []) {
+    element.classList?.remove?.(NATIVE_COMPOSER_CLASS);
+  }
+}
+
 function updateSidebarChatLauncherState(button, chatOpen) {
   const open = Boolean(chatOpen);
   button.dataset.chatOpen = open ? "true" : "false";
@@ -1480,10 +1514,9 @@ export function mountSidebarChatLauncher({
     existing?.remove?.();
     return null;
   }
-  if (existing?.parentNode === placement.header) {
-    updateSidebarChatLauncherState(existing, isChatOpenImpl());
-    return existing;
-  }
+  // A developer-extension reload evaluates a new module while the old DOM
+  // node can remain in Roam. Replace it so no stale listener, disabled flag,
+  // or in-flight visual state survives the reload.
   existing?.roamCodexDispose?.();
   existing?.remove?.();
 
@@ -1544,6 +1577,7 @@ export function mountSidebarChatLauncher({
     button,
     placement.header.firstChild || placement.nativeToggle,
   );
+  placement.header.classList?.add?.("roam-codex-chat-toolbar");
   return button;
 }
 
@@ -1561,10 +1595,24 @@ export function installSidebarChatLauncher({
 } = {}) {
   let disposed = false;
   let scheduled = null;
+  let mountedButton = null;
   const sync = () => {
     scheduled = null;
     if (disposed) return null;
-    return mountSidebarChatLauncher({ doc, ...mountOptions });
+    const placement = findSidebarChatLauncherPlacement(doc);
+    if (
+      mountedButton?.isConnected &&
+      placement?.header === mountedButton.parentNode
+    ) {
+      placement.header.classList?.add?.("roam-codex-chat-toolbar");
+      const isOpen = typeof mountOptions.isChatOpenImpl === "function"
+        ? mountOptions.isChatOpenImpl()
+        : activeChatPanelIsOpen();
+      updateSidebarChatLauncherState(mountedButton, isOpen);
+      return mountedButton;
+    }
+    mountedButton = mountSidebarChatLauncher({ doc, ...mountOptions });
+    return mountedButton;
   };
   const schedule = () => {
     if (disposed || scheduled !== null) return;
@@ -1598,9 +1646,13 @@ export function installSidebarChatLauncher({
       observer?.disconnect?.();
       if (scheduled !== null) cancelAnimationFrameImpl(scheduled);
       scheduled = null;
-      const button = doc?.getElementById?.(SIDEBAR_CHAT_LAUNCHER_ID);
+      const button = mountedButton?.isConnected
+        ? mountedButton
+        : doc?.getElementById?.(SIDEBAR_CHAT_LAUNCHER_ID);
       button?.roamCodexDispose?.();
+      button?.parentNode?.classList?.remove?.("roam-codex-chat-toolbar");
       button?.remove?.();
+      mountedButton = null;
     },
   };
 }
@@ -1617,6 +1669,18 @@ function modelTiers(model) {
   return Array.isArray(model?.serviceTiers)
     ? model.serviceTiers.filter((tier) => typeof tier?.id === "string")
     : [];
+}
+
+function modelTierChoices(model) {
+  const tiers = modelTiers(model);
+  if (!tiers.length) return [];
+  if (tiers.some((tier) => tier.id === "standard")) return tiers;
+  return [{
+    id: "",
+    name: "Standard",
+    description: "Default speed",
+    synthetic: true,
+  }, ...tiers];
 }
 
 function effortLabel(effort) {
@@ -1640,7 +1704,7 @@ async function waitForSidebarBlockWindow(
   blockUid,
   api,
   {
-    attempts = 40,
+    attempts = 80,
     waitImpl = (resolveWait) => setTimeout(resolveWait, 50),
   } = {},
 ) {
@@ -1663,14 +1727,20 @@ export async function openPromptBlockInSidebar(
     throw new Error("Focus an ordinary Roam block before opening Codex chat.");
   }
 
+  // A window can remain in getWindows() while the sidebar is hidden at zero
+  // width. addWindow identifies windows by type + target UID, so repeating it
+  // is the supported way to ensure the existing prompt window is visible too.
   await api.ui.rightSidebar.addWindow({
     window: { type: "block", "block-uid": blockUid, order: 0 },
   });
-  const sidebarWindow = await waitForSidebarBlockWindow(
-    blockUid,
-    api,
-    waitOptions,
-  );
+  let sidebarWindow = findSidebarBlockWindow(blockUid, { api });
+  if (!sidebarWindow) {
+    sidebarWindow = await waitForSidebarBlockWindow(
+      blockUid,
+      api,
+      waitOptions,
+    );
+  }
   if (sidebarWindow["collapsed?"]) {
     await api.ui.rightSidebar.expandWindow({
       window: { type: "block", "block-uid": blockUid },
@@ -1823,7 +1893,10 @@ export async function resolveChatPromptBlock(
   }
 
   const focusedBlockUid = api.ui?.getFocusedBlock?.()?.["block-uid"];
-  if (validBlockUid(focusedBlockUid)) {
+  if (
+    validBlockUid(focusedBlockUid) &&
+    await pullUid(focusedBlockUid, api)
+  ) {
     return { uid: focusedBlockUid, scratch: false };
   }
 
@@ -2254,6 +2327,7 @@ export function createChatPanel({
 
   const progress = createPanelElement(doc, "div", "roam-codex-chat-progress");
   progress.setAttribute("aria-live", "polite");
+  progress.hidden = true;
   const progressMeta = createPanelElement(
     doc,
     "span",
@@ -2273,7 +2347,16 @@ export function createChatPanel({
     "roam-codex-chat-progress-text",
   );
   progress.appendChild(progressText);
-  body.appendChild(progress);
+  transcript.appendChild(progress);
+
+  const syncTranscriptStatus = ({ scroll = false } = {}) => {
+    if (progress.parentNode !== transcript) transcript.appendChild(progress);
+    transcript.hidden = !messages.length && progress.hidden;
+    if (scroll && !progress.hidden) {
+      transcript.scrollTop = transcript.scrollHeight;
+      updateScrollLatestButton();
+    }
+  };
 
   const clampTranscriptHeight = (value) => Math.min(
     CHAT_TRANSCRIPT_MAX_HEIGHT,
@@ -2295,8 +2378,9 @@ export function createChatPanel({
     setElementStyle(transcript, "height", `${height}px`);
     setElementStyle(transcript, "maxHeight", `${height}px`);
   };
-  let transcriptHeight = readStoredTranscriptHeight();
-  if (transcriptHeight !== null) applyTranscriptHeight(transcriptHeight);
+  let transcriptHeight = readStoredTranscriptHeight() ??
+    CHAT_TRANSCRIPT_MAX_HEIGHT;
+  applyTranscriptHeight(transcriptHeight);
 
   let transcriptResize = null;
   const handleTranscriptResizeMove = (event) => {
@@ -2356,6 +2440,14 @@ export function createChatPanel({
   pickerMenu.setAttribute("aria-label", "Model, effort, and speed options");
   pickerMenu.hidden = true;
   pickerWrap.appendChild(pickerMenu);
+  const pickerSubmenu = createPanelElement(
+    doc,
+    "div",
+    "roam-codex-chat-picker-submenu",
+  );
+  pickerSubmenu.setAttribute("role", "menu");
+  pickerSubmenu.hidden = true;
+  pickerWrap.appendChild(pickerSubmenu);
   modelRow.appendChild(pickerWrap);
   const actions = createPanelElement(doc, "div", "roam-codex-chat-actions");
   const stopButton = panelButton(
@@ -2560,9 +2652,10 @@ export function createChatPanel({
     disposeRenderedMessages();
     const renderVersion = messageRenderVersion;
     transcript.replaceChildren();
-    transcript.hidden = !messages.length;
     transcriptHandle.hidden = !messages.length;
     if (!messages.length) {
+      transcript.appendChild(progress);
+      syncTranscriptStatus();
       scrollLatestButton.hidden = true;
       return;
     }
@@ -2637,6 +2730,8 @@ export function createChatPanel({
       article.appendChild(messageText);
       transcript.appendChild(article);
     }
+    transcript.appendChild(progress);
+    syncTranscriptStatus();
     transcript.scrollTop = transcript.scrollHeight;
     updateScrollLatestButton();
   };
@@ -2645,6 +2740,7 @@ export function createChatPanel({
     progressText.textContent = singleLine(text);
     progress.dataset.kind = kind;
     progress.hidden = !progressText.textContent && progressMeta.hidden;
+    syncTranscriptStatus({ scroll: !progress.hidden });
   };
 
   const currentModelEntry = () =>
@@ -2653,10 +2749,10 @@ export function createChatPanel({
     models[0] || null;
 
   const defaultTierIdFor = (model) => {
-    const tiers = modelTiers(model);
+    const tiers = modelTierChoices(model);
     return tiers.some((tier) => tier.id === model?.defaultServiceTier)
       ? model.defaultServiceTier
-      : tiers[0]?.id || "";
+      : "";
   };
 
   const initPicker = () => {
@@ -2673,7 +2769,7 @@ export function createChatPanel({
     pickerEffort = efforts.includes(preferred.effort)
       ? preferred.effort
       : defaultEffort || efforts[0] || "";
-    const tiers = modelTiers(selected);
+    const tiers = modelTierChoices(selected);
     pickerSpeed = tiers.some((tier) => tier.id === preferred.speed)
       ? preferred.speed
       : defaultTierIdFor(selected);
@@ -2684,7 +2780,9 @@ export function createChatPanel({
     const selected = currentModelEntry();
     const parts = [selected?.displayName || selected?.id || "Model"];
     if (pickerEffort) parts.push(effortLabel(pickerEffort));
-    const tier = modelTiers(selected).find((entry) => entry.id === pickerSpeed);
+    const tier = modelTierChoices(selected).find(
+      (entry) => entry.id === pickerSpeed,
+    );
     if (tier && tier.id !== defaultTierIdFor(selected)) {
       parts.push(tier.name || tier.id);
     }
@@ -2701,48 +2799,66 @@ export function createChatPanel({
     pickerOpen = false;
     pickerLevel = null;
     pickerMenu.hidden = true;
+    pickerSubmenu.hidden = true;
+    pickerSubmenu.replaceChildren();
     pickerButton.setAttribute("aria-expanded", "false");
     if (restoreFocus) pickerButton.focus?.();
   };
 
-  const renderPickerMenu = () => {
-    pickerMenu.replaceChildren();
+  const syncPickerRows = () => {
+    for (const row of pickerMenu.children || []) {
+      const open = row.dataset?.level === pickerLevel;
+      row.className = row.className.replace(/\s+is-open/g, "") +
+        (open ? " is-open" : "");
+      row.setAttribute?.("aria-expanded", String(open));
+    }
+  };
+
+  const renderPickerSubmenu = () => {
+    pickerSubmenu.replaceChildren();
+    if (!pickerLevel) {
+      pickerSubmenu.hidden = true;
+      return;
+    }
     const selected = currentModelEntry();
+    pickerSubmenu.hidden = false;
+    pickerSubmenu.setAttribute(
+      "aria-label",
+      `${effortLabel(pickerLevel)} options`,
+    );
 
-    const addBack = (label) => {
-      const back = panelButton(
-        doc,
-        "roam-codex-chat-picker-back",
-        `‹ ${label}`,
-        "Back to all options",
-      );
-      back.setAttribute("role", "menuitem");
-      back.addEventListener("click", () => {
-        pickerLevel = null;
-        renderPickerMenu();
-      });
-      pickerMenu.appendChild(back);
-    };
-
-    const addOption = (label, active, onPick) => {
+    const addOption = (label, active, onPick, description = "") => {
       const option = panelButton(
         doc,
         `roam-codex-chat-picker-option${active ? " is-active" : ""}`,
-        label,
         "",
+        description,
       );
       option.setAttribute("role", "menuitemradio");
       option.setAttribute("aria-checked", String(active));
+      option.appendChild(createPanelElement(
+        doc,
+        "span",
+        "roam-codex-chat-picker-option-label",
+        label,
+      ));
+      if (description) {
+        option.appendChild(createPanelElement(
+          doc,
+          "span",
+          "roam-codex-chat-picker-option-description",
+          description,
+        ));
+      }
       option.addEventListener("click", () => {
         onPick();
         closePicker({ restoreFocus: true });
         renderPickerButton();
       });
-      pickerMenu.appendChild(option);
+      pickerSubmenu.appendChild(option);
     };
 
     if (pickerLevel === "model") {
-      addBack("Model");
       for (const model of models) {
         if (!model || typeof model.id !== "string") continue;
         const displayName = model.displayName || model.id;
@@ -2765,18 +2881,20 @@ export function createChatPanel({
                 : null;
               pickerEffort = defaultEffort || efforts[0] || "";
             }
-            if (!modelTiers(next).some((tier) => tier.id === pickerSpeed)) {
+            if (!modelTierChoices(next).some(
+              (tier) => tier.id === pickerSpeed,
+            )) {
               pickerSpeed = defaultTierIdFor(next);
             }
             savePreferences();
           },
+          model.description || "",
         );
       }
       return;
     }
 
     if (pickerLevel === "effort") {
-      addBack("Effort");
       const efforts = modelEfforts(selected);
       const defaultEffort = efforts.includes(selected?.defaultReasoningEffort)
         ? selected.defaultReasoningEffort
@@ -2793,15 +2911,17 @@ export function createChatPanel({
             effortChanged = true;
             savePreferences();
           },
+          selected?.supportedReasoningEfforts?.find(
+            (entry) => entry?.reasoningEffort === effort,
+          )?.description || "",
         );
       }
       return;
     }
 
     if (pickerLevel === "speed") {
-      addBack("Speed");
       const defaultTier = defaultTierIdFor(selected);
-      for (const tier of modelTiers(selected)) {
+      for (const tier of modelTierChoices(selected)) {
         const name = tier.name || tier.id;
         addOption(
           tier.id === defaultTier ? `${name} (Default)` : name,
@@ -2812,12 +2932,23 @@ export function createChatPanel({
             speedChanged = true;
             savePreferences();
           },
+          tier.description || "",
         );
       }
-      return;
     }
+  };
 
-    const tiers = modelTiers(selected);
+  const openPickerLevel = (level) => {
+    pickerLevel = level;
+    syncPickerRows();
+    renderPickerSubmenu();
+  };
+
+  const renderPickerMenu = () => {
+    pickerMenu.replaceChildren();
+    const selected = currentModelEntry();
+
+    const tiers = modelTierChoices(selected);
     const currentTier = tiers.find((tier) => tier.id === pickerSpeed);
     const rows = [
       ["Model", selected?.displayName || selected?.id || "—", "model"],
@@ -2834,6 +2965,8 @@ export function createChatPanel({
         `Choose ${label.toLowerCase()}`,
       );
       row.setAttribute("role", "menuitem");
+      row.setAttribute("aria-haspopup", "menu");
+      row.dataset.level = level;
       row.appendChild(createPanelElement(
         doc,
         "span",
@@ -2854,12 +2987,19 @@ export function createChatPanel({
       );
       chevron.setAttribute("aria-hidden", "true");
       row.appendChild(chevron);
-      row.addEventListener("click", () => {
-        pickerLevel = level;
-        renderPickerMenu();
+      const open = () => openPickerLevel(level);
+      row.addEventListener("mouseenter", open);
+      row.addEventListener("focus", open);
+      row.addEventListener("click", open);
+      row.addEventListener("keydown", (event) => {
+        if (!["ArrowRight", "Enter", " "].includes(event.key)) return;
+        event.preventDefault?.();
+        open();
       });
       pickerMenu.appendChild(row);
     }
+    syncPickerRows();
+    renderPickerSubmenu();
   };
 
   const historyItems = () => buildConversationHistory(
@@ -3186,6 +3326,7 @@ export function createChatPanel({
       elapsedIntervalId = null;
     }
     progress.hidden = !progressText.textContent && progressMeta.hidden;
+    syncTranscriptStatus({ scroll: value });
     running = value;
     if (value && pickerOpen) closePicker();
     pickerButton.disabled = value || !modelsReady;
@@ -3227,7 +3368,7 @@ export function createChatPanel({
       ? pickerModel || catalogDefaultModel?.id || null
       : null;
     const effortOverride = effortChanged ? pickerEffort || null : null;
-    const speedOverride = speedChanged ? pickerSpeed || null : null;
+    const speedOverride = speedChanged ? pickerSpeed || null : undefined;
 
     const shouldClearPrompt = shouldClearChatPrompt(prompt.uid, {
       scratchPrompt,
@@ -3446,6 +3587,12 @@ export function createChatPanel({
     return closePromise;
   };
 
+  // Keep Roam's native block editor focused until send() snapshots it. A
+  // normal button mouse-down otherwise moves focus into the controls before
+  // readFocusedPromptBlock() can identify the composer window.
+  sendButton.addEventListener("mousedown", (event) => {
+    event.preventDefault?.();
+  });
   sendButton.addEventListener("click", () => void send());
   closeButton.addEventListener("click", () => {
     const removeWindow = api.ui?.rightSidebar?.removeWindow;
@@ -3554,7 +3701,7 @@ export function createChatPanel({
   };
 }
 
-export async function openChatPanel({
+async function openChatPanelInternal({
   api = getRoamApi(),
   doc = globalThis.document,
   storage = window.localStorage,
@@ -3580,19 +3727,78 @@ export async function openChatPanel({
     }
   }
 
-  if (ACTIVE_CHAT_PANEL?.element?.isConnected) {
-    if (ACTIVE_CHAT_PANEL.rootBlockUid === promptBlockUid) {
+  if (ACTIVE_CHAT_PANEL) {
+    if (
+      ACTIVE_CHAT_PANEL.element?.isConnected &&
+      ACTIVE_CHAT_PANEL.rootBlockUid === promptBlockUid
+    ) {
       await ACTIVE_CHAT_PANEL.focus();
       return ACTIVE_CHAT_PANEL;
     }
-    void ACTIVE_CHAT_PANEL.close();
+    await ACTIVE_CHAT_PANEL.close();
+    if (ACTIVE_CHAT_PANEL?.element?.isConnected === false) {
+      ACTIVE_CHAT_PANEL = null;
+    }
   }
 
   let controller;
   let nativeWindowObserver = null;
+  let disconnectedHostTimer = null;
   let host = null;
   let nativeHeader = null;
   let nativeComposer = null;
+  let composerShell = null;
+  const releaseMountedHost = () => {
+    nativeHeader?.classList?.remove?.(NATIVE_WINDOW_HEADER_CLASS);
+    nativeComposer?.classList?.remove?.(NATIVE_COMPOSER_CLASS);
+    if (composerShell?.parentNode && nativeComposer) {
+      composerShell.parentNode.insertBefore?.(nativeComposer, composerShell);
+    }
+    composerShell?.remove?.();
+    host?.classList?.remove?.("roam-codex-chat-window");
+    nativeHeader = null;
+    nativeComposer = null;
+    composerShell = null;
+  };
+  const mountControllerInHost = (nextHost) => {
+    if (!nextHost || !controller) return false;
+    releaseMountedHost();
+    host = nextHost;
+    host.classList?.add?.("roam-codex-chat-window");
+    nativeHeader = host.firstElementChild || null;
+    host.insertBefore(
+      controller.element,
+      nativeHeader?.nextSibling || null,
+    );
+    nativeHeader?.classList?.add?.(NATIVE_WINDOW_HEADER_CLASS);
+    nativeComposer = controller.element.nextElementSibling || null;
+    nativeComposer?.classList?.add?.(NATIVE_COMPOSER_CLASS);
+    if (nativeComposer && typeof doc.createElement === "function") {
+      composerShell = doc.createElement("div");
+      composerShell.className = "roam-codex-chat-composer-shell";
+      host.insertBefore(composerShell, nativeComposer);
+      composerShell.appendChild(nativeComposer);
+      composerShell.appendChild(controller.controlsElement);
+    } else {
+      host.appendChild(controller.controlsElement);
+    }
+    if (controller.headerElement) {
+      const launcherPlacement = findSidebarChatLauncherPlacement(doc);
+      const launcher = doc.getElementById?.(SIDEBAR_CHAT_LAUNCHER_ID);
+      if (
+        launcherPlacement?.header &&
+        launcher?.parentNode === launcherPlacement.header
+      ) {
+        launcherPlacement.header.insertBefore(
+          controller.headerElement,
+          launcher.nextSibling || null,
+        );
+      } else {
+        host.insertBefore(controller.headerElement, controller.element);
+      }
+    }
+    return true;
+  };
   try {
     const sidebarWindow = await openPromptBlock(
       promptBlockUid,
@@ -3611,9 +3817,11 @@ export async function openChatPanel({
       scratchPrompt: prompt.scratch,
       onClose: ({ whenIdle, resetPromptUids }) => {
         nativeWindowObserver?.disconnect?.();
-        nativeHeader?.classList?.remove?.(NATIVE_WINDOW_HEADER_CLASS);
-        nativeComposer?.classList?.remove?.(NATIVE_COMPOSER_CLASS);
-        host?.classList?.remove?.("roam-codex-chat-window");
+        if (disconnectedHostTimer !== null) {
+          globalThis.clearTimeout(disconnectedHostTimer);
+          disconnectedHostTimer = null;
+        }
+        releaseMountedHost();
         if (ACTIVE_CHAT_PANEL === controller) ACTIVE_CHAT_PANEL = null;
         return whenIdle()
           .then(() => prompt.scratch
@@ -3627,40 +3835,45 @@ export async function openChatPanel({
         });
       },
     });
-    host.classList?.add?.("roam-codex-chat-window");
-    nativeHeader = host.firstElementChild || null;
-    host.insertBefore(
-      controller.element,
-      nativeHeader?.nextSibling || null,
-    );
-    nativeHeader?.classList?.add?.(NATIVE_WINDOW_HEADER_CLASS);
-    nativeComposer = controller.element.nextElementSibling || null;
-    nativeComposer?.classList?.add?.(NATIVE_COMPOSER_CLASS);
-    host.appendChild(controller.controlsElement);
-    if (controller.headerElement) {
-      const launcherPlacement = findSidebarChatLauncherPlacement(doc);
-      const launcher = doc.getElementById?.(SIDEBAR_CHAT_LAUNCHER_ID);
-      if (launcherPlacement?.header && launcher?.parentNode === launcherPlacement.header) {
-        launcherPlacement.header.insertBefore(
-          controller.headerElement,
-          launcher.nextSibling || null,
-        );
-      } else {
-        host.insertBefore(controller.headerElement, controller.element);
-      }
-    }
+    mountControllerInHost(host);
     ACTIVE_CHAT_PANEL = controller;
 
     const MutationObserverImpl = doc.defaultView?.MutationObserver ||
       globalThis.MutationObserver;
-    if (MutationObserverImpl && host.parentNode) {
+    const observationRoot = doc.body || doc.documentElement || host.parentNode;
+    if (MutationObserverImpl && observationRoot) {
       nativeWindowObserver = new MutationObserverImpl(() => {
-        if (!host.isConnected) void controller.close();
+        if (
+          host?.isConnected &&
+          controller.element?.isConnected
+        ) return;
+        if (disconnectedHostTimer !== null) return;
+        disconnectedHostTimer = globalThis.setTimeout(() => {
+          disconnectedHostTimer = null;
+          if (host?.isConnected && controller.element?.isConnected) return;
+          const liveWindow = findSidebarBlockWindow(promptBlockUid, { api });
+          if (!liveWindow) {
+            void controller.close();
+            return;
+          }
+          const nextHost = findChatPanelHost(doc, liveWindow);
+          if (nextHost) mountControllerInHost(nextHost);
+        }, 100);
       });
-      nativeWindowObserver.observe(host.parentNode, { childList: true });
+      nativeWindowObserver.observe(observationRoot, {
+        childList: true,
+        subtree: true,
+      });
     }
 
-    await controller.focus();
+    // Roam may leave this promise pending even after the sidebar window has
+    // rendered. Focusing is a convenience, so it must not hold the panel-open
+    // lifecycle (and the launcher/keyboard toggle) in an "opening" state.
+    try {
+      void Promise.resolve(controller.focus()).catch(() => {});
+    } catch {
+      // The panel is already usable; a synchronous focus failure is harmless.
+    }
     return controller;
   } catch (error) {
     if (controller) {
@@ -3677,10 +3890,72 @@ export async function openChatPanel({
   }
 }
 
+export function openChatPanel(options = {}) {
+  if (CHAT_PANEL_OPEN_PROMISE) return CHAT_PANEL_OPEN_PROMISE;
+  const opening = openChatPanelInternal(options);
+  const tracked = opening.finally(() => {
+    if (CHAT_PANEL_OPEN_PROMISE === tracked) CHAT_PANEL_OPEN_PROMISE = null;
+  });
+  CHAT_PANEL_OPEN_PROMISE = tracked;
+  return tracked;
+}
+
 export function closeChatPanel() {
-  const closePromise = ACTIVE_CHAT_PANEL?.close();
+  if (CHAT_PANEL_CLOSE_PROMISE) return CHAT_PANEL_CLOSE_PROMISE;
+  const panel = ACTIVE_CHAT_PANEL;
+  if (!panel) return Promise.resolve();
   ACTIVE_CHAT_PANEL = null;
-  return closePromise || Promise.resolve();
+  const closing = Promise.resolve(panel.close());
+  const tracked = closing.finally(() => {
+    if (CHAT_PANEL_CLOSE_PROMISE === tracked) CHAT_PANEL_CLOSE_PROMISE = null;
+  });
+  CHAT_PANEL_CLOSE_PROMISE = tracked;
+  return tracked;
+}
+
+export function toggleChatPanel() {
+  if (CHAT_PANEL_OPEN_PROMISE) return CHAT_PANEL_OPEN_PROMISE;
+  if (CHAT_PANEL_CLOSE_PROMISE) return CHAT_PANEL_CLOSE_PROMISE;
+  return activeChatPanelIsOpen() ? closeChatPanel() : openChatPanel();
+}
+
+export function installChatToggleHotkey({
+  doc = globalThis.document,
+  toggleImpl = toggleChatPanel,
+  notifyImpl = notify,
+} = {}) {
+  if (!doc?.addEventListener) return () => {};
+  const runtime = doc.defaultView || globalThis;
+  runtime[CHAT_TOGGLE_HOTKEY_KEY]?.();
+  let disposed = false;
+  const handleKeydown = (event) => {
+    if (
+      disposed ||
+      event.defaultPrevented ||
+      event.altKey ||
+      event.shiftKey ||
+      !(event.metaKey || event.ctrlKey) ||
+      String(event.key).toLowerCase() !== "j"
+    ) {
+      return;
+    }
+    event.preventDefault?.();
+    event.stopPropagation?.();
+    void Promise.resolve(toggleImpl()).catch((error) => {
+      notifyImpl(`Codex chat could not toggle: ${error.message}`, "danger");
+    });
+  };
+  doc.addEventListener("keydown", handleKeydown, true);
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    doc.removeEventListener?.("keydown", handleKeydown, true);
+    if (runtime[CHAT_TOGGLE_HOTKEY_KEY] === dispose) {
+      delete runtime[CHAT_TOGGLE_HOTKEY_KEY];
+    }
+  };
+  runtime[CHAT_TOGGLE_HOTKEY_KEY] = dispose;
+  return dispose;
 }
 
 export function sendActiveChatMessage({
@@ -3752,6 +4027,10 @@ export async function checkBridge({
 
 export default {
   onload: ({ extensionAPI }) => {
+    cleanupStaleChatUi();
+    ACTIVE_CHAT_PANEL = null;
+    CHAT_PANEL_OPEN_PROMISE = null;
+    CHAT_PANEL_CLOSE_PROMISE = null;
     void cleanupStaleRunningStatuses().catch((error) => {
       notify(
         `A stale Codex running indicator could not be removed: ${error.message}`,
@@ -3773,6 +4052,8 @@ export default {
     SIDEBAR_CHAT_LAUNCHER = installSidebarChatLauncher({
       openChatImpl: openChat,
     });
+    CHAT_TOGGLE_HOTKEY_DISPOSE?.();
+    CHAT_TOGGLE_HOTKEY_DISPOSE = installChatToggleHotkey();
 
     extensionAPI.ui.commandPalette.addCommand({
       label: "Codex: Send chat message",
@@ -3784,14 +4065,10 @@ export default {
 
     extensionAPI.ui.commandPalette.addCommand({
       label: "Codex: Toggle chat",
-      "default-hotkey": "defmod-j",
+      "disable-hotkey": true,
       callback: () => {
-        if (activeChatPanelIsOpen()) {
-          void closeChatPanel();
-          return;
-        }
-        void openChat().catch((error) => {
-          notify(`Codex chat could not open: ${error.message}`, "danger");
+        void toggleChatPanel().catch((error) => {
+          notify(`Codex chat could not toggle: ${error.message}`, "danger");
         });
       },
     });
@@ -3805,25 +4082,15 @@ export default {
       },
     });
 
-    for (const label of [
-      "Codex: Work on this block",
-      "Codex: Probe selected block",
-    ]) {
-      extensionAPI.ui.slashCommand.addCommand({
-        label,
-        callback: workFromSlashCommand,
-      });
-    }
+    extensionAPI.ui.slashCommand.addCommand({
+      label: "Codex: Do this block",
+      callback: workFromSlashCommand,
+    });
 
-    for (const label of [
-      "Codex: Work on focused block",
-      "Codex: Probe focused block",
-    ]) {
-      extensionAPI.ui.commandPalette.addCommand({
-        label,
-        callback: workFromCommandPalette,
-      });
-    }
+    extensionAPI.ui.commandPalette.addCommand({
+      label: "Codex: Do this block",
+      callback: workFromCommandPalette,
+    });
 
     extensionAPI.ui.commandPalette.addCommand({
       label: "Codex: Pair local bridge",
@@ -3842,9 +4109,13 @@ export default {
     });
   },
   onunload: () => {
+    CHAT_TOGGLE_HOTKEY_DISPOSE?.();
+    CHAT_TOGGLE_HOTKEY_DISPOSE = null;
     SIDEBAR_CHAT_LAUNCHER?.dispose?.();
+    SIDEBAR_CHAT_LAUNCHER?.remove?.();
     SIDEBAR_CHAT_LAUNCHER = null;
-    closeChatPanel();
+    void closeChatPanel();
+    cleanupStaleChatUi();
     stopAllRunningPresentations();
   },
 };

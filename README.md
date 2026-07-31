@@ -7,7 +7,7 @@ Roam graph:
 focused Roam block
         |
         v
-Codex: Work on this block
+Codex: Do this block
         |
         v
 localhost bridge -> Codex app-server -> block + prior comments
@@ -95,7 +95,7 @@ than copying transformed DOM text.
 Persistent chat has direct read/write access to this one configured graph. It
 does not write ordinary replies into Roam, but when the user explicitly asks
 for a graph change it performs that change through Roam MCP and reports the
-result in chat. There is no separate Apply stage. The structured `Work on this
+result in chat. There is no separate Apply stage. The structured `Do this
 block` command remains a different workflow: it asks for a bounded plan and the
 extension applies that plan through the browser API.
 
@@ -139,7 +139,7 @@ diagnostics or transient toasts.
 Builder tasks inherit the user's ordinary read/write Roam connection and every
 Roam MCP tool, including developer-extension reload commands. The bridge uses a
 separate graph-scoped Roam connection for the runtime app-server, exposes graph
-read/write tools to persistent chat, and narrows the structured `Work on this
+read/write tools to persistent chat, and narrows the structured `Do this
 block` thread to its read-only tool list. Unrelated MCP servers and plugins stay
 disabled.
 
@@ -148,7 +148,7 @@ Runtime instructions are deliberately separate from builder instructions:
 - [`runtime-agent.md`](./runtime-agent.md) is the plugin-owned contract for
   persistent chat.
 - [`runtime-work-agent.md`](./runtime-work-agent.md) is the stricter read-only
-  contract for `Work on this block` planning.
+  contract for `Do this block` planning.
 - `[[roam/agent guidelines]]` remains the graph owner's place for graph-specific
   naming, structure, filing, and presentation preferences. The runtime reads it
   through `get_graph_guidelines` according to the Roam tool contract.
@@ -236,10 +236,10 @@ not expose or copy the token.
 ## Run the first experiment
 
 1. Write an ordinary request or question as a Roam block.
-2. Focus it and choose `Codex: Work on this block` from the slash menu, or
-   `Codex: Work on focused block` from the command palette.
-   The previous `Codex: Probe selected block` and
-   `Codex: Probe focused block` labels remain as aliases.
+2. Focus it and choose `Codex: Do this block` from the slash menu or the
+   command palette. The block is the instruction; Codex carries it out and
+   appends the result beneath. The previous `Work on ...` and `Probe ...`
+   labels are removed; rebind any hotkey to the new label.
 3. A `[[Codex/running]]` child appears with a local spinner, elapsed timer, Stop
    button, and evolving concise progress summary while the bridge is working.
 4. Codex's durable result appears as ordinary child blocks at the invocation

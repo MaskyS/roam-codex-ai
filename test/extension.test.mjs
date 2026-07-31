@@ -22,6 +22,7 @@ const {
   RUNNING_BLOCK_TEXT,
   applyRunPlan,
   buildConversationHistory,
+  cleanupStaleChatUi,
   clearScratchPromptBlock,
   cleanupStaleRunningStatuses,
   copyRoamText,
@@ -53,6 +54,7 @@ const {
   shouldClearChatPrompt,
   startRunningPresentation,
   installSidebarChatLauncher,
+  installChatToggleHotkey,
   mountSidebarChatLauncher,
   unmountRoamMarkdown,
   workOnBlock,
@@ -238,6 +240,7 @@ function createFakePanelDocument() {
       listeners: {},
       dataset: {},
       className: "",
+      style: {},
       value: "",
       removed: false,
       scrollHeight: 0,
@@ -626,6 +629,7 @@ test("panel chat streams a thread id, progress, and a panel-only reply", async (
     threadId: "thread_12345678",
     model: "model-from-list",
     effort: "medium",
+    serviceTier: null,
     onStarted: (event) => starts.push(event),
     onThread: (event) => threads.push(event),
     onProgress: (event) => progress.push(event),
@@ -646,6 +650,7 @@ test("panel chat streams a thread id, progress, and a panel-only reply", async (
     threadId: "thread_12345678",
     model: "model-from-list",
     effort: "medium",
+    serviceTier: null,
   });
   assert.deepEqual(starts, [{ runId: "run-1" }]);
   assert.deepEqual(threads, [{ threadId: "thread_12345678" }]);
@@ -768,7 +773,7 @@ test("the visible right sidebar receives one AI chat launcher beside its toggle"
   assert.equal(placement.header, header);
   assert.equal(placement.nativeToggle, nativeToggle);
 
-  const button = mountSidebarChatLauncher({
+  let button = mountSidebarChatLauncher({
     doc,
     openChatImpl: async () => {
       opens.push("open");
@@ -783,10 +788,21 @@ test("the visible right sidebar receives one AI chat launcher beside its toggle"
   assert.deepEqual(header.children, [button, nativeToggle]);
   assert.equal(button.title, "Open Codex chat");
   assert.equal(button["aria-label"], "Open Codex chat");
-  assert.equal(mountSidebarChatLauncher({
+  const staleButton = button;
+  button = mountSidebarChatLauncher({
     doc,
+    openChatImpl: async () => {
+      opens.push("open");
+      chatOpen = true;
+    },
+    closeChatImpl: async () => {
+      closes.push("close");
+      chatOpen = false;
+    },
     isChatOpenImpl: () => chatOpen,
-  }), button);
+  });
+  assert.notEqual(button, staleButton);
+  assert.equal(staleButton.isConnected, false);
   assert.equal(header.children.length, 2);
 
   await button.listeners.click();
@@ -807,6 +823,51 @@ test("the visible right sidebar receives one AI chat launcher beside its toggle"
   sidebar.width = 0;
   assert.equal(mountSidebarChatLauncher({ doc }), null);
   assert.deepEqual(header.children, [nativeToggle]);
+});
+
+test("Cmd-J uses one reload-safe extension listener", async () => {
+  const listeners = new Set();
+  const doc = {
+    defaultView: {},
+    addEventListener(name, listener, capture) {
+      assert.equal(name, "keydown");
+      assert.equal(capture, true);
+      listeners.add(listener);
+    },
+    removeEventListener(name, listener, capture) {
+      assert.equal(name, "keydown");
+      assert.equal(capture, true);
+      listeners.delete(listener);
+    },
+  };
+  let toggles = 0;
+  installChatToggleHotkey({ doc, toggleImpl: () => { toggles += 1; } });
+  const dispose = installChatToggleHotkey({
+    doc,
+    toggleImpl: () => { toggles += 1; },
+  });
+  assert.equal(listeners.size, 1);
+
+  let prevented = 0;
+  let stopped = 0;
+  const event = {
+    key: "j",
+    metaKey: true,
+    ctrlKey: false,
+    altKey: false,
+    shiftKey: false,
+    defaultPrevented: false,
+    preventDefault: () => { prevented += 1; },
+    stopPropagation: () => { stopped += 1; },
+  };
+  [...listeners][0](event);
+  await Promise.resolve();
+  assert.equal(toggles, 1);
+  assert.equal(prevented, 1);
+  assert.equal(stopped, 1);
+
+  dispose();
+  assert.equal(listeners.size, 0);
 });
 
 test("sidebar launcher reports opening failures and observer cleanup removes it", async () => {
@@ -859,6 +920,11 @@ test("sidebar launcher reports opening failures and observer cleanup removes it"
   assert.equal(button.dataset.state, "idle");
   assert.equal(observed.target, doc.body);
   assert.equal(observed.options.subtree, true);
+  assert.equal(controller.sync(), button);
+  assert.equal(
+    doc.getElementById("roam-codex-sidebar-chat-launcher"),
+    button,
+  );
 
   sidebar.width = 0;
   observed.observer.callback([{ target: sidebar }]);
@@ -876,11 +942,16 @@ test("prompt blocks open through Roam's native right-sidebar window API", async 
       rightSidebar: {
         addWindow: async (input) => {
           calls.push(input);
-          windows.push({
-            ...input.window,
-            "window-id": "sidebar-block-prompt123",
-            "collapsed?": false,
-          });
+          if (!windows.some((window) =>
+            window.type === input.window.type &&
+            window["block-uid"] === input.window["block-uid"]
+          )) {
+            windows.push({
+              ...input.window,
+              "window-id": "sidebar-block-prompt123",
+              "collapsed?": false,
+            });
+          }
         },
         getWindows: () => windows,
       },
@@ -888,10 +959,13 @@ test("prompt blocks open through Roam's native right-sidebar window API", async 
   };
 
   const sidebarWindow = await openPromptBlockInSidebar("prompt123", { api });
-  assert.deepEqual(calls, [{
-    window: { type: "block", "block-uid": "prompt123", order: 0 },
-  }]);
+  const reopenedWindow = await openPromptBlockInSidebar("prompt123", { api });
+  assert.deepEqual(calls, [
+    { window: { type: "block", "block-uid": "prompt123", order: 0 } },
+    { window: { type: "block", "block-uid": "prompt123", order: 0 } },
+  ]);
   assert.equal(sidebarWindow["window-id"], "sidebar-block-prompt123");
+  assert.equal(reopenedWindow, sidebarWindow);
   assert.equal(findSidebarBlockWindow("prompt123", { api }), sidebarWindow);
 });
 
@@ -902,6 +976,9 @@ test("chat uses a focused block without creating or changing graph data", async 
       getFocusedBlock: () => ({ "block-uid": "focused123" }),
     },
     data: {
+      async: {
+        pull: async () => ({ ":block/uid": "focused123" }),
+      },
       block: {
         create: async () => {
           created = true;
@@ -915,6 +992,30 @@ test("chat uses a focused block without creating or changing graph data", async 
     scratch: false,
   });
   assert.equal(created, false);
+});
+
+test("chat ignores a stale focused UID left behind by a deleted composer", async () => {
+  const writes = [];
+  const api = {
+    ui: {
+      getFocusedBlock: () => ({ "block-uid": "deleted123" }),
+      mainWindow: {
+        getOpenPageOrBlockUid: async () => "current123",
+      },
+    },
+    util: { generateUID: () => "scratch789" },
+    data: {
+      async: { pull: async () => null },
+      block: { create: async (input) => writes.push(input) },
+    },
+  };
+
+  assert.deepEqual(await resolveChatPromptBlock(undefined, { api }), {
+    uid: "scratch789",
+    scratch: true,
+    parentUid: "current123",
+  });
+  assert.equal(writes.length, 1);
 });
 
 test("chat creates one ordinary scratch block on the current main view when nothing is focused", async () => {
@@ -1446,6 +1547,182 @@ test("open chat puts its title beside the single sidebar launcher", async () => 
   await controller.close();
 });
 
+test("open chat remounts when Roam recreates the sidebar after hiding it", async () => {
+  let observer;
+  class FakeMutationObserver {
+    constructor(callback) {
+      this.callback = callback;
+      observer = this;
+    }
+    observe() {}
+    disconnect() {}
+  }
+  const observationRoot = {};
+  const nativeContent = { classList: { add() {}, remove() {} } };
+  const makeHost = () => ({
+    isConnected: true,
+    parentNode: observationRoot,
+    firstElementChild: {
+      nextSibling: nativeContent,
+      classList: { add() {}, remove() {} },
+    },
+    insertBefore(element) {
+      this.panel = element;
+      element.isConnected = this.isConnected;
+    },
+    appendChild(element) {
+      this.controls = element;
+      element.isConnected = this.isConnected;
+    },
+    classList: { add() {}, remove() {} },
+  });
+  const firstHost = makeHost();
+  let liveHost = firstHost;
+  const panelElement = {
+    isConnected: false,
+    nextElementSibling: nativeContent,
+    remove() { this.isConnected = false; },
+  };
+  const controlsElement = {
+    isConnected: false,
+    remove() { this.isConnected = false; },
+  };
+  const sidebarWindow = {
+    type: "block",
+    "block-uid": "prompt-remount",
+    "window-id": "sidebar-block-prompt-remount",
+  };
+  const api = {
+    ui: { rightSidebar: { getWindows: () => [sidebarWindow] } },
+  };
+  const doc = {
+    body: observationRoot,
+    defaultView: { MutationObserver: FakeMutationObserver },
+    getElementById: (id) =>
+      id === "sidebar-window-sidebar-block-prompt-remount" ? liveHost : null,
+  };
+  let panelOptions;
+  const controller = await openChatPanel({
+    api,
+    doc,
+    storage: {},
+    resolvePromptBlock: async () => ({
+      uid: "prompt-remount",
+      scratch: false,
+    }),
+    readOutlineUids: async () => new Set(["prompt-remount"]),
+    openPromptBlock: async () => sidebarWindow,
+    createPanel: (options) => {
+      panelOptions = options;
+      return {
+        element: panelElement,
+        controlsElement,
+        rootBlockUid: options.rootBlockUid,
+        focus: async () => {},
+        close: () => {
+          panelElement.remove();
+          controlsElement.remove();
+          return options.onClose({
+            whenIdle: () => Promise.resolve(),
+            resetPromptUids: new Set(),
+          });
+        },
+      };
+    },
+  });
+  assert.equal(firstHost.panel, panelElement);
+  assert.equal(panelElement.isConnected, true);
+
+  firstHost.isConnected = false;
+  panelElement.isConnected = false;
+  controlsElement.isConnected = false;
+  liveHost = null;
+  observer.callback([]);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.equal(panelElement.isConnected, false);
+
+  const secondHost = makeHost();
+  liveHost = secondHost;
+  observer.callback([]);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.equal(secondHost.panel, panelElement);
+  assert.equal(secondHost.controls, controlsElement);
+  assert.equal(panelElement.isConnected, true);
+
+  await controller.close();
+  assert.equal(panelOptions.rootBlockUid, "prompt-remount");
+});
+
+test("concurrent chat-open requests share one sidebar transition without waiting for focus", async () => {
+  const nativeContent = { classList: { add() {}, remove() {} } };
+  const host = {
+    firstElementChild: {
+      nextSibling: nativeContent,
+      classList: { add() {}, remove() {} },
+    },
+    insertBefore(element) {
+      this.panel = element;
+    },
+    appendChild(element) {
+      this.controls = element;
+    },
+    classList: { add() {}, remove() {} },
+  };
+  const doc = {
+    getElementById: (id) =>
+      id === "sidebar-window-sidebar-block-prompt456" ? host : null,
+  };
+  let releasePrompt;
+  const promptReady = new Promise((resolve) => {
+    releasePrompt = resolve;
+  });
+  let promptReads = 0;
+  let panelCreates = 0;
+  const options = {
+    api: {},
+    doc,
+    storage: {},
+    resolvePromptBlock: async () => {
+      promptReads += 1;
+      await promptReady;
+      return { uid: "prompt456", scratch: false };
+    },
+    readOutlineUids: async () => new Set(["prompt456"]),
+    openPromptBlock: async () => ({
+      type: "block",
+      "block-uid": "prompt456",
+      "window-id": "sidebar-block-prompt456",
+    }),
+    createPanel: (receivedOptions) => {
+      panelCreates += 1;
+      return {
+        element: { isConnected: true, nextElementSibling: nativeContent },
+        controlsElement: {},
+        rootBlockUid: receivedOptions.rootBlockUid,
+        focus: () => new Promise(() => {}),
+        close: () => receivedOptions.onClose({
+          whenIdle: () => Promise.resolve(),
+          resetPromptUids: new Set(),
+        }),
+      };
+    },
+  };
+  const first = openChatPanel(options);
+  const second = openChatPanel(options);
+  assert.equal(first, second);
+  releasePrompt();
+  const controller = await Promise.race([
+    first,
+    new Promise((_, reject) => setTimeout(
+      () => reject(new Error("chat open waited for Roam focus")),
+      100,
+    )),
+  ]);
+  assert.equal(promptReads, 1);
+  assert.equal(panelCreates, 1);
+  await controller.close();
+});
+
 test("open chat removes a newly created scratch block when sidebar opening fails", async () => {
   const removed = [];
   await assert.rejects(
@@ -1808,8 +2085,12 @@ test("chat clears a scratch composer before requesting a reply", async () => {
   const pickerMenu = allElements.find(
     (element) => element.className === "roam-codex-chat-picker-menu",
   );
+  const pickerSubmenu = allElements.find(
+    (element) => element.className === "roam-codex-chat-picker-submenu",
+  );
   assert.equal(pickerButton.textContent, "GPT-5.6-Sol · Low");
   assert.equal(pickerMenu.hidden, true);
+  assert.equal(pickerSubmenu.hidden, true);
   pickerButton.listeners.click();
   assert.equal(pickerMenu.hidden, false);
   assert.deepEqual(
@@ -1820,24 +2101,24 @@ test("chat clears a scratch composer before requesting a reply", async () => {
     pickerMenu.children.map((row) => row.children?.[1]?.textContent),
     ["GPT-5.6-Sol", "Low"],
   );
-  pickerMenu.children[1].listeners.click();
-  assert.deepEqual(
-    pickerMenu.children.map((option) => option.textContent),
-    ["‹ Effort", "Low (Default)", "Medium", "High"],
-  );
-  assert.deepEqual(
-    pickerMenu.children
-      .slice(1)
-      .map((option) => option.className.includes("is-active")),
-    [true, false, false],
-  );
-  pickerMenu.children[0].listeners.click();
+  pickerMenu.children[1].listeners.mouseenter();
   assert.deepEqual(
     pickerMenu.children.map((row) => row.children?.[0]?.textContent),
     ["Model", "Effort"],
   );
+  assert.equal(pickerSubmenu.hidden, false);
+  assert.deepEqual(
+    pickerSubmenu.children.map((option) => option.children?.[0]?.textContent),
+    ["Low (Default)", "Medium", "High"],
+  );
+  assert.deepEqual(
+    pickerSubmenu.children
+      .map((option) => option.className.includes("is-active")),
+    [true, false, false],
+  );
   pickerButton.listeners.click();
   assert.equal(pickerMenu.hidden, true);
+  assert.equal(pickerSubmenu.hidden, true);
   assert.equal(chatRequests, 0);
   assert.equal(readChatState({ storage }).activeThreadId, null);
 
@@ -2269,18 +2550,36 @@ test("Send yields its slot to Stop while a turn runs and names its shortcut", as
   const progressTimer = elements.find(
     (element) => element.className === "roam-codex-chat-progress-timer",
   );
+  const progress = elements.find(
+    (element) => element.className === "roam-codex-chat-progress",
+  );
+  const transcript = elements.find(
+    (element) => element.className === "roam-codex-chat-transcript",
+  );
+  const actions = elements.find(
+    (element) => element.className === "roam-codex-chat-actions",
+  );
   assert.match(sendButton.title, /Option\+Enter/);
   assert.equal(shortcut.textContent, "⌥⏎");
   assert.equal(shortcut["aria-hidden"], "true");
   assert.equal(sendButton.hidden, false);
   assert.equal(stopButton.hidden, true);
   assert.equal(progressMeta.hidden, true);
+  assert.equal(progress.parentNode, transcript);
+  assert.equal(stopButton.parentNode, actions);
+  let preventedMouseFocus = 0;
+  sendButton.listeners.mousedown({
+    preventDefault: () => { preventedMouseFocus += 1; },
+  });
+  assert.equal(preventedMouseFocus, 1);
 
   const sending = controller.send();
   assert.equal(sendButton.hidden, true);
   assert.equal(stopButton.hidden, false);
   assert.equal(progressMeta.hidden, false);
   assert.equal(progressTimer.textContent, "0:00");
+  assert.equal(transcript.children.at(-1), progress);
+  assert.equal(progress.hidden, false);
 
   finishTurn();
   await sending;
@@ -2313,11 +2612,16 @@ test("the transcript resize handle drags, clamps, and persists its height", asyn
   const handle = panelElements(controller).find(
     (element) => element.className === "roam-codex-chat-resize",
   );
+  const transcript = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-transcript",
+  );
   assert.equal(handle.hidden, true);
   assert.equal(handle.role, "separator");
+  assert.equal(transcript.style.height, "640px");
+  assert.equal(transcript.style.maxHeight, "640px");
 
   handle.listeners.pointerdown({ clientY: 100, preventDefault() {} });
-  doc.listeners.pointermove({ clientY: 160, preventDefault() {} });
+  doc.listeners.pointermove({ clientY: -180, preventDefault() {} });
   doc.listeners.pointerup();
   assert.equal(
     values.get("roam-codex-lab.chat-transcript-height.maskys"),
@@ -2511,9 +2815,8 @@ test("the picker offers Speed from serviceTiers and sends the chosen tier", asyn
       isDefault: true,
       defaultReasoningEffort: "low",
       supportedReasoningEfforts: [{ reasoningEffort: "low" }],
-      defaultServiceTier: "standard",
+      defaultServiceTier: null,
       serviceTiers: [
-        { id: "standard", name: "Standard" },
         { id: "priority", name: "Fast" },
       ],
     }],
@@ -2534,6 +2837,9 @@ test("the picker offers Speed from serviceTiers and sends the chosen tier", asyn
   const pickerMenu = elements.find(
     (element) => element.className === "roam-codex-chat-picker-menu",
   );
+  const pickerSubmenu = elements.find(
+    (element) => element.className === "roam-codex-chat-picker-submenu",
+  );
   assert.equal(pickerButton.textContent, "GPT-5.6-Sol · Low");
 
   pickerButton.listeners.click();
@@ -2541,13 +2847,19 @@ test("the picker offers Speed from serviceTiers and sends the chosen tier", asyn
     pickerMenu.children.map((row) => row.children?.[0]?.textContent),
     ["Model", "Effort", "Speed"],
   );
-  pickerMenu.children[2].listeners.click();
+  assert.equal(pickerMenu.children[2].children[1].textContent, "Standard");
+  pickerMenu.children[2].listeners.mouseenter();
   assert.deepEqual(
-    pickerMenu.children.map((option) => option.textContent),
-    ["‹ Speed", "Standard (Default)", "Fast"],
+    pickerMenu.children.map((row) => row.children?.[0]?.textContent),
+    ["Model", "Effort", "Speed"],
   );
-  pickerMenu.children[2].listeners.click();
+  assert.deepEqual(
+    pickerSubmenu.children.map((option) => option.children?.[0]?.textContent),
+    ["Standard (Default)", "Fast"],
+  );
+  pickerSubmenu.children[1].listeners.click();
   assert.equal(pickerMenu.hidden, true);
+  assert.equal(pickerSubmenu.hidden, true);
   assert.equal(pickerButton.textContent, "GPT-5.6-Sol · Low · Fast");
 
   await controller.send();

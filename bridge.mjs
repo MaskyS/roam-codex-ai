@@ -731,7 +731,7 @@ export class AppServerClient extends EventEmitter {
     threadId: requestedThreadId = null,
     model = null,
     effort = null,
-    serviceTier = null,
+    serviceTier,
     timeoutMs = DEFAULT_TIMEOUT_MS,
     onProgress = () => {},
     onThread = () => {},
@@ -745,7 +745,7 @@ export class AppServerClient extends EventEmitter {
       );
     }
 
-    if (model || effort || serviceTier) {
+    if (model || effort || serviceTier != null) {
       const models = await this.listModels();
       const selectedModel = model
         ? models.find((entry) => entry.id === model)
@@ -766,7 +766,7 @@ export class AppServerClient extends EventEmitter {
           );
         }
       }
-      if (serviceTier) {
+      if (serviceTier != null) {
         const tiers = Array.isArray(selectedModel.serviceTiers)
           ? selectedModel.serviceTiers.map((tier) => tier?.id)
           : [];
@@ -862,6 +862,7 @@ export class AppServerClient extends EventEmitter {
               `Prompt block UID: ${promptBlockUid}`,
               "Read this block and useful descendants with Roam MCP before answering.",
               "Treat its page and block references as part of the user's instruction.",
+              "Format for Roam renderString: use **bold** and __italic__ (never single-asterisk emphasis), and use • instead of Markdown - bullets.",
             ].join("\n"),
           },
         },
@@ -871,7 +872,7 @@ export class AppServerClient extends EventEmitter {
       };
       if (model) turnParams.model = model;
       if (effort) turnParams.effort = effort;
-      if (serviceTier) turnParams.serviceTier = serviceTier;
+      if (serviceTier !== undefined) turnParams.serviceTier = serviceTier;
 
       const turnResult = await this.request("turn/start", turnParams);
       turnId = turnResult?.turn?.id;
@@ -1479,6 +1480,7 @@ export function createBridgeServer({
             ? model.serviceTiers.map((tier) => ({
                 id: tier.id,
                 name: tier.name || tier.id,
+                description: tier.description || "",
               }))
             : [],
         }));
@@ -1734,7 +1736,9 @@ export function createBridgeServer({
           threadId: requestedThreadId,
           model: body.model || null,
           effort: body.effort || null,
-          serviceTier: body.serviceTier || null,
+          serviceTier: Object.hasOwn(body, "serviceTier")
+            ? body.serviceTier
+            : undefined,
           onProgress: (progress) => {
             writeNdjson(response, { type: "progress", ...progress });
           },
