@@ -2755,6 +2755,90 @@ test("a rejected steer resends the intact draft once the turn settles", async ()
   await controller.close();
 });
 
+test("an unpaired panel focuses the pairing input and keeps errors quiet", async () => {
+  const doc = createFakePanelDocument();
+  const notPaired = () => {
+    const error = new Error("This device isn't paired with the local Codex bridge yet.");
+    error.code = "NOT_PAIRED";
+    throw error;
+  };
+  const controller = createChatPanel({
+    doc,
+    api: {},
+    storage: {
+      getItem: () => null,
+      setItem: () => {},
+    },
+    rootBlockUid: "root123",
+    setIntervalImpl: () => 1,
+    clearIntervalImpl: () => {},
+    setTimeoutImpl: () => 1,
+    clearTimeoutImpl: () => {},
+    probeConnectionImpl: async () => ({ state: "unpaired", graph: "maskys" }),
+    requestModelsImpl: async () => notPaired(),
+    requestMessagesImpl: async () => [],
+    requestHistoryImpl: async () => ({
+      threads: [],
+      missingThreadIds: [],
+      unavailableThreadIds: [],
+    }),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const elements = panelElements(controller);
+  const card = elements.find(
+    (element) => element.className === "roam-codex-connection-card",
+  );
+  assert.equal(card.hidden, false);
+  const input = card.children.find(
+    (child) => child.className === "roam-codex-connection-input",
+  );
+  assert.ok(input);
+  assert.equal(input.focused, true);
+  const progressText = elements.find(
+    (element) => element.className === "roam-codex-chat-progress-text",
+  );
+  assert.equal(progressText.textContent || "", "");
+  await controller.close();
+});
+
+test("Do this block without pairing opens the chat panel instead of a dead end", async () => {
+  let opened = 0;
+  const toasts = [];
+  await assert.rejects(
+    () => workOnBlock("block1234", {
+      api: {
+        util: { generateUID: () => "status-uid" },
+        data: {
+          block: {
+            create: async () => {},
+            delete: async () => {},
+          },
+        },
+      },
+      storage: {
+        getItem: () => null,
+        setItem: () => {},
+        removeItem: () => {},
+      },
+      request: async () => {
+        const error = new Error("This device isn't paired with the local Codex bridge yet.");
+        error.code = "NOT_PAIRED";
+        throw error;
+      },
+      notifyImpl: (message, intent) => toasts.push({ message, intent }),
+      startPresentation: () => () => {},
+      openChatImpl: async () => {
+        opened += 1;
+      },
+    }),
+    (error) => error.code === "NOT_PAIRED",
+  );
+  assert.equal(opened, 1);
+  assert.equal(toasts.at(-1).intent, "warning");
+  assert.match(toasts.at(-1).message, /Pair this device/);
+});
+
 test("the connection card explains failures and clears once connected", async () => {
   const timers = [];
   const doc = createFakePanelDocument();

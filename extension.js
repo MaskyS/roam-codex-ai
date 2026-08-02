@@ -255,6 +255,14 @@ function getToken({
   return storage.getItem(tokenKey(graph))?.trim() || "";
 }
 
+function missingTokenError() {
+  const error = new Error(
+    "This device isn't paired with the local Codex bridge yet.",
+  );
+  error.code = "NOT_PAIRED";
+  return error;
+}
+
 function notify(message, intent = "primary") {
   const api = getRoamApi();
   if (api.ui?.toaster?.show) {
@@ -278,9 +286,7 @@ export async function requestProbe(blockUid, {
   onStarted = () => {},
 } = {}) {
   if (!token) {
-    throw new Error(
-      'No bridge token. Run "Codex: Pair local bridge" first.',
-    );
+    throw missingTokenError();
   }
 
   const response = await fetchImpl(`${bridgeUrl}/probe`, {
@@ -405,9 +411,7 @@ async function bridgeJson(path, {
   token = getToken({ graph }),
 } = {}) {
   if (!token) {
-    throw new Error(
-      'No bridge token. Run "Codex: Pair local bridge" first.',
-    );
+    throw missingTokenError();
   }
 
   const response = await fetchImpl(`${bridgeUrl}${path}`, {
@@ -457,9 +461,7 @@ export async function requestPanelLogin({
   token = getToken({ graph }),
 } = {}) {
   if (!token) {
-    throw new Error(
-      'No bridge token. Run "Codex: Pair local bridge" first.',
-    );
+    throw missingTokenError();
   }
   const response = await fetchImpl(`${bridgeUrl}/auth/login`, {
     method: "POST",
@@ -538,9 +540,7 @@ export async function requestPanelThreadSummaries(threadIds, {
   token = getToken({ graph }),
 } = {}) {
   if (!token) {
-    throw new Error(
-      'No bridge token. Run "Codex: Pair local bridge" first.',
-    );
+    throw missingTokenError();
   }
   if (
     !Array.isArray(threadIds) ||
@@ -600,7 +600,7 @@ export async function requestPanelThreadName(threadId, name, {
   token = getToken({ graph }),
 } = {}) {
   if (!token) {
-    throw new Error('No bridge token. Run "Codex: Pair local bridge" first.');
+    throw missingTokenError();
   }
   const cleanName = singleLine(name);
   if (!validThreadId(threadId) || !cleanName || cleanName.length > 100) {
@@ -648,9 +648,7 @@ export async function requestPanelChat(message, {
   onApproval = () => {},
 } = {}) {
   if (!token) {
-    throw new Error(
-      'No bridge token. Run "Codex: Pair local bridge" first.',
-    );
+    throw missingTokenError();
   }
   if (!validBlockUid(promptBlockUid)) {
     throw new Error("Cannot chat without a valid Roam prompt block UID.");
@@ -706,9 +704,7 @@ export async function requestRunApproval(runId, approvalId, decision, {
   token = getToken({ graph }),
 } = {}) {
   if (!token) {
-    throw new Error(
-      'No bridge token. Run "Codex: Pair local bridge" first.',
-    );
+    throw missingTokenError();
   }
   if (!/^[0-9a-f-]{36}$/i.test(runId) || !/^[0-9a-f-]{36}$/i.test(approvalId)) {
     throw new Error("A valid active approval is required.");
@@ -747,9 +743,7 @@ export async function requestRunCancellation(runId, {
   token = getToken({ graph }),
 } = {}) {
   if (!token) {
-    throw new Error(
-      'No bridge token. Run "Codex: Pair local bridge" first.',
-    );
+    throw missingTokenError();
   }
   if (!/^[0-9a-f-]{36}$/i.test(runId)) {
     throw new Error("Cannot stop a run without a valid run ID.");
@@ -784,9 +778,7 @@ export async function requestRunSteer(runId, message, {
   token = getToken({ graph }),
 } = {}) {
   if (!token) {
-    throw new Error(
-      'No bridge token. Run "Codex: Pair local bridge" first.',
-    );
+    throw missingTokenError();
   }
   if (!/^[0-9a-f-]{36}$/i.test(runId)) {
     throw new Error("Cannot steer a run without a valid run ID.");
@@ -1599,6 +1591,7 @@ export async function workOnBlock(
     cancelRequest = requestRunCancellation,
     notifyImpl = notify,
     startPresentation = startRunningPresentation,
+    openChatImpl = () => openChatPanel(),
   } = {},
 ) {
   if (!blockUid) {
@@ -1652,6 +1645,14 @@ export async function workOnBlock(
         sourceCommentUids: [],
         commentUids: [],
       };
+    }
+    if (failure.code === "NOT_PAIRED") {
+      notifyImpl(
+        "Pair this device with the local Codex bridge to continue — opening the chat panel.",
+        "warning",
+      );
+      void openChatImpl().catch(() => {});
+      throw failure;
     }
     notifyImpl(`Codex could not finish: ${failure.message}`, "danger");
     throw failure;
@@ -4013,6 +4014,11 @@ export function createChatPanel({
       if (cleared.composerCleared) {
         ({ restored, restoreFailed } = await restoreSubmittedPrompt(prompt));
       }
+      if (error.code === "NOT_PAIRED") {
+        setProgress("", "");
+        void refreshConnection();
+        return null;
+      }
       const draftIntact = !cleared.composerCleared || restored;
       if ([404, 409].includes(error.status) && draftIntact) {
         await idlePromise;
@@ -4146,6 +4152,11 @@ export function createChatPanel({
       let restoreFailed = false;
       if (composerCleared) {
         ({ restored, restoreFailed } = await restoreSubmittedPrompt(prompt));
+      }
+      if (error.code === "NOT_PAIRED") {
+        setProgress("", "");
+        void refreshConnection();
+        return null;
       }
       if (error.code === "TURN_INTERRUPTED") {
         setProgress(
@@ -4328,8 +4339,10 @@ export function createChatPanel({
       })
       .catch((error) => {
         if (closed) return;
-        pickerButton.textContent = "Models unavailable";
-        setProgress(error.message, "error");
+        if (error.code !== "NOT_PAIRED") {
+          pickerButton.textContent = "Models unavailable";
+          setProgress(error.message, "error");
+        }
         scheduleConnectionRetry();
       })
       .finally(() => {
@@ -4347,7 +4360,7 @@ export function createChatPanel({
       });
   };
 
-  const renderConnectionCard = () => {
+  const renderConnectionCard = ({ focusInput = false } = {}) => {
     if (closed) return;
     connectionCard.replaceChildren();
     if (connection.state === "connected") {
@@ -4400,6 +4413,7 @@ export function createChatPanel({
         if (event.key === "Enter") void startPairing(input.value);
       });
       connectionCard.appendChild(input);
+      if (focusInput) input.focus?.();
       addAction("Pair", () => startPairing(input.value));
     } else if (connection.state === "signed-out") {
       addTitle("Sign in to Codex");
@@ -4464,9 +4478,10 @@ export function createChatPanel({
           : { state: "no-bridge", graph: next.graph, detail: error.message };
       }
     }
-    if (next.state !== connection.state) connectionNote = "";
+    const stateChanged = next.state !== connection.state;
+    if (stateChanged) connectionNote = "";
     connection = next;
-    renderConnectionCard();
+    renderConnectionCard({ focusInput: stateChanged });
     if (connection.state === "connected") {
       if (connectionRetryTimer !== null) {
         clearTimeoutImpl?.(connectionRetryTimer);
@@ -4485,7 +4500,7 @@ export function createChatPanel({
       await refreshConnection();
     } catch (error) {
       connectionNote = error.message || "Pairing failed.";
-      renderConnectionCard();
+      renderConnectionCard({ focusInput: true });
     }
   };
 
