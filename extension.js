@@ -578,6 +578,47 @@ export async function requestRunCancellation(runId, {
   return result;
 }
 
+export async function requestRunSteer(runId, message, {
+  fetchImpl = window.fetch.bind(window),
+  token = getToken(),
+} = {}) {
+  if (!token) {
+    throw new Error(
+      'No bridge token. Run "Codex: Pair local bridge" first.',
+    );
+  }
+  if (!/^[0-9a-f-]{36}$/i.test(runId)) {
+    throw new Error("Cannot steer a run without a valid run ID.");
+  }
+
+  const response = await fetchImpl(
+    `${BRIDGE_URL}/runs/${encodeURIComponent(runId)}/steer`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ graph: GRAPH, message: String(message) }),
+    },
+  );
+  let result = {};
+  try {
+    result = await response.json();
+  } catch {
+    // A useful status error is emitted below.
+  }
+  if (!response.ok) {
+    const error = new Error(
+      result.error || `Bridge returned HTTP ${response.status}.`,
+    );
+    error.status = response.status;
+    error.code = result.code;
+    throw error;
+  }
+  return result;
+}
+
 function singleLine(value) {
   return String(value).replace(/\s+/g, " ").trim();
 }
@@ -2260,6 +2301,7 @@ export function createChatPanel({
       scratchPrompt,
     }),
   cancelRequest = requestRunCancellation,
+  steerRequest = requestRunSteer,
   approvalRequest = requestRunApproval,
   protectedPromptUids = null,
   scratchPrompt = false,
@@ -3626,16 +3668,149 @@ export function createChatPanel({
     running = value;
     if (value && pickerOpen) closePicker();
     pickerButton.disabled = value || !modelsReady;
-    sendButton.disabled = value || !modelsReady;
-    sendButton.hidden = value;
     conversationButton.disabled = value;
     stopButton.hidden = !value;
     stopButton.disabled = false;
+    syncSendButton();
     if (historyOpen) renderHistory();
   };
 
+  const syncSendButton = () => {
+    const steering = running && Boolean(runId);
+    sendButton.hidden = false;
+    sendButton.disabled = !modelsReady || (running && !runId);
+    sendButton.classList?.toggle?.("is-steering", steering);
+    const label = sendButton.firstChild;
+    if (label && typeof label.nodeValue === "string") {
+      label.nodeValue = steering ? "Steer" : "Send";
+    }
+    sendButton.title = steering
+      ? "Add the focused block to Codex's current turn without stopping it"
+      : `Send the focused block in this chat's Block Outline (${
+        sendShortcutIsMac ? "Option" : "Alt"
+      }+Enter, rebindable in Settings → Hotkeys)`;
+  };
+
+  const clearComposerForSubmit = async (prompt) => {
+    const shouldClearPrompt = shouldClearChatPrompt(prompt.uid, {
+      scratchPrompt,
+      protectedPromptUids,
+    });
+    if (!shouldClearPrompt) return { ok: true, composerCleared: false };
+    const resetBlockUid = scratchPrompt ? rootBlockUid : prompt.uid;
+    let composerCleared = false;
+    try {
+      composerCleared = await clearScratchPromptImpl(prompt);
+    } catch (error) {
+      try {
+        await restorePromptImpl(prompt);
+      } catch {
+        // The original reset error is more useful than a secondary recovery
+        // error. The composer remains visible for manual recovery.
+      }
+      return {
+        ok: false,
+        error: error.message || "The composer could not be cleared safely.",
+      };
+    }
+    if (!composerCleared) {
+      return {
+        ok: false,
+        error: "The composer changed before it could be sent. Review it and try again.",
+      };
+    }
+    resetPromptUids.add(resetBlockUid);
+    try {
+      const sidebarWindow = findSidebarBlockWindow(rootBlockUid, { api });
+      if (sidebarWindow?.["window-id"]) {
+        await api.ui.setBlockFocusAndSelection({
+          location: {
+            "block-uid": resetBlockUid,
+            "window-id": sidebarWindow["window-id"],
+          },
+        });
+      }
+    } catch {
+      // The outline has already reset successfully. A focus failure should
+      // not turn a valid send into a failed one.
+    }
+    return { ok: true, composerCleared: true };
+  };
+
+  const restoreSubmittedPrompt = async (prompt) => {
+    try {
+      const restored = await restorePromptImpl(prompt);
+      if (restored) {
+        const sidebarWindow = findSidebarBlockWindow(rootBlockUid, { api });
+        if (sidebarWindow?.["window-id"]) {
+          await api.ui.setBlockFocusAndSelection({
+            location: {
+              "block-uid": prompt.uid,
+              "window-id": sidebarWindow["window-id"],
+            },
+          });
+        }
+      }
+      return { restored, restoreFailed: false };
+    } catch {
+      return { restored: false, restoreFailed: true };
+    }
+  };
+
+  const steerActiveTurn = async (steerRunId) => {
+    let prompt;
+    try {
+      prompt = await readPromptImpl();
+    } catch (error) {
+      setProgress(error.message || "Focus a Roam block before sending.", "error");
+      return null;
+    }
+    const cleared = await clearComposerForSubmit(prompt);
+    if (!cleared.ok) {
+      setProgress(cleared.error, "error");
+      return null;
+    }
+    const bubble = { role: "user", text: prompt.text };
+    messages.push(bubble);
+    renderMessages();
+    setProgress("Adding to the current turn", "activity");
+    try {
+      await steerRequest(steerRunId, prompt.text);
+      return null;
+    } catch (error) {
+      const bubbleIndex = messages.indexOf(bubble);
+      if (bubbleIndex >= 0) {
+        messages.splice(bubbleIndex, 1);
+        renderMessages();
+      }
+      let restored = false;
+      let restoreFailed = false;
+      if (cleared.composerCleared) {
+        ({ restored, restoreFailed } = await restoreSubmittedPrompt(prompt));
+      }
+      const draftIntact = !cleared.composerCleared || restored;
+      if ([404, 409].includes(error.status) && draftIntact) {
+        await idlePromise;
+        if (!closed && !running) return send();
+      }
+      const failureText = error.message || "The turn could not be steered.";
+      setProgress(
+        restoreFailed
+          ? `${failureText} The submitted outline could not be restored.`
+          : restored
+            ? `${failureText} · Draft restored.`
+            : failureText,
+        "error",
+      );
+      return null;
+    }
+  };
+
   const send = async () => {
-    if (running) return null;
+    if (running) {
+      if (runId) return steerActiveTurn(runId);
+      return null;
+    }
     setRunning(true);
     if (state.activeThreadId) {
       await loadHistory({ reconcileActive: true });
@@ -3666,53 +3841,13 @@ export function createChatPanel({
     const effortOverride = effortChanged ? pickerEffort || null : null;
     const speedOverride = speedChanged ? pickerSpeed || null : undefined;
 
-    const shouldClearPrompt = shouldClearChatPrompt(prompt.uid, {
-      scratchPrompt,
-      protectedPromptUids,
-    });
-    const resetBlockUid = scratchPrompt ? rootBlockUid : prompt.uid;
-    let composerCleared = false;
-    if (shouldClearPrompt) {
-      try {
-        composerCleared = await clearScratchPromptImpl(prompt);
-      } catch (error) {
-        try {
-          await restorePromptImpl(prompt);
-        } catch {
-          // The original reset error is more useful than a secondary recovery
-          // error. The composer remains visible for manual recovery.
-        }
-        setProgress(
-          error.message || "The composer could not be cleared safely.",
-          "error",
-        );
-        setRunning(false);
-        return null;
-      }
-      if (!composerCleared) {
-        setProgress(
-          "The composer changed before it could be sent. Review it and try again.",
-          "error",
-        );
-        setRunning(false);
-        return null;
-      }
-      resetPromptUids.add(resetBlockUid);
-      try {
-        const sidebarWindow = findSidebarBlockWindow(rootBlockUid, { api });
-        if (sidebarWindow?.["window-id"]) {
-          await api.ui.setBlockFocusAndSelection({
-            location: {
-              "block-uid": resetBlockUid,
-              "window-id": sidebarWindow["window-id"],
-            },
-          });
-        }
-      } catch {
-        // The outline has already reset successfully. A focus failure should
-        // not turn a valid send into a failed one.
-      }
+    const cleared = await clearComposerForSubmit(prompt);
+    if (!cleared.ok) {
+      setProgress(cleared.error, "error");
+      setRunning(false);
+      return null;
     }
+    const composerCleared = cleared.composerCleared;
 
     messages.push({ role: "user", text: prompt.text });
     renderMessages();
@@ -3730,6 +3865,7 @@ export function createChatPanel({
         enabledServers: enabledMcpServers,
         onStarted: ({ runId: startedRunId }) => {
           runId = startedRunId;
+          syncSendButton();
         },
         onThread: ({ threadId }) => {
           rememberThread(threadId);
@@ -3775,22 +3911,7 @@ export function createChatPanel({
       let restored = false;
       let restoreFailed = false;
       if (composerCleared) {
-        try {
-          restored = await restorePromptImpl(prompt);
-          if (restored) {
-            const sidebarWindow = findSidebarBlockWindow(rootBlockUid, { api });
-            if (sidebarWindow?.["window-id"]) {
-              await api.ui.setBlockFocusAndSelection({
-                location: {
-                  "block-uid": prompt.uid,
-                  "window-id": sidebarWindow["window-id"],
-                },
-              });
-            }
-          }
-        } catch {
-          restoreFailed = true;
-        }
+        ({ restored, restoreFailed } = await restoreSubmittedPrompt(prompt));
       }
       if (error.code === "TURN_INTERRUPTED") {
         setProgress(
@@ -3959,7 +4080,7 @@ export function createChatPanel({
       modelsReady = true;
       initPicker();
       renderPickerButton();
-      setRunning(false);
+      setRunning(running);
     })
     .catch((error) => {
       if (closed) return;
