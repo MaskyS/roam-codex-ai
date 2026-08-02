@@ -18,12 +18,13 @@ The prototype is successful when a focused block in the `maskys` graph can run
 receive useful appended outline blocks beneath the focused block. When the run
 finishes, the temporary running child must be deleted.
 
-The runtime agent reads Roam through the allowlisted MCP tools and returns a
-bounded edit plan. It may use built-in live web search when a task depends on
-current or external facts. It must not write to Roam, edit this repository, or
-invoke shell commands. `extension.js`, running under the signed-in human's Roam
-session, owns the visible writes: append-only outline edits, linked source
-comments, and other native comments.
+The structured `Do this block` runtime reads Roam through its read-only MCP
+allowlist and returns a bounded edit plan; `extension.js`, running under the
+signed-in human's Roam session, applies that plan. Persistent chat uses its
+separate allowlist and may make explicitly requested graph changes according to
+the selected access mode. Runtime agents may use built-in live web search when
+a task depends on current or external facts, but must not edit this repository
+or invoke shell commands.
 
 ## Development loop
 
@@ -39,20 +40,38 @@ comments, and other native comments.
 
 ## Documentation and research
 
+- Required first-turn gate: for every nontrivial implementation, debugging,
+  review, or design task in this integration, the first substantive discovery
+  turn must actually open and read both (a) the applicable current Roam
+  documentation on `https://roamdocs.fyi` and (b) the current official Codex
+  App Server API at `https://learn.chatgpt.com/docs/app-server`. Do this before
+  forming a plan, reviewing an implementation, or editing code. Merely knowing,
+  citing, or intending to use these sources does not satisfy the gate; if they
+  were not read in the first substantive turn, the task's discovery contract
+  has failed. The only exceptions are local prose-only edits and graph-only
+  transformations whose behavior does not touch the integration.
 - Be proactive about research. When behavior may depend on a current API,
   recent product change, known bug, or unfamiliar integration detail, look it
   up before designing or editing. Do not wait for the user to suggest the
   relevant documentation.
-- For Roam extension work, start with the applicable pages on
-  `https://roamdocs.fyi`, especially the Roam Depot Extension API and Roam Alpha
-  API documentation. Read the specific command, focused-block, pull-watch,
-  comments, sidebar, or developer-extension guidance relevant to the change;
-  do not infer supported behavior from DOM appearance alone.
+- For any work that touches Roam behavior, go read the applicable current pages
+  on `https://roamdocs.fyi` before designing or editing. This includes Roam's
+  components and interaction behavior generally—not only the Roam Depot
+  Extension API and Roam Alpha API. Read the specific block, outline, command,
+  focused-block, pull-watch, comments, sidebar, settings, rendering, or
+  developer-extension guidance relevant to the change; do not infer supported
+  behavior from DOM appearance alone.
 - Also use the official `roam-tools` / Roam MCP and Roam CLI documentation when
   the task concerns graph tools, comments, permissions, or extension reloads.
   Prefer the supported API or CLI over DOM automation. Verify reloads from the
   explicit command result or changed live behavior; a silent keyboard shortcut
   is not proof that new code loaded.
+- When a task concerns planned work, current priorities, or an implementation
+  already in progress, read the repository's relevant open GitHub issues and
+  recent comments, then inspect the current worktree and other active worktrees
+  before designing or editing. Treat concurrent work as shared state. Skip this
+  issue review for isolated changes whose contract is already clear from the
+  code and tests.
 - For Codex runtime work, consult the current official Codex App Server API
   documentation at `https://learn.chatgpt.com/docs/app-server`. For exact
   request fields, notification payloads, and enums, also generate bindings from
@@ -74,13 +93,16 @@ comments, and other native comments.
 
 - Keep the bridge bound to `127.0.0.1`.
 - Keep bearer tokens and traces under ignored `.dev/`.
-- Prefer a read-only runtime Roam token. If Roam grants broader token scopes,
-  keep the runtime's Codex MCP tool allowlist strictly read-only.
+- Use a separate graph-scoped runtime Roam token. Persistent chat requires the
+  graph access needed for explicitly requested writes; capability is narrowed
+  by the per-workflow and per-access-mode allowlists in `bridge.mjs`, not by
+  copying the builder connection into the runtime.
 - Builder tasks may use every Roam MCP tool through the user's normal
-  connection. Do not copy that authority into the app-server runtime; its
-  restriction is applied explicitly by `bridge.mjs`.
-- Do not enable Roam write, delete, move, update, raw Datalog, file, or UI tools
-  for the runtime agent.
+  connection. The structured `Do this block` workflow must keep its runtime
+  Roam tools read-only. Persistent chat may expose only its explicit tool list:
+  Read only hides write tools, while Auto and Manual expose writes under their
+  documented consent behavior. Other MCP servers remain disabled unless the
+  user explicitly enables them in Tools.
 - Never rewrite or delete the user's selected block.
 - The explicit command authorizes the extension to append descendants beneath
   the selected block. It does not authorize rewriting, moving, or deleting
