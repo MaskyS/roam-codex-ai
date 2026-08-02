@@ -123,6 +123,7 @@ const {
   CHAT_COMPOSER_PLACEHOLDER,
   RUNNING_BLOCK_TEXT,
   buildConversationHistory,
+  chatMessageOutlineRows,
   cleanupStaleChatUi,
   clearScratchPromptBlock,
   cleanupStaleRunningStatuses,
@@ -164,6 +165,7 @@ const {
   renderRoamMarkdown,
   restoreClearedChatPromptBlock,
   runningPresentationText,
+  serializeChatPromptOutline,
   sendActiveChatMessage,
   shouldClearChatPrompt,
   startRunningPresentation,
@@ -248,6 +250,45 @@ test("copyRoamText preserves the exact string supplied to the renderer", async (
   );
 });
 
+test("structured user messages keep their block hierarchy for rendering", () => {
+  const outline = {
+    uid: "root123",
+    string: "Root [[Project]]",
+    children: [{
+      uid: "empty123",
+      string: "",
+      children: [{
+        uid: "child123",
+        string: "Child **detail**",
+        children: [],
+      }],
+    }, {
+      uid: "sibling123",
+      string: "Sibling",
+      children: [],
+    }],
+  };
+  const expected = [
+    { depth: 0, text: "Root [[Project]]", root: true },
+    { depth: 1, text: "Child **detail**", root: false },
+    { depth: 1, text: "Sibling", root: false },
+  ];
+
+  assert.deepEqual(chatMessageOutlineRows({
+    role: "user",
+    text: "Root [[Project]]\n- Child **detail**\n- Sibling",
+    outline,
+  }), expected);
+  assert.deepEqual(chatMessageOutlineRows({
+    role: "user",
+    text: "Root [[Project]]\n- Child **detail**\n- Sibling",
+  }), expected);
+  assert.deepEqual(chatMessageOutlineRows({
+    role: "assistant",
+    text: "Root\n- Child",
+  }), []);
+});
+
 test("chat message rendering falls back safely to plain text", async () => {
   const element = { textContent: "" };
   assert.equal(
@@ -309,7 +350,16 @@ test("the chat transcript renders every message with Roam and unmounts it", asyn
     rootBlockUid: "prompt123",
     readPromptImpl: async () => ({
       uid: "prompt123",
-      text: "Question about [[Project]]",
+      text: "Question about [[Project]]\n- Nested ((context123))",
+      outline: {
+        uid: "prompt123",
+        string: "Question about [[Project]]",
+        children: [{
+          uid: "context123",
+          string: "Nested ((context123))",
+          children: [],
+        }],
+      },
     }),
     requestChatImpl: async () => ({
       threadId: "thread_render_123",
@@ -343,6 +393,7 @@ test("the chat transcript renders every message with Roam and unmounts it", asyn
   await Promise.resolve();
   assert.deepEqual([...new Set(rendered)], [
     "Question about [[Project]]",
+    "Nested ((context123))",
     "See **bold** and ((block123))",
   ]);
   assert.equal(unmounted.length, 0);
@@ -355,7 +406,9 @@ test("the chat transcript renders every message with Roam and unmounts it", asyn
     preventDefault() {},
     stopPropagation() {},
   });
-  assert.deepEqual(copied, ["Question about [[Project]]"]);
+  assert.deepEqual(copied, [
+    "Question about [[Project]]\n- Nested ((context123))",
+  ]);
   copyButtons = panelElements(controller).filter(
     (element) => element.className === "roam-codex-chat-copy",
   );
@@ -2148,7 +2201,7 @@ test("open chat removes a newly created scratch block when sidebar opening fails
   assert.deepEqual(removed, ["scratch999"]);
 });
 
-test("the focused native sidebar block supplies the message", async () => {
+test("the complete native sidebar outline supplies the message", async () => {
   const api = {
     ui: {
       getFocusedBlock: () => ({
@@ -2191,15 +2244,20 @@ test("the focused native sidebar block supplies the message", async () => {
   };
 
   assert.deepEqual(await readFocusedPromptBlock("root123", { api }), {
-    uid: "message123",
-    text: "Compare ((source123)) with [[Project Plan]]",
+    uid: "root123",
+    focusUid: "message123",
+    text: "Root context\n- Compare ((source123)) with [[Project Plan]]\n  - Nested context",
     outline: {
-      uid: "message123",
-      string: `${CHAT_COMPOSER_PLACEHOLDER}Compare ((source123)) with [[Project Plan]]`,
+      uid: "root123",
+      string: "Root context",
       children: [{
-        uid: "context123",
-        string: "Nested context",
-        children: [],
+        uid: "message123",
+        string: `${CHAT_COMPOSER_PLACEHOLDER}Compare ((source123)) with [[Project Plan]]`,
+        children: [{
+          uid: "context123",
+          string: "Nested context",
+          children: [],
+        }],
       }],
     },
     rootOutline: {
@@ -2255,6 +2313,7 @@ test("an empty focused child sends its nearest non-empty composer ancestor", asy
 
   assert.deepEqual(await readFocusedPromptBlock("root123", { api }), {
     uid: "root123",
+    focusUid: "emptyChild",
     text: "test 123",
     outline: {
       uid: "root123",
@@ -2317,6 +2376,41 @@ test("an empty focused outline still asks for a message", async () => {
   );
 });
 
+test("chat outline serialization preserves Roam order and nested structure", () => {
+  const outline = {
+    ":block/uid": "root123",
+    ":block/string": CHAT_COMPOSER_PLACEHOLDER,
+    ":block/children": [{
+      ":block/uid": "later123",
+      ":block/order": 2,
+      ":block/string": "Third",
+    }, {
+      ":block/uid": "first123",
+      ":block/order": 0,
+      ":block/string": "First",
+      ":block/children": [{
+        ":block/uid": "nested123",
+        ":block/order": 0,
+        ":block/string": "Nested\ncontinuation",
+      }],
+    }, {
+      ":block/uid": "empty123",
+      ":block/order": 1,
+      ":block/string": "",
+      ":block/children": [{
+        ":block/uid": "second123",
+        ":block/order": 0,
+        ":block/string": "Second",
+      }],
+    }],
+  };
+
+  assert.equal(
+    serializeChatPromptOutline(outline),
+    "- First\n  - Nested\n    continuation\n- Second\n- Third",
+  );
+});
+
 test("a remembered nested composer message survives button-induced focus loss", async () => {
   const root = {
     ":block/uid": "root123",
@@ -2358,12 +2452,21 @@ test("a remembered nested composer message survives button-induced focus loss", 
     api,
     preferredBlockUid: "emptyChild",
   }), {
-    uid: "message123",
-    text: "Send this message",
+    uid: "root123",
+    focusUid: "emptyChild",
+    text: "- Keep this sibling draft\n- Send this message",
     outline: {
-      uid: "message123",
-      string: "Send this message",
-      children: [{ uid: "emptyChild", string: "", children: [] }],
+      uid: "root123",
+      string: CHAT_COMPOSER_PLACEHOLDER,
+      children: [{
+        uid: "sibling1",
+        string: "Keep this sibling draft",
+        children: [],
+      }, {
+        uid: "message123",
+        string: "Send this message",
+        children: [{ uid: "emptyChild", string: "", children: [] }],
+      }],
     },
     rootOutline: {
       uid: "root123",
@@ -2451,7 +2554,9 @@ test("Send keeps the remembered composer message when activation clears focus", 
   focused = null;
   await controller.send();
 
-  assert.deepEqual(sent, ["Send the selected composer message"]);
+  assert.deepEqual(sent, [
+    "- Leave this sibling alone\n- Send the selected composer message\n  - Nested context remains attached",
+  ]);
   assert.equal(root[":block/children"][0][":block/string"], "Leave this sibling alone");
   await controller.close();
 });

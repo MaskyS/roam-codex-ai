@@ -1080,6 +1080,31 @@
   white-space: pre-wrap;
 }
 
+.roam-codex-chat-message-outline {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  white-space: normal;
+}
+
+.roam-codex-chat-message-outline-row {
+  align-items: flex-start;
+  display: flex;
+  min-width: 0;
+}
+
+.roam-codex-chat-message-outline-bullet {
+  flex: 0 0 13px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.roam-codex-chat-message-outline-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 @media (hover: none) {
   .roam-codex-chat-copy {
     opacity: 0.55;

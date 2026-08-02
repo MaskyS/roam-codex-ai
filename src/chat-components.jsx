@@ -128,6 +128,51 @@ export function ConnectionCard({
   );
 }
 
+function normalizedOutlineString(value) {
+  return typeof value === "string"
+    ? value.split("\u00a0").join("").trim()
+    : "";
+}
+
+function snapshotOutlineRows(outline, depth = 0, rows = [], root = true) {
+  const text = normalizedOutlineString(outline?.string);
+  if (text) rows.push({ depth, text, root });
+  for (const child of outline?.children || []) {
+    snapshotOutlineRows(child, text ? depth + 1 : depth, rows, false);
+  }
+  return rows;
+}
+
+function serializedOutlineRows(value) {
+  const lines = typeof value === "string" ? value.split(/\r?\n/) : [];
+  const firstContent = lines.find((line) => line.trim());
+  const rootOffset = firstContent && !/^\s*-\s/.test(firstContent) ? 1 : 0;
+  const rows = [];
+  for (const line of lines) {
+    const item = /^(\s*)-\s(.*)$/.exec(line);
+    if (item) {
+      rows.push({
+        depth: Math.floor(item[1].length / 2) + rootOffset,
+        text: item[2],
+        root: false,
+      });
+    } else if (!rows.length) {
+      if (line.trim()) rows.push({ depth: 0, text: line, root: true });
+    } else {
+      rows.at(-1).text += `\n${line.trimStart()}`;
+    }
+  }
+  return rows.filter((row) => row.text.trim());
+}
+
+export function chatMessageOutlineRows(message) {
+  if (message?.role !== "user") return [];
+  const rows = message.outline
+    ? snapshotOutlineRows(message.outline)
+    : serializedOutlineRows(message.text);
+  return rows.length > 1 ? rows : [];
+}
+
 export function ChatTranscript({
   messages,
   approvals,
@@ -157,6 +202,7 @@ export function ChatTranscript({
         const copyState = copyStates.get(message) || "idle";
         const copied = copyState === "copied";
         const failed = copyState === "error";
+        const outlineRows = chatMessageOutlineRows(message);
         return (
           <article
             key={message.id || `${message.role}-${index}`}
@@ -175,7 +221,33 @@ export function ChatTranscript({
               onClick={(event) => onCopy(message, event.currentTarget, roleLabel)}
             />
             <div className="roam-codex-chat-message-text">
-              <BlockString string={message.text} />
+              {outlineRows.length
+                ? (
+                  <div className="roam-codex-chat-message-outline">
+                    {outlineRows.map((row, rowIndex) => (
+                      <div
+                        key={`${index}-${rowIndex}`}
+                        className={`roam-codex-chat-message-outline-row${
+                          row.root ? " is-root" : ""
+                        }`}
+                        style={{ marginLeft: `${row.depth * 14}px` }}
+                      >
+                        {!row.root && (
+                          <span
+                            className="roam-codex-chat-message-outline-bullet"
+                            aria-hidden="true"
+                          >
+                            •
+                          </span>
+                        )}
+                        <span className="roam-codex-chat-message-outline-text">
+                          <BlockString string={row.text} />
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )
+                : <BlockString string={message.text} />}
             </div>
           </article>
         );

@@ -3,7 +3,10 @@ import {
   ChatHistory,
   ChatTranscript,
   ConnectionCard,
+  chatMessageOutlineRows,
 } from "./chat-components.jsx";
+
+export { chatMessageOutlineRows };
 
 const DEFAULT_BRIDGE_URL = "http://127.0.0.1:47321";
 const TOKEN_KEY_PREFIX = "roam-codex-lab.bridge-token";
@@ -2230,8 +2233,32 @@ function snapshotChatPromptOutline(block) {
     string: typeof block?.[":block/string"] === "string"
       ? block[":block/string"]
       : "",
-    children: (block?.[":block/children"] || []).map(snapshotChatPromptOutline),
+    children: orderedOutlineChildren(block).map(snapshotChatPromptOutline),
   };
+}
+
+function appendChatPromptOutline(lines, block, depth, root = false) {
+  const value = normalizeChatPromptText(block?.[":block/string"]);
+  let childDepth = depth;
+  if (value) {
+    if (root) {
+      lines.push(value);
+    } else {
+      const indent = "  ".repeat(depth);
+      const continuation = `\n${"  ".repeat(depth + 1)}`;
+      lines.push(`${indent}- ${value.replace(/\r?\n/g, continuation)}`);
+      childDepth += 1;
+    }
+  }
+  for (const child of orderedOutlineChildren(block)) {
+    appendChatPromptOutline(lines, child, childDepth);
+  }
+}
+
+export function serializeChatPromptOutline(block) {
+  const lines = [];
+  appendChatPromptOutline(lines, block, 0, true);
+  return lines.join("\n").trim();
 }
 
 function findChatPromptPath(block, targetUid, path = []) {
@@ -2288,7 +2315,8 @@ export async function readFocusedPromptBlock(
     throw new Error("The chat composer is no longer available.");
   }
 
-  const pattern = "[:block/uid :block/string {:block/children ...}]";
+  const pattern =
+    "[:block/uid :block/string :block/order {:block/children ...}]";
   const rootPull = api.data?.async?.pull
     ? await api.data.async.pull(pattern, [":block/uid", rootBlockUid])
     : api.data?.pull?.(pattern, [":block/uid", rootBlockUid]);
@@ -2301,31 +2329,21 @@ export async function readFocusedPromptBlock(
       validBlockUid(focused?.["block-uid"])
       ? focused["block-uid"]
       : null;
-  const candidateUids = [...new Set([
+  const focusUid = [...new Set([
     focusedBlockUid,
     validBlockUid(preferredBlockUid) ? preferredBlockUid : null,
     rootBlockUid,
-  ].filter(Boolean))];
-
-  for (const uid of candidateUids) {
-    const path = findChatPromptPath(rootPull, uid);
-    if (!path) continue;
-    let promptPull = path.at(-1);
-    let text = normalizeChatPromptText(promptPull?.[":block/string"]);
-    if (!text) {
-      promptPull = path
-        .slice(0, -1)
-        .reverse()
-        .find((block) => normalizeChatPromptText(block?.[":block/string"])) ||
-        promptPull;
-      text = normalizeChatPromptText(promptPull?.[":block/string"]);
-    }
-    if (!text) continue;
+  ].filter(Boolean))].find((uid) => findChatPromptPath(rootPull, uid)) ||
+    rootBlockUid;
+  const text = serializeChatPromptOutline(rootPull);
+  if (text) {
+    const outline = snapshotChatPromptOutline(rootPull);
     return {
-      uid: promptPull[":block/uid"],
+      uid: rootBlockUid,
+      focusUid,
       text,
-      outline: snapshotChatPromptOutline(promptPull),
-      rootOutline: snapshotChatPromptOutline(rootPull),
+      outline,
+      rootOutline: outline,
     };
   }
 
@@ -3932,12 +3950,13 @@ export function createChatPanel({
     try {
       const restored = await restorePromptImpl(prompt);
       if (restored) {
-        lastComposerBlockUid = prompt.uid;
+        const focusUid = prompt.focusUid || prompt.uid;
+        lastComposerBlockUid = focusUid;
         const sidebarWindow = findSidebarBlockWindow(rootBlockUid, { api });
         if (sidebarWindow?.["window-id"]) {
           await api.ui.setBlockFocusAndSelection({
             location: {
-              "block-uid": prompt.uid,
+              "block-uid": focusUid,
               "window-id": sidebarWindow["window-id"],
             },
           });
@@ -3955,7 +3974,7 @@ export function createChatPanel({
       prompt = await readPromptImpl({
         preferredBlockUid: lastComposerBlockUid,
       });
-      lastComposerBlockUid = prompt.uid;
+      lastComposerBlockUid = prompt.focusUid || prompt.uid;
     } catch (error) {
       setProgress(error.message || "Write a message in the chat composer.", "error");
       return null;
@@ -3965,7 +3984,11 @@ export function createChatPanel({
       setProgress(cleared.error, "error");
       return null;
     }
-    const bubble = { role: "user", text: prompt.text };
+    const bubble = {
+      role: "user",
+      text: prompt.text,
+      outline: prompt.outline,
+    };
     messages.push(bubble);
     renderMessages();
     setProgress("Adding to the current turn", "activity");
@@ -4038,7 +4061,7 @@ export function createChatPanel({
       prompt = await readPromptImpl({
         preferredBlockUid: lastComposerBlockUid,
       });
-      lastComposerBlockUid = prompt.uid;
+      lastComposerBlockUid = prompt.focusUid || prompt.uid;
     } catch (error) {
       setProgress(error.message || "Write a message in the chat composer.", "error");
       setRunning(false);
@@ -4068,7 +4091,11 @@ export function createChatPanel({
     }
     const composerCleared = cleared.composerCleared;
 
-    messages.push({ role: "user", text: prompt.text });
+    messages.push({
+      role: "user",
+      text: prompt.text,
+      outline: prompt.outline,
+    });
     renderMessages();
     runId = null;
     setProgress("Starting", "activity");
