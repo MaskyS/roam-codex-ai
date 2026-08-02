@@ -42,7 +42,7 @@ window.ReactDOMClient = {
           const key = name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
           element.dataset[key] = value;
         }
-        else if (name === "disabled") element.disabled = value;
+        else if (name === "disabled" || name === "hidden") element[name] = value;
         else element.setAttribute(name, value);
       }
       for (const child of node.children.flat(Infinity)) {
@@ -2148,19 +2148,28 @@ test("chat clears a scratch composer before requesting a reply", async () => {
     ).hidden,
     true,
   );
-  const pickerButton = allElements.find(
+  let pickerButton = allElements.find(
     (element) => element.className === "roam-codex-chat-picker-button",
   );
-  const pickerMenu = allElements.find(
+  let pickerMenu = allElements.find(
     (element) => element.className === "roam-codex-chat-picker-menu",
   );
-  const pickerSubmenu = allElements.find(
+  let pickerSubmenu = allElements.find(
     (element) => element.className === "roam-codex-chat-picker-submenu",
   );
   assert.equal(pickerButton.textContent, "GPT-5.6-Sol · Low");
   assert.equal(pickerMenu.hidden, true);
   assert.equal(pickerSubmenu.hidden, true);
   pickerButton.listeners.click();
+  pickerButton = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-button",
+  );
+  pickerMenu = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-menu",
+  );
+  pickerSubmenu = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-submenu",
+  );
   assert.equal(pickerMenu.hidden, false);
   assert.deepEqual(
     pickerMenu.children.map((row) => row.children?.[0]?.textContent),
@@ -2171,6 +2180,9 @@ test("chat clears a scratch composer before requesting a reply", async () => {
     ["GPT-5.6-Sol", "Low", "Auto"],
   );
   pickerMenu.children[1].listeners.mouseenter();
+  pickerSubmenu = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-submenu",
+  );
   assert.deepEqual(
     pickerMenu.children.map((row) => row.children?.[0]?.textContent),
     ["Model", "Effort", "Access"],
@@ -2186,6 +2198,12 @@ test("chat clears a scratch composer before requesting a reply", async () => {
     [true, false, false],
   );
   pickerButton.listeners.click();
+  pickerMenu = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-menu",
+  );
+  pickerSubmenu = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-submenu",
+  );
   assert.equal(pickerMenu.hidden, true);
   assert.equal(pickerSubmenu.hidden, true);
   assert.equal(chatRequests, 0);
@@ -2605,10 +2623,10 @@ test("Send stays alongside Stop while a turn runs and names its shortcut", async
   });
 
   const elements = panelElements(controller);
-  const sendButton = elements.find(
+  let sendButton = elements.find(
     (element) => element.className === "roam-codex-chat-send",
   );
-  const stopButton = elements.find(
+  let stopButton = elements.find(
     (element) => element.className === "roam-codex-chat-stop",
   );
   const shortcut = sendButton.children.find(
@@ -2645,6 +2663,12 @@ test("Send stays alongside Stop while a turn runs and names its shortcut", async
   assert.equal(preventedMouseFocus, 1);
 
   const sending = controller.send();
+  sendButton = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-send",
+  );
+  stopButton = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-stop",
+  );
   assert.equal(sendButton.hidden, false);
   assert.equal(sendButton.disabled, true);
   assert.equal(stopButton.hidden, false);
@@ -2655,6 +2679,12 @@ test("Send stays alongside Stop while a turn runs and names its shortcut", async
 
   finishTurn();
   await sending;
+  sendButton = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-send",
+  );
+  stopButton = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-stop",
+  );
   assert.equal(sendButton.hidden, false);
   assert.equal(stopButton.hidden, true);
   assert.equal(progressMeta.hidden, true);
@@ -3082,10 +3112,10 @@ test("the transcript offers a reduced-motion scroll-to-latest control", async ()
   transcript.listeners.scroll();
   assert.equal(scrollLatest.hidden, true);
 
-  const approvalRoot = reactRoots.at(-1);
-  assert.equal(approvalRoot.unmounted, false);
+  const controlsRoot = reactRoots.at(-1);
+  assert.equal(controlsRoot.unmounted, false);
   await controller.close();
-  assert.equal(approvalRoot.unmounted, true);
+  assert.equal(controlsRoot.unmounted, true);
   assert.equal(transcript.listeners.scroll, undefined);
 });
 
@@ -3213,24 +3243,30 @@ test("the picker offers Speed from serviceTiers and sends the chosen tier", asyn
   await Promise.resolve();
 
   const elements = panelElements(controller);
-  const pickerButton = elements.find(
+  let pickerButton = elements.find(
     (element) => element.className === "roam-codex-chat-picker-button",
   );
-  const pickerMenu = elements.find(
+  let pickerMenu = elements.find(
     (element) => element.className === "roam-codex-chat-picker-menu",
   );
-  const pickerSubmenu = elements.find(
+  let pickerSubmenu = elements.find(
     (element) => element.className === "roam-codex-chat-picker-submenu",
   );
   assert.equal(pickerButton.textContent, "GPT-5.6-Sol · Low");
 
   pickerButton.listeners.click();
+  pickerMenu = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-menu",
+  );
   assert.deepEqual(
     pickerMenu.children.map((row) => row.children?.[0]?.textContent),
     ["Model", "Effort", "Speed", "Access"],
   );
   assert.equal(pickerMenu.children[2].children[1].textContent, "Standard");
   pickerMenu.children[2].listeners.mouseenter();
+  pickerSubmenu = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-submenu",
+  );
   assert.deepEqual(
     pickerMenu.children.map((row) => row.children?.[0]?.textContent),
     ["Model", "Effort", "Speed", "Access"],
@@ -3240,6 +3276,15 @@ test("the picker offers Speed from serviceTiers and sends the chosen tier", asyn
     ["Standard (Default)", "Fast"],
   );
   pickerSubmenu.children[1].listeners.click();
+  pickerButton = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-button",
+  );
+  pickerMenu = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-menu",
+  );
+  pickerSubmenu = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-submenu",
+  );
   assert.equal(pickerMenu.hidden, true);
   assert.equal(pickerSubmenu.hidden, true);
   assert.equal(pickerButton.textContent, "GPT-5.6-Sol · Low");
@@ -3305,18 +3350,24 @@ test("the Tools picker reads and persists MCP consent through extension settings
     (element) => element.className === "roam-codex-chat-picker-submenu",
   );
   pickerButton.listeners.click();
+  const openToolsMenu = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-menu",
+  );
   assert.deepEqual(
-    pickerMenu.children.map((row) => row.children?.[0]?.textContent),
+    openToolsMenu.children.map((row) => row.children?.[0]?.textContent),
     ["Model", "Effort", "Access", "Tools"],
   );
-  assert.equal(pickerMenu.children[3].children[1].textContent, "Roam + 1");
-  pickerMenu.children[3].listeners.mouseenter();
+  assert.equal(openToolsMenu.children[3].children[1].textContent, "Roam + 1");
+  openToolsMenu.children[3].listeners.mouseenter();
+  const openToolsSubmenu = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-submenu",
+  );
   assert.deepEqual(
-    pickerSubmenu.children.map((option) => option.children?.[0]?.textContent),
+    openToolsSubmenu.children.map((option) => option.children?.[0]?.textContent),
     ["Roam", "felt", "paper"],
   );
-  assert.equal(pickerSubmenu.children[1]["aria-checked"], "true");
-  pickerSubmenu.children[2].listeners.click();
+  assert.equal(openToolsSubmenu.children[1]["aria-checked"], "true");
+  openToolsSubmenu.children[2].listeners.click();
   await Promise.resolve();
   assert.deepEqual(settingsWrites, [["felt", "paper"]]);
 
@@ -3399,14 +3450,20 @@ test("Manual access shows Allow and Reject before a Roam write continues", async
     (element) => element.className === "roam-codex-chat-picker-submenu",
   );
   pickerButton.listeners.click();
-  const accessRow = pickerMenu.children.at(-1);
+  const openAccessMenu = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-menu",
+  );
+  const accessRow = openAccessMenu.children.at(-1);
   assert.equal(accessRow.children[0].textContent, "Access");
   accessRow.listeners.mouseenter();
+  const openAccessSubmenu = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-submenu",
+  );
   assert.deepEqual(
-    pickerSubmenu.children.map((option) => option.children[0].textContent),
+    openAccessSubmenu.children.map((option) => option.children[0].textContent),
     ["Auto", "Read only", "Manual"],
   );
-  pickerSubmenu.children[2].listeners.click();
+  openAccessSubmenu.children[2].listeners.click();
 
   const sendPromise = controller.send();
   await Promise.resolve();

@@ -1787,6 +1787,125 @@ function ChatHistory({ items, activeThreadId, error, running, onNew, onSelect })
     }, error)] : []),
   ];
 }
+function ChatPickerOption({ option, onPick }) {
+  const h = window.React.createElement;
+  return h("button", {
+    type: "button",
+    className: `roam-codex-chat-picker-option${option.active ? " is-active" : ""}`,
+    title: option.description || "",
+    role: option.toggle ? "menuitemcheckbox" : "menuitemradio",
+    "aria-checked": String(option.active),
+    disabled: option.disabled,
+    onClick: option.disabled ? undefined : () => onPick(option.id),
+  },
+  h("span", { className: "roam-codex-chat-picker-option-label" }, option.label),
+  option.description && h(
+    "span",
+    { className: "roam-codex-chat-picker-option-description" },
+    option.description,
+  ));
+}
+function ChatPicker({ picker, onToggle, onOpenLevel, onPick }) {
+  const h = window.React.createElement;
+  const openLevel = (level) => onOpenLevel(level);
+  return h("div", { className: "roam-codex-chat-picker" },
+    h("button", {
+      type: "button",
+      className: "roam-codex-chat-picker-button",
+      title: "Choose the model, reasoning effort, speed, and access",
+      "aria-label": "Model, effort, speed, and access",
+      "aria-haspopup": "menu",
+      "aria-expanded": String(picker.open),
+      "data-speed": picker.speed,
+      disabled: picker.disabled,
+      onClick: onToggle,
+    }, picker.label),
+    h("div", {
+      className: "roam-codex-chat-picker-menu",
+      role: "menu",
+      "aria-label": "Model, effort, speed, and access options",
+      hidden: !picker.open,
+    }, ...picker.rows.map((row) => h("button", {
+      key: row.level,
+      type: "button",
+      className: `roam-codex-chat-picker-item${
+        row.level === picker.level ? " is-open" : ""
+      }`,
+      title: `Choose ${row.label.toLowerCase()}`,
+      role: "menuitem",
+      "aria-haspopup": "menu",
+      "aria-expanded": String(row.level === picker.level),
+      "data-level": row.level,
+      onMouseEnter: () => openLevel(row.level),
+      onFocus: () => openLevel(row.level),
+      onClick: () => openLevel(row.level),
+      onKeyDown: (event) => {
+        if (!["ArrowRight", "Enter", " "].includes(event.key)) return;
+        event.preventDefault?.();
+        openLevel(row.level);
+      },
+    },
+    h("span", { className: "roam-codex-chat-picker-item-label" }, row.label),
+    h("span", { className: "roam-codex-chat-picker-item-value" }, row.value),
+    h("span", {
+      className: "roam-codex-chat-picker-item-chevron",
+      "aria-hidden": "true",
+    }, "›")))),
+    h("div", {
+      className: "roam-codex-chat-picker-submenu",
+      role: "menu",
+      "aria-label": picker.level ? `${effortLabel(picker.level)} options` : undefined,
+      hidden: !picker.level,
+    }, ...picker.options.map((option) => h(ChatPickerOption, {
+      key: option.id,
+      option,
+      onPick,
+    }))));
+}
+function ChatControls({
+  picker,
+  running,
+  steering,
+  sendDisabled,
+  stopDisabled,
+  shortcutIsMac,
+  actions,
+}) {
+  const h = window.React.createElement;
+  const sendTitle = steering
+    ? "Add the focused block to Codex's current turn without stopping it"
+    : `Send the focused block in this chat's Block Outline (${
+      shortcutIsMac ? "Option" : "Alt"
+    }+Enter, rebindable in Settings → Hotkeys)`;
+  return h("div", { className: "roam-codex-chat-model-row" },
+    h(ChatPicker, {
+      picker,
+      onToggle: actions.togglePicker,
+      onOpenLevel: actions.openPickerLevel,
+      onPick: actions.pick,
+    }),
+    h("div", { className: "roam-codex-chat-actions" },
+      h("button", {
+        type: "button",
+        className: "roam-codex-chat-stop",
+        title: "Stop the current Codex turn",
+        hidden: !running,
+        disabled: stopDisabled,
+        onClick: actions.stop,
+      }, "Stop"),
+      h("button", {
+        type: "button",
+        className: `roam-codex-chat-send${steering ? " is-steering" : ""}`,
+        title: sendTitle,
+        hidden: false,
+        disabled: sendDisabled,
+        onMouseDown: (event) => event.preventDefault?.(),
+        onClick: actions.send,
+      }, steering ? "Steer" : "Send", h("kbd", {
+        className: "roam-codex-chat-send-kbd",
+        "aria-hidden": "true",
+      }, shortcutIsMac ? "⌥↵" : "Alt ↵"))));
+}
 export function renderRoamMarkdown(
   element,
   string,
@@ -2609,6 +2728,7 @@ export function createChatPanel({
   let messages = [];
   let models = [];
   let modelsReady = false;
+  let modelsError = "";
   let mcpServers = [];
   let connection = { state: "checking" };
   let connectionRetryTimer = null;
@@ -2650,6 +2770,7 @@ export function createChatPanel({
   let pickerAccess = defaultAccess;
   let pickerOpen = false;
   let pickerLevel = null;
+  let stopDisabled = false;
   let messageRenderVersion = 0;
   const renderedMessageNodes = new Set();
   const copyFeedbackTimers = new Map();
@@ -2877,67 +2998,9 @@ export function createChatPanel({
     event.preventDefault?.();
   });
 
-  const modelRow = createPanelElement(doc, "div", "roam-codex-chat-model-row");
-  const pickerWrap = createPanelElement(doc, "div", "roam-codex-chat-picker");
-  const pickerButton = panelButton(
-    doc,
-    "roam-codex-chat-picker-button",
-    "Loading models…",
-    "Choose the model, reasoning effort, speed, and access",
-  );
-  pickerButton.setAttribute("aria-label", "Model, effort, speed, and access");
-  pickerButton.setAttribute("aria-haspopup", "menu");
-  pickerButton.setAttribute("aria-expanded", "false");
-  pickerButton.disabled = true;
-  pickerWrap.appendChild(pickerButton);
-  const pickerMenu = createPanelElement(
-    doc,
-    "div",
-    "roam-codex-chat-picker-menu",
-  );
-  pickerMenu.setAttribute("role", "menu");
-  pickerMenu.setAttribute("aria-label", "Model, effort, speed, and access options");
-  pickerMenu.hidden = true;
-  pickerWrap.appendChild(pickerMenu);
-  const pickerSubmenu = createPanelElement(
-    doc,
-    "div",
-    "roam-codex-chat-picker-submenu",
-  );
-  pickerSubmenu.setAttribute("role", "menu");
-  pickerSubmenu.hidden = true;
-  pickerWrap.appendChild(pickerSubmenu);
-  modelRow.appendChild(pickerWrap);
-  const actions = createPanelElement(doc, "div", "roam-codex-chat-actions");
-  const stopButton = panelButton(
-    doc,
-    "roam-codex-chat-stop",
-    "Stop",
-    "Stop the current Codex turn",
-  );
-  stopButton.hidden = true;
-  actions.appendChild(stopButton);
   const sendShortcutIsMac = /Mac|iP(?:hone|ad|od)/i.test(
     navigatorImpl?.platform || navigatorImpl?.userAgent || "",
   );
-  const sendButton = panelButton(
-    doc,
-    "roam-codex-chat-send",
-    "Send",
-    `Send the focused block in this chat's Block Outline (${
-      sendShortcutIsMac ? "Option" : "Alt"
-    }+Enter, rebindable in Settings → Hotkeys)`,
-  );
-  const sendShortcut = createPanelElement(
-    doc,
-    "kbd",
-    "roam-codex-chat-send-kbd",
-    sendShortcutIsMac ? "⌥↵" : "Alt ↵",
-  );
-  sendShortcut.setAttribute("aria-hidden", "true");
-  sendButton.appendChild(sendShortcut);
-  actions.appendChild(sendButton);
-  modelRow.appendChild(actions);
   panel.appendChild(body);
 
   const controls = createPanelElement(
@@ -2946,7 +3009,7 @@ export function createChatPanel({
     "roam-codex-chat-controls",
   );
   controls.id = CHAT_CONTROLS_ID;
-  controls.appendChild(modelRow);
+  const controlsRoot = createRoot(controls);
 
   const persist = () => writeChatState(state, { storage });
   const currentRecord = () => state.activeThreadId
@@ -3306,310 +3369,182 @@ export function createChatPanel({
     return parts.join(" · ");
   };
 
-  const renderPickerButton = () => {
-    if (!modelsReady) return;
-    const tier = modelTierChoices(currentModelEntry()).find(
-      (entry) => entry.id === pickerSpeed,
-    );
-    pickerButton.dataset.speed = tier?.id === "priority"
-      ? "fast"
-      : "standard";
-    pickerButton.textContent = pickerLabel();
-    pickerButton.setAttribute("aria-expanded", String(pickerOpen));
-  };
-
   const closePicker = ({ restoreFocus = false } = {}) => {
     pickerOpen = false;
     pickerLevel = null;
-    pickerMenu.hidden = true;
-    pickerSubmenu.hidden = true;
-    pickerSubmenu.replaceChildren();
-    pickerButton.setAttribute("aria-expanded", "false");
-    if (restoreFocus) pickerButton.focus?.();
-  };
-
-  const syncPickerRows = () => {
-    for (const row of pickerMenu.children || []) {
-      const open = row.dataset?.level === pickerLevel;
-      row.className = row.className.replace(/\s+is-open/g, "") +
-        (open ? " is-open" : "");
-      row.setAttribute?.("aria-expanded", String(open));
+    renderControls();
+    if (restoreFocus) {
+      controls.querySelector?.(".roam-codex-chat-picker-button")?.focus?.();
     }
   };
 
-  const renderPickerSubmenu = () => {
-    pickerSubmenu.replaceChildren();
-    if (!pickerLevel) {
-      pickerSubmenu.hidden = true;
-      return;
-    }
+  const pickerOptions = () => {
     const selected = currentModelEntry();
-    pickerSubmenu.hidden = false;
-    pickerSubmenu.setAttribute(
-      "aria-label",
-      `${effortLabel(pickerLevel)} options`,
-    );
-
-    const addOption = (label, active, onPick, description = "") => {
-      const option = panelButton(
-        doc,
-        `roam-codex-chat-picker-option${active ? " is-active" : ""}`,
-        "",
-        description,
-      );
-      option.setAttribute("role", "menuitemradio");
-      option.setAttribute("aria-checked", String(active));
-      option.appendChild(createPanelElement(
-        doc,
-        "span",
-        "roam-codex-chat-picker-option-label",
-        label,
-      ));
-      if (description) {
-        option.appendChild(createPanelElement(
-          doc,
-          "span",
-          "roam-codex-chat-picker-option-description",
-          description,
-        ));
-      }
-      option.addEventListener("click", () => {
-        onPick();
-        closePicker({ restoreFocus: true });
-        renderPickerButton();
-      });
-      pickerSubmenu.appendChild(option);
-    };
-
     if (pickerLevel === "model") {
-      for (const model of models) {
-        if (!model || typeof model.id !== "string") continue;
-        const displayName = model.displayName || model.id;
-        addOption(
-          model.isDefault ? `${displayName} (Default)` : displayName,
-          model.id === pickerModel,
-          () => {
-            if (model.id === pickerModel) return;
-            pickerModel = model.id;
-            modelChanged = true;
-            effortChanged = true;
-            speedChanged = true;
-            const next = currentModelEntry();
-            const efforts = modelEfforts(next);
-            if (!efforts.includes(pickerEffort)) {
-              const defaultEffort = efforts.includes(
-                next?.defaultReasoningEffort,
-              )
-                ? next.defaultReasoningEffort
-                : null;
-              pickerEffort = defaultEffort || efforts[0] || "";
-            }
-            if (!modelTierChoices(next).some(
-              (tier) => tier.id === pickerSpeed,
-            )) {
-              pickerSpeed = defaultTierIdFor(next);
-            }
-            savePreferences();
-          },
-          model.description || "",
-        );
-      }
-      return;
+      return models.filter((model) => model?.id).map((model) => ({
+        id: model.id,
+        label: `${model.displayName || model.id}${model.isDefault ? " (Default)" : ""}`,
+        active: model.id === pickerModel,
+        description: model.description || "",
+      }));
     }
-
     if (pickerLevel === "effort") {
       const efforts = modelEfforts(selected);
       const defaultEffort = efforts.includes(selected?.defaultReasoningEffort)
         ? selected.defaultReasoningEffort
         : null;
-      for (const effort of efforts) {
-        addOption(
-          effort === defaultEffort
-            ? `${effortLabel(effort)} (Default)`
-            : effortLabel(effort),
-          effort === pickerEffort,
-          () => {
-            if (effort === pickerEffort) return;
-            pickerEffort = effort;
-            effortChanged = true;
-            savePreferences();
-          },
-          selected?.supportedReasoningEfforts?.find(
-            (entry) => entry?.reasoningEffort === effort,
-          )?.description || "",
-        );
-      }
-      return;
+      return efforts.map((effort) => ({
+        id: effort,
+        label: `${effortLabel(effort)}${effort === defaultEffort ? " (Default)" : ""}`,
+        active: effort === pickerEffort,
+        description: selected?.supportedReasoningEfforts?.find(
+          (entry) => entry?.reasoningEffort === effort,
+        )?.description || "",
+      }));
     }
-
     if (pickerLevel === "speed") {
       const defaultTier = defaultTierIdFor(selected);
-      for (const tier of modelTierChoices(selected)) {
-        const name = tier.name || tier.id;
-        addOption(
-          tier.id === defaultTier ? `${name} (Default)` : name,
-          tier.id === pickerSpeed,
-          () => {
-            if (tier.id === pickerSpeed) return;
-            pickerSpeed = tier.id;
-            speedChanged = true;
-            savePreferences();
-          },
-          tier.description || "",
-        );
-      }
-      return;
+      return modelTierChoices(selected).map((tier) => ({
+        id: tier.id,
+        label: `${tier.name || tier.id}${tier.id === defaultTier ? " (Default)" : ""}`,
+        active: tier.id === pickerSpeed,
+        description: tier.description || "",
+      }));
     }
-
     if (pickerLevel === "access") {
-      const choices = [
+      return [
         ["auto", "Auto", "Allow requested Roam changes without asking"],
         ["read-only", "Read only", "Do not expose Roam write tools"],
         ["manual", "Manual", "Ask before each Roam write"],
-      ];
-      for (const [id, label, description] of choices) {
-        addOption(
-          label,
-          id === pickerAccess,
-          () => {
-            if (id === pickerAccess) return;
-            pickerAccess = id;
-            savePreferences();
-          },
-          description,
-        );
-      }
-      return;
+      ].map(([id, label, description]) => ({
+        id, label, description, active: id === pickerAccess,
+      }));
     }
-
     if (pickerLevel === "tools") {
-      const addToggle = (label, active, onToggle, description = "") => {
-        const option = panelButton(
-          doc,
-          `roam-codex-chat-picker-option${active ? " is-active" : ""}`,
-          "",
-          description,
-        );
-        option.setAttribute("role", "menuitemcheckbox");
-        option.setAttribute("aria-checked", String(active));
-        option.appendChild(createPanelElement(
-          doc,
-          "span",
-          "roam-codex-chat-picker-option-label",
-          label,
-        ));
-        if (description) {
-          option.appendChild(createPanelElement(
-            doc,
-            "span",
-            "roam-codex-chat-picker-option-description",
-            description,
-          ));
-        }
-        if (onToggle) {
-          option.addEventListener("click", () => {
-            onToggle();
-            renderPickerMenu();
-          });
-        } else {
-          option.disabled = true;
-        }
-        pickerSubmenu.appendChild(option);
-        return option;
-      };
-
-      addToggle("Roam", true, null, "Graph tools are always available");
-      for (const name of mcpServers) {
-        const active = enabledMcpServers.includes(name);
-        addToggle(name, active, () => {
-          const previous = enabledMcpServers;
-          const next = new Set(enabledMcpServers);
-          if (active) next.delete(name);
-          else next.add(name);
-          enabledMcpServers = sanitizeEnabledMcpServers([...next]);
-          void Promise.resolve(writeEnabledMcpServersImpl(enabledMcpServers))
-            .catch(() => {
-              enabledMcpServers = previous;
-              if (pickerOpen) renderPickerMenu();
-            });
-        });
-      }
+      return [{
+        id: "Roam", label: "Roam", active: true, toggle: true,
+        disabled: true, description: "Graph tools are always available",
+      }, ...mcpServers.map((name) => ({
+        id: name, label: name, active: enabledMcpServers.includes(name), toggle: true,
+      }))];
     }
+    return [];
   };
 
-  const openPickerLevel = (level) => {
-    pickerLevel = level;
-    syncPickerRows();
-    renderPickerSubmenu();
-  };
-
-  const renderPickerMenu = () => {
-    pickerMenu.replaceChildren();
+  const pickerRows = () => {
     const selected = currentModelEntry();
-
     const tiers = modelTierChoices(selected);
     const currentTier = tiers.find((tier) => tier.id === pickerSpeed);
     const rows = [
-      ["Model", selected?.displayName || selected?.id || "—", "model"],
-      ["Effort", pickerEffort ? effortLabel(pickerEffort) : "—", "effort"],
+      { label: "Model", value: selected?.displayName || selected?.id || "—", level: "model" },
+      { label: "Effort", value: pickerEffort ? effortLabel(pickerEffort) : "—", level: "effort" },
     ];
     if (tiers.length) {
-      rows.push(["Speed", currentTier?.name || currentTier?.id || "—", "speed"]);
+      rows.push({ label: "Speed", value: currentTier?.name || currentTier?.id || "—", level: "speed" });
     }
-    rows.push(["Access", effortLabel(pickerAccess), "access"]);
+    rows.push({ label: "Access", value: effortLabel(pickerAccess), level: "access" });
     if (mcpServers.length) {
       const enabledCount = enabledMcpServers
         .filter((name) => mcpServers.includes(name))
         .length;
-      rows.push([
-        "Tools",
-        enabledCount ? `Roam + ${enabledCount}` : "Roam only",
-        "tools",
-      ]);
+      rows.push({ label: "Tools", value: enabledCount ? `Roam + ${enabledCount}` : "Roam only", level: "tools" });
     }
-    for (const [label, value, level] of rows) {
-      const row = panelButton(
-        doc,
-        "roam-codex-chat-picker-item",
-        "",
-        `Choose ${label.toLowerCase()}`,
-      );
-      row.setAttribute("role", "menuitem");
-      row.setAttribute("aria-haspopup", "menu");
-      row.dataset.level = level;
-      row.appendChild(createPanelElement(
-        doc,
-        "span",
-        "roam-codex-chat-picker-item-label",
-        label,
-      ));
-      row.appendChild(createPanelElement(
-        doc,
-        "span",
-        "roam-codex-chat-picker-item-value",
-        value,
-      ));
-      const chevron = createPanelElement(
-        doc,
-        "span",
-        "roam-codex-chat-picker-item-chevron",
-        "›",
-      );
-      chevron.setAttribute("aria-hidden", "true");
-      row.appendChild(chevron);
-      const open = () => openPickerLevel(level);
-      row.addEventListener("mouseenter", open);
-      row.addEventListener("focus", open);
-      row.addEventListener("click", open);
-      row.addEventListener("keydown", (event) => {
-        if (!["ArrowRight", "Enter", " "].includes(event.key)) return;
-        event.preventDefault?.();
-        open();
-      });
-      pickerMenu.appendChild(row);
+    return rows;
+  };
+
+  const pickPickerOption = (id) => {
+    if (pickerLevel === "tools") {
+      const previous = enabledMcpServers;
+      const next = new Set(enabledMcpServers);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      enabledMcpServers = sanitizeEnabledMcpServers([...next]);
+      renderControls();
+      void Promise.resolve(writeEnabledMcpServersImpl(enabledMcpServers))
+        .catch(() => {
+          enabledMcpServers = previous;
+          renderControls();
+        });
+      return;
     }
-    syncPickerRows();
-    renderPickerSubmenu();
+    if (pickerLevel === "model" && id !== pickerModel) {
+      pickerModel = id;
+      modelChanged = true;
+      effortChanged = true;
+      speedChanged = true;
+      const selected = currentModelEntry();
+      const efforts = modelEfforts(selected);
+      if (!efforts.includes(pickerEffort)) {
+        pickerEffort = efforts.includes(selected?.defaultReasoningEffort)
+          ? selected.defaultReasoningEffort
+          : efforts[0] || "";
+      }
+      if (!modelTierChoices(selected).some((tier) => tier.id === pickerSpeed)) {
+        pickerSpeed = defaultTierIdFor(selected);
+      }
+      savePreferences();
+    } else if (pickerLevel === "effort" && id !== pickerEffort) {
+      pickerEffort = id;
+      effortChanged = true;
+      savePreferences();
+    } else if (pickerLevel === "speed" && id !== pickerSpeed) {
+      pickerSpeed = id;
+      speedChanged = true;
+      savePreferences();
+    } else if (pickerLevel === "access" && id !== pickerAccess) {
+      pickerAccess = id;
+      savePreferences();
+    }
+    closePicker({ restoreFocus: true });
+  };
+
+  const stopTurn = () => {
+    if (!runId) return;
+    stopDisabled = true;
+    setProgress("Stopping", "activity");
+    renderControls();
+    void cancelRequest(runId).catch((error) => {
+      stopDisabled = false;
+      setProgress(error.message || "Could not stop the turn.", "error");
+      renderControls();
+    });
+  };
+
+  const renderControls = () => {
+    const tier = modelTierChoices(currentModelEntry()).find(
+      (entry) => entry.id === pickerSpeed,
+    );
+    controlsRoot.render(window.React.createElement(ChatControls, {
+      picker: {
+        label: modelsError || (modelsReady ? pickerLabel() : "Loading models…"),
+        disabled: running || !modelsReady,
+        open: pickerOpen,
+        level: pickerLevel,
+        speed: tier?.id === "priority" ? "fast" : "standard",
+        rows: pickerRows(),
+        options: pickerOptions(),
+      },
+      running,
+      steering: running && Boolean(runId),
+      sendDisabled: !modelsReady || (running && (!runId || steerPending)),
+      stopDisabled,
+      shortcutIsMac: sendShortcutIsMac,
+      actions: {
+        togglePicker: () => {
+          if (running || !modelsReady) return;
+          pickerOpen = !pickerOpen;
+          pickerLevel = null;
+          renderControls();
+        },
+        openPickerLevel: (level) => {
+          pickerLevel = level;
+          renderControls();
+        },
+        pick: pickPickerOption,
+        send: () => void send(),
+        stop: stopTurn,
+      },
+    }));
   };
 
   const historyItems = () => buildConversationHistory(
@@ -3652,7 +3587,7 @@ export function createChatPanel({
     renderMessages();
     if (modelsReady) {
       initPicker();
-      renderPickerButton();
+      renderControls();
     }
     renderConversationButton();
     closeHistory();
@@ -3691,7 +3626,7 @@ export function createChatPanel({
     renderMessages();
     if (modelsReady) {
       initPicker();
-      renderPickerButton();
+      renderControls();
     }
     renderConversationButton();
     closeHistory();
@@ -3882,28 +3817,10 @@ export function createChatPanel({
     syncTranscriptStatus({ scroll: value });
     running = value;
     if (value && pickerOpen) closePicker();
-    pickerButton.disabled = value || !modelsReady;
     conversationButton.disabled = value;
-    stopButton.hidden = !value;
-    stopButton.disabled = false;
-    syncSendButton();
+    stopDisabled = false;
+    renderControls();
     if (historyOpen) renderHistory();
-  };
-
-  const syncSendButton = () => {
-    const steering = running && Boolean(runId);
-    sendButton.hidden = false;
-    sendButton.disabled = !modelsReady || (running && (!runId || steerPending));
-    sendButton.classList?.toggle?.("is-steering", steering);
-    const label = sendButton.firstChild;
-    if (label && typeof label.nodeValue === "string") {
-      label.nodeValue = steering ? "Steer" : "Send";
-    }
-    sendButton.title = steering
-      ? "Add the focused block to Codex's current turn without stopping it"
-      : `Send the focused block in this chat's Block Outline (${
-        sendShortcutIsMac ? "Option" : "Alt"
-      }+Enter, rebindable in Settings → Hotkeys)`;
   };
 
   const clearComposerForSubmit = async (prompt) => {
@@ -4030,12 +3947,12 @@ export function createChatPanel({
     if (running) {
       if (runId && !steerPending) {
         steerPending = true;
-        syncSendButton();
+        renderControls();
         try {
           return await steerActiveTurn(runId);
         } finally {
           steerPending = false;
-          syncSendButton();
+          renderControls();
         }
       }
       return null;
@@ -4094,7 +4011,7 @@ export function createChatPanel({
         enabledServers: enabledMcpServers,
         onStarted: ({ runId: startedRunId }) => {
           runId = startedRunId;
-          syncSendButton();
+          renderControls();
         },
         onThread: ({ threadId }) => {
           rememberThread(threadId);
@@ -4214,7 +4131,7 @@ export function createChatPanel({
 
   const handleDocumentClick = (event) => {
     if (historyOpen && !header.contains?.(event.target)) closeHistory();
-    if (pickerOpen && !pickerWrap.contains?.(event.target)) closePicker();
+    if (pickerOpen && !controls.contains?.(event.target)) closePicker();
   };
 
   const close = () => {
@@ -4240,6 +4157,7 @@ export function createChatPanel({
     disposeRenderedMessages();
     approvalRoot.unmount();
     historyRoot.unmount();
+    controlsRoot.unmount();
     header.remove();
     panel.remove();
     controls.remove();
@@ -4250,13 +4168,6 @@ export function createChatPanel({
     return closePromise;
   };
 
-  // Keep Roam's native block editor focused until send() snapshots it. A
-  // normal button mouse-down otherwise moves focus into the controls before
-  // readFocusedPromptBlock() can identify the composer window.
-  sendButton.addEventListener("mousedown", (event) => {
-    event.preventDefault?.();
-  });
-  sendButton.addEventListener("click", () => void send());
   closeButton.addEventListener("click", () => {
     const removeWindow = api.ui?.rightSidebar?.removeWindow;
     const removal = typeof removeWindow === "function"
@@ -4288,28 +4199,6 @@ export function createChatPanel({
   doc.addEventListener?.("click", handleDocumentClick, true);
   doc.addEventListener?.("visibilitychange", handleVisibilityChange);
   doc.defaultView?.addEventListener?.("focus", handleWindowFocus);
-  pickerButton.addEventListener("click", () => {
-    if (running || !modelsReady) return;
-    if (pickerOpen) {
-      closePicker();
-      return;
-    }
-    pickerOpen = true;
-    pickerLevel = null;
-    pickerMenu.hidden = false;
-    pickerButton.setAttribute("aria-expanded", "true");
-    renderPickerMenu();
-  });
-  stopButton.addEventListener("click", () => {
-    if (!runId) return;
-    stopButton.disabled = true;
-    setProgress("Stopping", "activity");
-    void cancelRequest(runId).catch((error) => {
-      stopButton.disabled = false;
-      setProgress(error.message || "Could not stop the turn.", "error");
-    });
-  });
-
   renderMessages();
   setProgress();
   renderConversationButton();
@@ -4325,13 +4214,14 @@ export function createChatPanel({
         models = Array.isArray(availableModels) ? availableModels : [];
         modelsReady = true;
         initPicker();
-        renderPickerButton();
+        renderControls();
         setRunning(running);
       })
       .catch((error) => {
         if (closed) return;
         if (error.code !== "NOT_PAIRED") {
-          pickerButton.textContent = "Models unavailable";
+          modelsError = "Models unavailable";
+          renderControls();
           setProgress(error.message, "error");
         }
         scheduleConnectionRetry();
@@ -4344,7 +4234,7 @@ export function createChatPanel({
       .then((servers) => {
         if (closed) return;
         mcpServers = Array.isArray(servers) ? servers : [];
-        if (pickerOpen) renderPickerMenu();
+        renderControls();
       })
       .catch(() => {
         // Without a server list the picker simply omits the Tools row.
