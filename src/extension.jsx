@@ -2202,16 +2202,18 @@ export async function openPromptBlockInSidebar(
   // A window can remain in getWindows() while the sidebar is hidden at zero
   // width. addWindow identifies windows by type + target UID, so repeating it
   // is the supported way to ensure the existing prompt window is visible too.
-  await api.ui.rightSidebar.addWindow({
+  const addWindowResult = api.ui.rightSidebar.addWindow({
     window: { type: "block", "block-uid": blockUid, order: 0 },
   });
   let sidebarWindow = findSidebarBlockWindow(blockUid, { api });
   if (!sidebarWindow) {
-    sidebarWindow = await waitForSidebarBlockWindow(
-      blockUid,
-      api,
-      waitOptions,
-    );
+    const addWindowFailure = new Promise((_, reject) => {
+      Promise.resolve(addWindowResult).catch(reject);
+    });
+    sidebarWindow = await Promise.race([
+      waitForSidebarBlockWindow(blockUid, api, waitOptions),
+      addWindowFailure,
+    ]);
   }
   if (sidebarWindow["collapsed?"]) {
     await api.ui.rightSidebar.expandWindow({
@@ -2375,28 +2377,10 @@ async function ensureDailyNotePage(date, api) {
   return uid;
 }
 
-export async function resolveChatPromptBlock(
-  blockUid,
-  {
-    api = getRoamApi(),
-    date = new Date(),
-  } = {},
-) {
-  if (blockUid !== undefined && blockUid !== null) {
-    if (!validBlockUid(blockUid)) {
-      throw new Error("Codex chat received an invalid Roam block UID.");
-    }
-    return { uid: blockUid, scratch: false };
-  }
-
-  const focusedBlockUid = api.ui?.getFocusedBlock?.()?.["block-uid"];
-  if (
-    validBlockUid(focusedBlockUid) &&
-    await pullUid(focusedBlockUid, api)
-  ) {
-    return { uid: focusedBlockUid, scratch: false };
-  }
-
+export async function resolveChatPromptBlock({
+  api = getRoamApi(),
+  date = new Date(),
+} = {}) {
   let parentUid = await api.ui?.mainWindow?.getOpenPageOrBlockUid?.();
   if (!validBlockUid(parentUid)) {
     parentUid = await ensureDailyNotePage(date, api);
@@ -4515,7 +4499,6 @@ async function openChatPanelInternal({
   api = getRoamApi(),
   doc = globalThis.document,
   storage = window.localStorage,
-  blockUid,
   waitOptions,
   resolvePromptBlock = resolveChatPromptBlock,
   openPromptBlock = openPromptBlockInSidebar,
@@ -4524,7 +4507,7 @@ async function openChatPanelInternal({
   removeResetPrompts = removeResetChatPromptBlocks,
   readOutlineUids = readPromptOutlineUids,
 } = {}) {
-  const prompt = await resolvePromptBlock(blockUid, { api });
+  const prompt = await resolvePromptBlock({ api });
   const promptBlockUid = prompt.uid;
   let protectedPromptUids = new Set();
   if (!prompt.scratch) {

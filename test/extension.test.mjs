@@ -1371,56 +1371,59 @@ test("prompt blocks open through Roam's native right-sidebar window API", async 
   assert.equal(findSidebarBlockWindow("prompt123", { api }), sidebarWindow);
 });
 
-test("chat uses a focused block without creating or changing graph data", async () => {
-  let created = false;
+test("prompt opening does not wait for Roam after the native window exists", async () => {
+  const windows = [];
   const api = {
     ui: {
-      getFocusedBlock: () => ({ "block-uid": "focused123" }),
-    },
-    data: {
-      async: {
-        pull: async () => ({ ":block/uid": "focused123" }),
-      },
-      block: {
-        create: async () => {
-          created = true;
+      rightSidebar: {
+        addWindow: () => {
+          windows.push({
+            type: "block",
+            "block-uid": "scratch123",
+            "window-id": "sidebar-block-scratch123",
+          });
+          return new Promise(() => {});
         },
+        getWindows: () => windows,
       },
     },
   };
 
-  assert.deepEqual(await resolveChatPromptBlock(undefined, { api }), {
-    uid: "focused123",
-    scratch: false,
-  });
-  assert.equal(created, false);
+  assert.equal(
+    (await openPromptBlockInSidebar("scratch123", { api }))["window-id"],
+    "sidebar-block-scratch123",
+  );
 });
 
-test("chat ignores a stale focused UID left behind by a deleted composer", async () => {
+test("chat creates its own scratch block instead of borrowing the focused block", async () => {
   const writes = [];
   const api = {
     ui: {
-      getFocusedBlock: () => ({ "block-uid": "deleted123" }),
+      getFocusedBlock: () => ({ "block-uid": "focused123" }),
       mainWindow: {
         getOpenPageOrBlockUid: async () => "current123",
       },
     },
     util: { generateUID: () => "scratch789" },
     data: {
-      async: { pull: async () => null },
-      block: { create: async (input) => writes.push(input) },
+      block: {
+        create: async (input) => writes.push(input),
+      },
     },
   };
 
-  assert.deepEqual(await resolveChatPromptBlock(undefined, { api }), {
+  assert.deepEqual(await resolveChatPromptBlock({ api }), {
     uid: "scratch789",
     scratch: true,
     parentUid: "current123",
   });
-  assert.equal(writes.length, 1);
+  assert.deepEqual(writes, [{
+    location: { "parent-uid": "current123", order: "last" },
+    block: { uid: "scratch789", string: CHAT_COMPOSER_PLACEHOLDER },
+  }]);
 });
 
-test("chat creates one ordinary scratch block on the current main view when nothing is focused", async () => {
+test("chat creates one ordinary scratch block on the current main view", async () => {
   const writes = [];
   const api = {
     ui: {
@@ -1437,7 +1440,7 @@ test("chat creates one ordinary scratch block on the current main view when noth
     },
   };
 
-  assert.deepEqual(await resolveChatPromptBlock(undefined, { api }), {
+  assert.deepEqual(await resolveChatPromptBlock({ api }), {
     uid: "scratch123",
     scratch: true,
     parentUid: "current123",
@@ -1469,7 +1472,7 @@ test("chat uses today's Daily Note when the main window is the Daily Notes log",
     },
   };
 
-  assert.deepEqual(await resolveChatPromptBlock(undefined, { api, date }), {
+  assert.deepEqual(await resolveChatPromptBlock({ api, date }), {
     uid: "scratch456",
     scratch: true,
     parentUid: "07-31-2026",
