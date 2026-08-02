@@ -59,6 +59,45 @@ export function validPairingGraphName(value) {
     !/[\u0000-\u001f]/.test(value);
 }
 
+export async function ensureRuntimeGraphAccess({
+  graph,
+  home = homedir(),
+  execFileImpl = execFileAsync,
+} = {}) {
+  try {
+    const store = JSON.parse(
+      await readFile(resolve(home, ".roam-tools.json"), "utf8"),
+    );
+    const graphs = Array.isArray(store?.graphs) ? store.graphs : [];
+    if (graphs.some((entry) => entry?.nickname === graph || entry?.name === graph)) {
+      return { connected: true, alreadyConnected: true };
+    }
+  } catch {
+    // No store yet: fall through to the connect attempt.
+  }
+
+  try {
+    await execFileImpl(
+      "npx",
+      [
+        "-y",
+        "@roam-research/roam-mcp",
+        "connect",
+        "--graph",
+        graph,
+        "--nickname",
+        graph,
+        "--access-level",
+        "full",
+      ],
+      { timeout: 120_000 },
+    );
+    return { connected: true, alreadyConnected: false };
+  } catch (error) {
+    return { connected: false, error: error?.message || "connect failed" };
+  }
+}
+
 export async function requestPairingConsent({
   graph,
   platform = process.platform,
@@ -210,10 +249,7 @@ function threadSummary(thread) {
   };
 }
 
-export function runtimeAppServerArgs({
-  roamHome = resolve(ROOT, ".dev", "roam-home"),
-  disableServers = [],
-} = {}) {
+export function runtimeAppServerArgs({ disableServers = [] } = {}) {
   const disabledServers = [...new Set(disableServers)]
     .filter((server) =>
       typeof server === "string" &&
@@ -240,8 +276,6 @@ export function runtimeAppServerArgs({
     'mcp_servers.roam.args=["--yes","@roam-research/roam-mcp"]',
     "-c",
     "mcp_servers.roam.enabled=true",
-    "-c",
-    `mcp_servers.roam.env={HOME=${JSON.stringify(roamHome)}}`,
     "-c",
     `mcp_servers.roam.enabled_tools=${JSON.stringify(RUNTIME_CHAT_ROAM_TOOLS)}`,
     ...(disabledServers.length
@@ -1714,6 +1748,7 @@ export function createBridgeServer({
     new AppServerClient({ runtimeCwd: runtimeCwdForGraph(boundGraph) }),
   onBind = async () => {},
   requestConsent = requestPairingConsent,
+  ensureGraphAccess = ensureRuntimeGraphAccess,
   pairingCodePath = PAIRING_CODE_PATH,
   trace = createTraceWriter(),
 } = {}) {
@@ -1734,6 +1769,15 @@ export function createBridgeServer({
       void Promise.resolve(previousClient.stop()).catch(() => {});
     }
     await onBind(nextGraph);
+    void Promise.resolve(ensureGraphAccess({ graph: nextGraph }))
+      .then((result) => trace({
+        event: result.connected
+          ? "graph.access.ready"
+          : "graph.access.unavailable",
+        graph: nextGraph,
+        ...(result.alreadyConnected ? { alreadyConnected: true } : {}),
+      }))
+      .catch(() => {});
   };
   const activeRunsByBlockUid = new Map();
   const activeRunsByThreadId = new Map();

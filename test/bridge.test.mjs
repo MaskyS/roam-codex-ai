@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter, once } from "node:events";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { PassThrough } from "node:stream";
@@ -11,6 +11,7 @@ import {
   buildProbePrompt,
   createBridgeServer,
   createPairingSession,
+  ensureRuntimeGraphAccess,
   createProgressNormalizer,
   isAllowedOrigin,
   parseAndValidatePlan,
@@ -144,7 +145,6 @@ test("runtime instruction audit allows user-global guidance and rejects project 
 
 test("runtime app-server exposes direct graph tools to persistent chat", () => {
   const args = runtimeAppServerArgs({
-    roamHome: "/runtime/roam-home",
     disableServers: ["node_repl", "roam", "felt server", "node_repl"],
   });
   const joined = args.join(" ");
@@ -152,7 +152,7 @@ test("runtime app-server exposes direct graph tools to persistent chat", () => {
   assert.match(joined, /mcp_servers\.roam\.command="npx"/);
   assert.match(joined, /@roam-research\/roam-mcp/);
   assert.match(joined, /mcp_servers\.roam\.enabled=true/);
-  assert.match(joined, /mcp_servers\.roam\.env=\{HOME="\/runtime\/roam-home"\}/);
+  assert.doesNotMatch(joined, /mcp_servers\.roam\.env=/);
   assert.match(joined, /mcp_servers\.roam\.enabled_tools=/);
   assert.match(joined, /get_graph_guidelines/);
   assert.match(joined, /get_comments/);
@@ -1298,6 +1298,7 @@ test("pairing binds the graph, creates its client, and persists the choice", asy
       assert.equal(graph, "My Graph");
       return { supported: true, allowed: true };
     },
+    ensureGraphAccess: async () => ({ connected: true, alreadyConnected: true }),
     trace: async () => {},
   });
   server.listen(0, "127.0.0.1");
@@ -1336,6 +1337,66 @@ test("pairing binds the graph, creates its client, and persists the choice", asy
     headers: { origin, authorization: "Bearer secret-token" },
   });
   assert.equal(nowServed.status, 200);
+});
+
+test("runtime graph access is reused when already connected", async () => {
+  const home = resolve(tmpdir(), `roam-tools-home-${process.pid}`);
+  await mkdir(home, { recursive: true });
+  await writeFile(
+    resolve(home, ".roam-tools.json"),
+    JSON.stringify({
+      version: 1,
+      graphs: [{ name: "maskys", nickname: "maskys", accessLevel: "full" }],
+    }),
+  );
+  let connectCalls = 0;
+  assert.deepEqual(
+    await ensureRuntimeGraphAccess({
+      graph: "maskys",
+      home,
+      execFileImpl: async () => {
+        connectCalls += 1;
+        return { stdout: "" };
+      },
+    }),
+    { connected: true, alreadyConnected: true },
+  );
+  assert.equal(connectCalls, 0);
+
+  const connectArgs = [];
+  assert.deepEqual(
+    await ensureRuntimeGraphAccess({
+      graph: "other-graph",
+      home,
+      execFileImpl: async (command, args) => {
+        connectArgs.push([command, ...args]);
+        return { stdout: "" };
+      },
+    }),
+    { connected: true, alreadyConnected: false },
+  );
+  assert.deepEqual(connectArgs, [[
+    "npx",
+    "-y",
+    "@roam-research/roam-mcp",
+    "connect",
+    "--graph",
+    "other-graph",
+    "--nickname",
+    "other-graph",
+    "--access-level",
+    "full",
+  ]]);
+
+  const failed = await ensureRuntimeGraphAccess({
+    graph: "unreachable",
+    home,
+    execFileImpl: async () => {
+      throw new Error("Roam Desktop is not running");
+    },
+  });
+  assert.equal(failed.connected, false);
+  await rm(home, { recursive: true, force: true });
 });
 
 test("a declined pairing dialog refuses to bind", async (t) => {
@@ -1702,6 +1763,7 @@ test("bridge enforces bearer auth and graph restriction", async (t) => {
     graph: "maskys",
     client,
     requestConsent: async () => ({ supported: false }),
+    ensureGraphAccess: async () => ({ connected: true, alreadyConnected: true }),
     pairingCodePath: resolve(tmpdir(), `roam-pairing-code-${process.pid}`),
     trace: async (entry) => traceEntries.push(entry),
   });
