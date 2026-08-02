@@ -39,6 +39,76 @@ export function ChatApprovalCards({ approvals, decide }) {
   ));
 }
 
+export function ChatTranscript({
+  messages,
+  approvals,
+  progress,
+  copyStates,
+  BlockString,
+  onCopy,
+  onDecide,
+  transcriptRef,
+  onScroll,
+  height,
+}) {
+  const hasProgress = Boolean(progress.text || progress.running);
+  return (
+    <div
+      ref={transcriptRef}
+      className="roam-codex-chat-transcript"
+      role="log"
+      aria-live="polite"
+      hidden={!messages.length && !approvals.length && !hasProgress}
+      onScroll={onScroll}
+      style={{ height: `${height}px`, maxHeight: `${height}px` }}
+    >
+      {messages.map((message, index) => {
+        if (!message || !["user", "assistant"].includes(message.role)) return null;
+        const roleLabel = message.role === "user" ? "You" : "Codex";
+        const copyState = copyStates.get(message) || "idle";
+        const copied = copyState === "copied";
+        const failed = copyState === "error";
+        return (
+          <article
+            key={message.id || `${message.role}-${index}`}
+            className={`roam-codex-chat-message roam-codex-chat-message-${message.role}`}
+          >
+            <button
+              type="button"
+              className="roam-codex-chat-copy"
+              title={copied ? "Copied" : failed ? "Could not copy Roam text" : "Copy Roam text"}
+              aria-label={copied
+                ? "Copied Roam text"
+                : failed
+                ? "Could not copy Roam text"
+                : `Copy ${roleLabel} message as Roam text`}
+              data-state={copyState}
+              onClick={(event) => onCopy(message, event.currentTarget, roleLabel)}
+            />
+            <div className="roam-codex-chat-message-text">
+              <BlockString string={message.text} />
+            </div>
+          </article>
+        );
+      })}
+      <div className="roam-codex-chat-approvals" hidden={!approvals.length}>
+        <ChatApprovalCards approvals={approvals} decide={onDecide} />
+      </div>
+      <div
+        className="roam-codex-chat-progress"
+        aria-live="polite"
+        data-kind={progress.kind}
+        hidden={!hasProgress}
+      >
+        <span className="roam-codex-chat-progress-meta" hidden={!progress.running}>
+          <span className="roam-codex-chat-progress-timer">{progress.elapsed}</span>
+        </span>
+        <span className="roam-codex-chat-progress-text">{progress.text}</span>
+      </div>
+    </div>
+  );
+}
+
 export function ChatHistory({
   items,
   activeThreadId,

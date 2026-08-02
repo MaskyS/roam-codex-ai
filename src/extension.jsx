@@ -1,7 +1,7 @@
 import {
-  ChatApprovalCards,
   ChatControls,
   ChatHistory,
+  ChatTranscript,
 } from "./chat-components.jsx";
 
 const DEFAULT_BRIDGE_URL = "http://127.0.0.1:47321";
@@ -2579,10 +2579,10 @@ export function createChatPanel({
   let pickerOpen = false;
   let pickerLevel = null;
   let stopDisabled = false;
-  let messageRenderVersion = 0;
-  const renderedMessageNodes = new Set();
   const copyFeedbackTimers = new Map();
+  const copyStates = new Map();
   const approvalCards = new Map();
+  let progressState = { text: "", kind: "", running: false, elapsed: "" };
 
   const panel = createPanelElement(doc, "section", CHAT_PANEL_CLASS);
   panel.id = CHAT_PANEL_ID;
@@ -2633,10 +2633,9 @@ export function createChatPanel({
     "div",
     "roam-codex-chat-transcript-wrap",
   );
-  const transcript = createPanelElement(doc, "div", "roam-codex-chat-transcript");
-  transcript.setAttribute("role", "log");
-  transcript.setAttribute("aria-live", "polite");
-  transcriptWrap.appendChild(transcript);
+  let transcript = null;
+  const transcriptMount = createPanelElement(doc, "div");
+  transcriptWrap.appendChild(transcriptMount);
   const scrollLatestButton = panelButton(
     doc,
     "roam-codex-chat-scroll-latest",
@@ -2685,7 +2684,6 @@ export function createChatPanel({
     }
     scrollLatestButton.hidden = true;
   };
-  transcript.addEventListener("scroll", updateScrollLatestButton);
   scrollLatestButton.addEventListener("click", scrollToLatest);
 
   const transcriptHandle = createPanelElement(
@@ -2699,50 +2697,11 @@ export function createChatPanel({
   transcriptHandle.hidden = false;
   body.appendChild(transcriptHandle);
 
-  const progress = createPanelElement(doc, "div", "roam-codex-chat-progress");
-  progress.setAttribute("aria-live", "polite");
-  progress.hidden = true;
-  const progressMeta = createPanelElement(
-    doc,
-    "span",
-    "roam-codex-chat-progress-meta",
-  );
-  progressMeta.hidden = true;
-  const progressTimer = createPanelElement(
-    doc,
-    "span",
-    "roam-codex-chat-progress-timer",
-  );
-  progressMeta.appendChild(progressTimer);
-  progress.appendChild(progressMeta);
-  const progressText = createPanelElement(
-    doc,
-    "span",
-    "roam-codex-chat-progress-text",
-  );
-  progress.appendChild(progressText);
-  const approvalContainer = createPanelElement(
-    doc,
-    "div",
-    "roam-codex-chat-approvals",
-  );
-  approvalContainer.hidden = true;
   const createRoot = window.ReactDOMClient?.createRoot;
   if (!window.React?.createElement || !createRoot)
     throw new Error("Codex chat requires Roam's React 18 globals.");
-  const approvalRoot = createRoot(approvalContainer);
+  const transcriptRoot = createRoot(transcriptMount);
   const historyRoot = createRoot(historyPopover);
-  transcript.appendChild(approvalContainer);
-  transcript.appendChild(progress);
-  const syncTranscriptStatus = ({ scroll = false } = {}) => {
-    if (progress.parentNode !== transcript) transcript.appendChild(progress);
-    transcript.hidden = !messages.length && progress.hidden &&
-      approvalCards.size === 0;
-    if (scroll && !progress.hidden) {
-      transcript.scrollTop = transcript.scrollHeight;
-      updateScrollLatestButton();
-    }
-  };
 
   const clampTranscriptHeight = (value) => Math.min(
     CHAT_TRANSCRIPT_MAX_HEIGHT,
@@ -2763,8 +2722,10 @@ export function createChatPanel({
   const applyTranscriptHeight = (height) => {
     setElementStyle(transcriptWrap, "height", `${height}px`);
     setElementStyle(transcriptWrap, "maxHeight", `${height}px`);
-    setElementStyle(transcript, "height", `${height}px`);
-    setElementStyle(transcript, "maxHeight", `${height}px`);
+    if (transcript) {
+      setElementStyle(transcript, "height", `${height}px`);
+      setElementStyle(transcript, "maxHeight", `${height}px`);
+    }
   };
   let transcriptHeight = readStoredTranscriptHeight() ??
     CHAT_TRANSCRIPT_MAX_HEIGHT;
@@ -2981,120 +2942,63 @@ export function createChatPanel({
     return graphRecord;
   };
 
-  const disposeRenderedMessages = () => {
-    messageRenderVersion += 1;
-    for (const element of renderedMessageNodes) {
-      void unmountRoamMarkdown(element, { api });
+  const handleCopy = async (message, button, roleLabel) => {
+    const previousTimer = copyFeedbackTimers.get(message);
+    if (previousTimer !== undefined) clearTimeoutImpl(previousTimer);
+    copyFeedbackTimers.delete(message);
+    copyStates.set(message, "copying");
+    renderMessages();
+    try {
+      await copyTextImpl(message.text);
+      if (closed) return;
+      copyStates.set(message, "copied");
+    } catch {
+      if (closed) return;
+      copyStates.set(message, "error");
     }
-    renderedMessageNodes.clear();
+    renderMessages();
+    const timer = setTimeoutImpl(() => {
+      copyFeedbackTimers.delete(message);
+      if (closed) return;
+      copyStates.set(message, "idle");
+      renderMessages();
+    }, 1_400);
+    copyFeedbackTimers.set(message, timer);
   };
 
-  const renderMessages = () => {
-    disposeRenderedMessages();
-    const renderVersion = messageRenderVersion;
-    transcript.replaceChildren();
+  const renderMessages = ({ scroll = true } = {}) => {
+    if (closed) return;
+    transcriptRoot.render(window.React.createElement(ChatTranscript, {
+      messages,
+      approvals: [...approvalCards.values()],
+      progress: progressState,
+      copyStates,
+      BlockString: api.ui?.react?.BlockString || getRoamApi().ui.react.BlockString,
+      onCopy: handleCopy,
+      onDecide: decideApproval,
+      transcriptRef: (node) => {
+        transcript = node;
+      },
+      onScroll: updateScrollLatestButton,
+      height: transcriptHeight,
+    }));
     transcriptHandle.hidden = false;
-    if (!messages.length) {
-      transcript.appendChild(approvalContainer);
-      transcript.appendChild(progress);
-      syncTranscriptStatus();
-      scrollLatestButton.hidden = true;
-      return;
-    }
-
-    for (const message of messages) {
-      if (!message || !["user", "assistant"].includes(message.role)) continue;
-      const article = createPanelElement(
-        doc,
-        "article",
-        `roam-codex-chat-message roam-codex-chat-message-${message.role}`,
-      );
-      const roleLabel = message.role === "user" ? "You" : "Codex";
-      const copyButton = panelButton(
-        doc,
-        "roam-codex-chat-copy",
-        "",
-        "Copy Roam text",
-      );
-      copyButton.setAttribute(
-        "aria-label",
-        `Copy ${roleLabel} message as Roam text`,
-      );
-      copyButton.dataset.state = "idle";
-      copyButton.addEventListener("click", async (event) => {
-        event?.preventDefault?.();
-        event?.stopPropagation?.();
-        const previousTimer = copyFeedbackTimers.get(copyButton);
-        if (previousTimer !== undefined) clearTimeoutImpl(previousTimer);
-        copyFeedbackTimers.delete(copyButton);
-        copyButton.dataset.state = "copying";
-        try {
-          await copyTextImpl(message.text);
-          if (closed) return;
-          copyButton.dataset.state = "copied";
-          copyButton.title = "Copied";
-          copyButton.setAttribute("aria-label", "Copied Roam text");
-        } catch {
-          if (closed) return;
-          copyButton.dataset.state = "error";
-          copyButton.title = "Could not copy Roam text";
-          copyButton.setAttribute("aria-label", "Could not copy Roam text");
-        }
-        const timer = setTimeoutImpl(() => {
-          copyFeedbackTimers.delete(copyButton);
-          if (closed) return;
-          copyButton.dataset.state = "idle";
-          copyButton.title = "Copy Roam text";
-          copyButton.setAttribute(
-            "aria-label",
-            `Copy ${roleLabel} message as Roam text`,
-          );
-        }, 1_400);
-        copyFeedbackTimers.set(copyButton, timer);
-      });
-      article.appendChild(copyButton);
-      const messageText = createPanelElement(
-        doc,
-        "div",
-        "roam-codex-chat-message-text",
-      );
-      renderedMessageNodes.add(messageText);
-      void renderRoamMarkdown(messageText, message.text, { api })
-        .then((rendered) => {
-          if (
-            rendered &&
-            (closed || renderVersion !== messageRenderVersion ||
-              !renderedMessageNodes.has(messageText))
-          ) {
-            void unmountRoamMarkdown(messageText, { api });
-          }
-        });
-      article.appendChild(messageText);
-      transcript.appendChild(article);
-    }
-    transcript.appendChild(approvalContainer);
-    transcript.appendChild(progress);
-    syncTranscriptStatus();
-    transcript.scrollTop = transcript.scrollHeight;
+    if (scroll && transcript) transcript.scrollTop = transcript.scrollHeight;
     updateScrollLatestButton();
   };
 
   const setProgress = (text = "", kind = "") => {
-    progressText.textContent = singleLine(text);
-    progress.dataset.kind = kind;
-    progress.hidden = !progressText.textContent && progressMeta.hidden;
-    syncTranscriptStatus({ scroll: !progress.hidden });
+    progressState = { ...progressState, text: singleLine(text), kind };
+    renderMessages({ scroll: Boolean(progressState.text || progressState.running) });
   };
 
   const removeApprovalCard = (approvalId) => {
     if (!approvalCards.has(approvalId)) return;
     approvalCards.delete(approvalId);
-    approvalContainer.hidden = approvalCards.size === 0;
     renderApprovalCards();
   };
   const clearApprovalCards = () => {
     approvalCards.clear();
-    approvalContainer.hidden = true;
     renderApprovalCards();
   };
   const decideApproval = (approvalId, decision) => {
@@ -3115,18 +3019,12 @@ export function createChatPanel({
   };
   const renderApprovalCards = () => {
     if (closed) return;
-    approvalRoot.render(window.React.createElement(ChatApprovalCards, {
-      approvals: [...approvalCards.values()],
-      decide: decideApproval,
-    }));
+    renderMessages();
   };
   const renderApproval = ({ approvalId, questions }) => {
     if (approvalCards.has(approvalId)) return;
     approvalCards.set(approvalId, { approvalId, questions, state: "" });
     renderApprovalCards();
-    approvalContainer.hidden = false;
-    transcript.hidden = false;
-    transcript.scrollTop = transcript.scrollHeight;
   };
 
   const currentModelEntry = () =>
@@ -3608,11 +3506,14 @@ export function createChatPanel({
         resolveIdle = resolve;
       });
       runStartedAt = now();
-      progressTimer.textContent = formatRunningElapsed(0);
-      progressMeta.hidden = false;
+      progressState = { ...progressState, running: true, elapsed: formatRunningElapsed(0) };
       if (setIntervalImpl && clearIntervalImpl && elapsedIntervalId === null) {
         elapsedIntervalId = setIntervalImpl(() => {
-          progressTimer.textContent = formatRunningElapsed(now() - runStartedAt);
+          progressState = {
+            ...progressState,
+            elapsed: formatRunningElapsed(now() - runStartedAt),
+          };
+          renderMessages({ scroll: false });
         }, 1000);
       }
     } else if (!value && running) {
@@ -3620,14 +3521,13 @@ export function createChatPanel({
       resolveIdle = null;
     }
     if (!value) {
-      progressMeta.hidden = true;
+      progressState = { ...progressState, running: false };
       if (clearIntervalImpl && elapsedIntervalId !== null) {
         clearIntervalImpl(elapsedIntervalId);
       }
       elapsedIntervalId = null;
     }
-    progress.hidden = !progressText.textContent && progressMeta.hidden;
-    syncTranscriptStatus({ scroll: value });
+    renderMessages({ scroll: value });
     running = value;
     if (value && pickerOpen) closePicker();
     conversationButton.disabled = value;
@@ -3964,11 +3864,9 @@ export function createChatPanel({
     doc.removeEventListener?.("click", handleDocumentClick, true);
     doc.removeEventListener?.("visibilitychange", handleVisibilityChange);
     doc.defaultView?.removeEventListener?.("focus", handleWindowFocus);
-    transcript.removeEventListener?.("scroll", updateScrollLatestButton);
     for (const timer of copyFeedbackTimers.values()) clearTimeoutImpl(timer);
     copyFeedbackTimers.clear();
-    disposeRenderedMessages();
-    approvalRoot.unmount();
+    transcriptRoot.unmount();
     historyRoot.unmount();
     controlsRoot.unmount();
     header.remove();

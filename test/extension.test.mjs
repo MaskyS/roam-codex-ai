@@ -11,6 +11,9 @@ globalThis.window = {
   roamAlphaAPI: {
     graph: { name: "maskys" },
     ui: {
+      react: {
+        BlockString: ({ string }) => window.React.createElement("span", {}, string),
+      },
       toaster: {
         show: () => {},
       },
@@ -35,9 +38,16 @@ window.ReactDOMClient = {
       const element = container.ownerDocument.createElement(node.type);
       for (const [name, value] of Object.entries(node.props)) {
         if (name === "children" || name === "key" || value == null) continue;
-        if (name.startsWith("on") && typeof value === "function") {
-          element.addEventListener(name.slice(2).toLowerCase(), value);
+        if (name === "ref" && typeof value === "function") {
+          value(element);
+        } else if (name.startsWith("on") && typeof value === "function") {
+          element.addEventListener(name.slice(2).toLowerCase(), (event = {}) =>
+            value({ ...event, currentTarget: element, target: event.target || element }));
         } else if (name === "className") element.className = value;
+        else if (name === "style" && typeof value === "object") {
+          element.style ||= {};
+          Object.assign(element.style, value);
+        }
         else if (name.startsWith("data-")) {
           const key = name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
           element.dataset[key] = value;
@@ -47,10 +57,12 @@ window.ReactDOMClient = {
       }
       for (const child of node.children.flat(Infinity)) {
         const rendered = renderNode(child);
-        if (typeof rendered === "string") {
-          element.textContent = `${element.textContent || ""}${rendered}`;
+        for (const value of (Array.isArray(rendered) ? rendered : [rendered])) {
+          if (typeof value === "string") {
+            element.textContent = `${element.textContent || ""}${value}`;
+          }
+          else if (value) element.appendChild(value);
         }
-        else if (rendered) element.appendChild(rendered);
       }
       return element;
     };
@@ -198,6 +210,12 @@ test("the chat transcript renders every message with Roam and unmounts it", asyn
   const doc = createFakePanelDocument();
   const api = {
     ui: {
+      react: {
+        BlockString: ({ string }) => {
+          rendered.push(string);
+          return window.React.createElement("span", {}, `rendered:${string}`);
+        },
+      },
       components: {
         renderString: async ({ el, string }) => {
           rendered.push(string);
@@ -256,13 +274,12 @@ test("the chat transcript renders every message with Roam and unmounts it", asyn
 
   await controller.send();
   await Promise.resolve();
-  assert.deepEqual(rendered, [
-    "Question about [[Project]]",
+  assert.deepEqual([...new Set(rendered)], [
     "Question about [[Project]]",
     "See **bold** and ((block123))",
   ]);
-  assert.equal(unmounted.length, 1);
-  const copyButtons = panelElements(controller).filter(
+  assert.equal(unmounted.length, 0);
+  let copyButtons = panelElements(controller).filter(
     (element) => element.className === "roam-codex-chat-copy",
   );
   assert.equal(copyButtons.length, 2);
@@ -272,12 +289,18 @@ test("the chat transcript renders every message with Roam and unmounts it", asyn
     stopPropagation() {},
   });
   assert.deepEqual(copied, ["Question about [[Project]]"]);
+  copyButtons = panelElements(controller).filter(
+    (element) => element.className === "roam-codex-chat-copy",
+  );
   assert.equal(copyButtons[0].dataset.state, "copied");
   assert.equal(copyButtons[0].title, "Copied");
   await copyButtons[1].listeners.click({
     preventDefault() {},
     stopPropagation() {},
   });
+  copyButtons = panelElements(controller).filter(
+    (element) => element.className === "roam-codex-chat-copy",
+  );
   assert.equal(copyButtons[1].dataset.state, "error");
   assert.equal(copyButtons[1].title, "Could not copy Roam text");
   assert.equal(pendingTimers.size, 2);
@@ -285,7 +308,7 @@ test("the chat transcript renders every message with Roam and unmounts it", asyn
   const unmountedBeforeClose = unmounted.length;
   await controller.close();
   await Promise.resolve();
-  assert.ok(unmounted.length >= unmountedBeforeClose + 2);
+  assert.equal(unmounted.length, unmountedBeforeClose);
   assert.deepEqual(clearedTimers, [1, 2]);
   assert.equal(pendingTimers.size, 0);
 });
@@ -2469,7 +2492,7 @@ test("rapid history selections cannot render a stale transcript", async () => {
   ]);
   await Promise.resolve();
 
-  const transcript = elements.find(
+  const transcript = panelElements(controller).find(
     (element) => element.className === "roam-codex-chat-transcript",
   );
   assert.match(transcript.textContent, /Older question/);
@@ -2633,16 +2656,16 @@ test("Send stays alongside Stop while a turn runs and names its shortcut", async
   const shortcut = sendButton.children.find(
     (element) => element.className === "roam-codex-chat-send-kbd",
   );
-  const progressMeta = elements.find(
+  let progressMeta = elements.find(
     (element) => element.className === "roam-codex-chat-progress-meta",
   );
-  const progressTimer = elements.find(
+  let progressTimer = elements.find(
     (element) => element.className === "roam-codex-chat-progress-timer",
   );
-  const progress = elements.find(
+  let progress = elements.find(
     (element) => element.className === "roam-codex-chat-progress",
   );
-  const transcript = elements.find(
+  let transcript = elements.find(
     (element) => element.className === "roam-codex-chat-transcript",
   );
   const actions = elements.find(
@@ -2670,6 +2693,18 @@ test("Send stays alongside Stop while a turn runs and names its shortcut", async
   stopButton = panelElements(controller).find(
     (element) => element.className === "roam-codex-chat-stop",
   );
+  progressMeta = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-progress-meta",
+  );
+  progressTimer = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-progress-timer",
+  );
+  progress = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-progress",
+  );
+  transcript = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-transcript",
+  );
   assert.equal(sendButton.hidden, false);
   assert.equal(sendButton.disabled, true);
   assert.equal(stopButton.hidden, false);
@@ -2685,6 +2720,9 @@ test("Send stays alongside Stop while a turn runs and names its shortcut", async
   );
   stopButton = panelElements(controller).find(
     (element) => element.className === "roam-codex-chat-stop",
+  );
+  progressMeta = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-progress-meta",
   );
   assert.equal(sendButton.hidden, false);
   assert.equal(stopButton.hidden, true);
@@ -3224,7 +3262,6 @@ test("the transcript offers a reduced-motion scroll-to-latest control", async ()
   assert.equal(controlsRoot.unmounted, false);
   await controller.close();
   assert.equal(controlsRoot.unmounted, true);
-  assert.equal(transcript.listeners.scroll, undefined);
 });
 
 test("the panel close control removes the native window before closing", async () => {
