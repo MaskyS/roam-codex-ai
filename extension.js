@@ -26,6 +26,7 @@ const CHAT_TRANSCRIPT_MIN_HEIGHT = 140;
 const CHAT_TRANSCRIPT_MAX_HEIGHT = 640;
 const CHAT_SCROLL_BOTTOM_THRESHOLD = 24;
 const CHAT_ACCESS_MODES = new Set(["auto", "read-only", "manual"]);
+const CONNECTION_RETRY_MS = 4_000;
 const ENABLED_MCP_SERVERS_SETTING = "enabled-mcp-servers";
 const BRIDGE_URL_SETTING = "bridge-url";
 const DEFAULT_ACCESS_SETTING = "default-access";
@@ -439,6 +440,95 @@ export async function requestPanelModels(options = {}) {
 export async function requestPanelMcpServers(options = {}) {
   const result = await bridgeJson("/mcp-servers", options);
   return sanitizeEnabledMcpServers(result.servers);
+}
+
+export async function requestPanelAuth(options = {}) {
+  const result = await bridgeJson("/auth", options);
+  return {
+    auth: result.auth === "authenticated" ? "authenticated" : "signed-out",
+    method: typeof result.method === "string" ? result.method : null,
+  };
+}
+
+export async function requestPanelLogin({
+  fetchImpl = window.fetch.bind(window),
+  graph = currentGraphName(),
+  bridgeUrl = currentBridgeUrl(),
+  token = getToken({ graph }),
+} = {}) {
+  if (!token) {
+    throw new Error(
+      'No bridge token. Run "Codex: Pair local bridge" first.',
+    );
+  }
+  const response = await fetchImpl(`${bridgeUrl}/auth/login`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "x-roam-graph": graphHeaderValue(graph),
+    },
+  });
+  let result = {};
+  try {
+    result = await response.json();
+  } catch {
+    // A useful status error is emitted below.
+  }
+  if (!response.ok || typeof result.authUrl !== "string") {
+    const error = new Error(
+      result.error || `Bridge returned HTTP ${response.status}.`,
+    );
+    error.status = response.status;
+    throw error;
+  }
+  return { loginId: result.loginId || null, authUrl: result.authUrl };
+}
+
+export async function probeBridgeConnection({
+  fetchImpl = window.fetch.bind(window),
+  storage = window.localStorage,
+  graph = currentGraphName(),
+  bridgeUrl = currentBridgeUrl(),
+} = {}) {
+  let response;
+  try {
+    response = await fetchImpl(`${bridgeUrl}/health`, {
+      headers: { "x-roam-graph": graphHeaderValue(graph) },
+    });
+  } catch (error) {
+    return { state: "no-bridge", graph, bridgeUrl, detail: error.message };
+  }
+
+  let result = {};
+  try {
+    result = await response.json();
+  } catch {
+    // A non-JSON reply is treated through the status checks below.
+  }
+  if (
+    response.status === 409 ||
+    (typeof result.graph === "string" && result.graph !== graph)
+  ) {
+    return {
+      state: "wrong-graph",
+      graph,
+      bridgeUrl,
+      serverGraph: typeof result.graph === "string" ? result.graph : null,
+      detail: typeof result.error === "string" ? result.error : "",
+    };
+  }
+  if (!response.ok || result.ok !== true) {
+    return {
+      state: "no-bridge",
+      graph,
+      bridgeUrl,
+      detail: typeof result.error === "string" ? result.error : "",
+    };
+  }
+  if (!getToken({ storage, graph })) {
+    return { state: "unpaired", graph, bridgeUrl };
+  }
+  return { state: "connected", graph, bridgeUrl };
 }
 
 export async function requestPanelThreadSummaries(threadIds, {
@@ -2378,6 +2468,11 @@ export function createChatPanel({
   requestChatImpl = requestPanelChat,
   requestModelsImpl = requestPanelModels,
   requestMcpServersImpl = requestPanelMcpServers,
+  probeConnectionImpl = probeBridgeConnection,
+  authRequest = requestPanelAuth,
+  loginRequest = requestPanelLogin,
+  pairRequest = pairBridge,
+  openUrlImpl = (url) => doc.defaultView?.open?.(url, "_blank", "noopener"),
   readEnabledMcpServersImpl = () =>
     EXTENSION_SETTINGS?.get?.(ENABLED_MCP_SERVERS_SETTING),
   writeEnabledMcpServersImpl = (servers) =>
@@ -2434,6 +2529,10 @@ export function createChatPanel({
   let models = [];
   let modelsReady = false;
   let mcpServers = [];
+  let connection = { state: "checking" };
+  let connectionRetryTimer = null;
+  let connectionProbeVersion = 0;
+  let connectionNote = "";
   let enabledMcpServers = sanitizeEnabledMcpServers(
     readEnabledMcpServersImpl(),
   );
@@ -2510,6 +2609,14 @@ export function createChatPanel({
   header.appendChild(closeButton);
 
   const body = createPanelElement(doc, "div", "roam-codex-chat-body");
+
+  const connectionCard = createPanelElement(
+    doc,
+    "section",
+    "roam-codex-connection-card",
+  );
+  connectionCard.hidden = true;
+  body.appendChild(connectionCard);
 
   const transcriptWrap = createPanelElement(
     doc,
@@ -4064,6 +4171,7 @@ export function createChatPanel({
               : failureText,
         "error",
       );
+      void refreshConnection();
       return null;
     } finally {
       clearApprovalCards();
@@ -4112,6 +4220,11 @@ export function createChatPanel({
   const close = () => {
     if (closed) return closePromise || Promise.resolve();
     closed = true;
+    connectionProbeVersion += 1;
+    if (connectionRetryTimer !== null) {
+      clearTimeoutImpl?.(connectionRetryTimer);
+      connectionRetryTimer = null;
+    }
     stopTranscriptResize();
     if (clearIntervalImpl && elapsedIntervalId !== null) {
       clearIntervalImpl(elapsedIntervalId);
@@ -4200,30 +4313,198 @@ export function createChatPanel({
   renderConversationButton();
   setRunning(false);
 
-  void requestModelsImpl()
-    .then((availableModels) => {
-      if (closed) return;
-      models = Array.isArray(availableModels) ? availableModels : [];
-      modelsReady = true;
-      initPicker();
-      renderPickerButton();
-      setRunning(running);
-    })
-    .catch((error) => {
-      if (closed) return;
-      pickerButton.textContent = "Models unavailable";
-      setProgress(error.message, "error");
-    });
+  let catalogsLoading = false;
+  const loadCatalogs = () => {
+    if (closed || modelsReady || catalogsLoading) return;
+    catalogsLoading = true;
+    void requestModelsImpl()
+      .then((availableModels) => {
+        if (closed) return;
+        models = Array.isArray(availableModels) ? availableModels : [];
+        modelsReady = true;
+        initPicker();
+        renderPickerButton();
+        setRunning(running);
+      })
+      .catch((error) => {
+        if (closed) return;
+        pickerButton.textContent = "Models unavailable";
+        setProgress(error.message, "error");
+        scheduleConnectionRetry();
+      })
+      .finally(() => {
+        catalogsLoading = false;
+      });
 
-  void requestMcpServersImpl()
-    .then((servers) => {
-      if (closed) return;
-      mcpServers = Array.isArray(servers) ? servers : [];
-      if (pickerOpen) renderPickerMenu();
-    })
-    .catch(() => {
-      // Without a server list the picker simply omits the Tools row.
-    });
+    void requestMcpServersImpl()
+      .then((servers) => {
+        if (closed) return;
+        mcpServers = Array.isArray(servers) ? servers : [];
+        if (pickerOpen) renderPickerMenu();
+      })
+      .catch(() => {
+        // Without a server list the picker simply omits the Tools row.
+      });
+  };
+
+  const renderConnectionCard = () => {
+    if (closed) return;
+    connectionCard.replaceChildren();
+    if (connection.state === "connected") {
+      connectionCard.hidden = true;
+      return;
+    }
+    connectionCard.hidden = false;
+    const addTitle = (text) => connectionCard.appendChild(
+      createPanelElement(doc, "h3", "roam-codex-connection-title", text),
+    );
+    const addText = (text) => connectionCard.appendChild(
+      createPanelElement(doc, "p", "roam-codex-connection-text", text),
+    );
+    const actions = createPanelElement(
+      doc,
+      "div",
+      "roam-codex-connection-actions",
+    );
+    const addAction = (label, onActivate) => {
+      const button = panelButton(
+        doc,
+        "roam-codex-connection-button",
+        label,
+        "",
+      );
+      button.addEventListener("click", () => void onActivate());
+      actions.appendChild(button);
+    };
+
+    if (connection.state === "checking") {
+      addTitle("Connecting to the local Codex bridge…");
+    } else if (connection.state === "wrong-graph") {
+      addTitle("The bridge serves a different graph");
+      addText(
+        connection.detail ||
+          `Restart the bridge with ROAM_GRAPH=${JSON.stringify(connection.graph)}.`,
+      );
+      addAction("Try again", refreshConnection);
+    } else if (connection.state === "unpaired") {
+      addTitle("Pair this device with the bridge");
+      addText("Enter the one-time pairing code shown in the bridge terminal.");
+      const input = createPanelElement(
+        doc,
+        "input",
+        "roam-codex-connection-input",
+      );
+      input.setAttribute("type", "text");
+      input.setAttribute("aria-label", "Bridge pairing code");
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") void startPairing(input.value);
+      });
+      connectionCard.appendChild(input);
+      addAction("Pair", () => startPairing(input.value));
+    } else if (connection.state === "signed-out") {
+      addTitle("Sign in to Codex");
+      addText(
+        "The bridge is running, but Codex has no signed-in ChatGPT account.",
+      );
+      addAction("Sign in", startLogin);
+    } else {
+      addTitle("The Codex bridge isn't running");
+      addText(
+        "Start it on this computer; this panel reconnects by itself.",
+      );
+      connectionCard.appendChild(createPanelElement(
+        doc,
+        "code",
+        "roam-codex-connection-command",
+        `ROAM_GRAPH=${JSON.stringify(connection.graph || "")} npm start`,
+      ));
+      addAction("Try again", refreshConnection);
+    }
+    if (connectionNote) {
+      connectionCard.appendChild(createPanelElement(
+        doc,
+        "p",
+        "roam-codex-connection-note",
+        connectionNote,
+      ));
+    }
+    if (actions.children.length) connectionCard.appendChild(actions);
+  };
+
+  const scheduleConnectionRetry = () => {
+    if (closed || !setTimeoutImpl) return;
+    if (connectionRetryTimer !== null) clearTimeoutImpl?.(connectionRetryTimer);
+    connectionRetryTimer = setTimeoutImpl(() => {
+      connectionRetryTimer = null;
+      void refreshConnection();
+    }, CONNECTION_RETRY_MS);
+  };
+
+  const refreshConnection = async () => {
+    if (closed) return;
+    const probeVersion = ++connectionProbeVersion;
+    let next;
+    try {
+      next = await probeConnectionImpl();
+    } catch (error) {
+      next = { state: "no-bridge", detail: error.message };
+    }
+    if (closed || probeVersion !== connectionProbeVersion) return;
+    if (next.state === "connected") {
+      try {
+        const authState = await authRequest();
+        if (closed || probeVersion !== connectionProbeVersion) return;
+        if (authState.auth !== "authenticated") {
+          next = { ...next, state: "signed-out" };
+        }
+      } catch (error) {
+        if (closed || probeVersion !== connectionProbeVersion) return;
+        next = error.status === 401
+          ? { state: "unpaired", graph: next.graph }
+          : { state: "no-bridge", graph: next.graph, detail: error.message };
+      }
+    }
+    if (next.state !== connection.state) connectionNote = "";
+    connection = next;
+    renderConnectionCard();
+    if (connection.state === "connected") {
+      if (connectionRetryTimer !== null) {
+        clearTimeoutImpl?.(connectionRetryTimer);
+        connectionRetryTimer = null;
+      }
+      loadCatalogs();
+    } else {
+      scheduleConnectionRetry();
+    }
+  };
+
+  const startPairing = async (code) => {
+    try {
+      await pairRequest({ code });
+      connectionNote = "";
+      await refreshConnection();
+    } catch (error) {
+      connectionNote = error.message || "Pairing failed.";
+      renderConnectionCard();
+    }
+  };
+
+  const startLogin = async () => {
+    try {
+      const login = await loginRequest();
+      connectionNote =
+        "Finish signing in from the browser tab that just opened; " +
+        "this panel reconnects by itself.";
+      renderConnectionCard();
+      openUrlImpl?.(login.authUrl);
+    } catch (error) {
+      connectionNote = error.message || "Sign-in could not start.";
+      renderConnectionCard();
+    }
+  };
+
+  loadCatalogs();
+  void refreshConnection();
 
   const initialThreadId = state.activeThreadId;
   void loadHistory().then(() => {
