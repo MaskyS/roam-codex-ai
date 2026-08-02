@@ -116,6 +116,12 @@ Lowercase filesystem-safe graph names retain a readable directory. Other names
 use a bounded readable prefix plus a digest of the exact name so Unicode,
 case-only, and long graph names remain distinct on macOS filesystems.
 
+The bridge bearer token lives at `~/.roam-better-ai/bridge-token`, shared by
+every version. It must never live beside the running copy: installs before
+0.9.2 kept it under the install directory, so each upgrade minted a new token
+and silently unpaired the user. A missing token is adopted once from the older
+locations before a new one is generated.
+
 The CLI copies the files needed by the LaunchAgent to
 `~/.roam-better-ai/app/<bridge-version>/` and writes that stable `bin.mjs` path
 into the plist. The service must never point into `~/.npm/_npx/`; that cache is
