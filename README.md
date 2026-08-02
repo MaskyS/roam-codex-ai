@@ -1,7 +1,7 @@
 # Roam Codex Lab
 
-This repository is the minimum end-to-end development loop for the `maskys`
-Roam graph:
+This repository is a minimum end-to-end development loop for a configured Roam
+graph:
 
 ```text
 focused Roam block
@@ -77,10 +77,10 @@ model's concrete default reasoning effort, marking each visible option with
 
 The conversation title opens a graph-scoped history popover. `New chat` keeps
 the existing Codex rollout and current Roam draft, clears only the panel's
-active conversation and transcript, and carries the visible model and effort
-into the next conversation. History is built only from thread IDs already
-recorded for this graph; the bridge hydrates those exact IDs with `thread/read`
-without listing or resuming unrelated Codex work.
+active conversation and transcript, and applies the graph's configured model
+and access defaults. History is built only from thread IDs already recorded for
+this graph; the bridge hydrates those exact IDs with `thread/read` without
+listing or resuming unrelated Codex work.
 
 User and Codex messages are rendered with Roam's native `renderString`
 component. Page links, block references, and Roam formatting therefore behave
@@ -164,7 +164,7 @@ Runtime instructions are deliberately separate from builder instructions:
   through `get_graph_guidelines` according to the Roam tool contract.
 - The ordinary prompt block and its descendants are the task and immediate
   context for one turn.
-- Bridge authentication, the fixed graph, sandbox, approval policy, and the
+- Bridge authentication, the configured graph, sandbox, approval policy, and the
   per-mode MCP allowlists enforce capability. Prompt or graph text cannot widen
   them.
 
@@ -178,7 +178,7 @@ development skills from becoming part of the Roam agent's role.
 
 ## Prerequisites
 
-- Roam Research Desktop with the `maskys` graph open.
+- Roam Research Desktop with the target graph open.
 - Node.js 20 or later.
 - A signed-in Codex CLI (`codex --version` should work).
 - Roam Developer Mode enabled.
@@ -198,8 +198,8 @@ access:
 mkdir -p .dev/roam-home
 HOME="$PWD/.dev/roam-home" \
   npx -y @roam-research/roam-mcp@0.9.1 connect \
-  --graph maskys \
-  --nickname maskys \
+  --graph <graph-name> \
+  --nickname <graph-name> \
   --access-level full
 ```
 
@@ -221,7 +221,7 @@ Roam loads the default export in `extension.js`. After edits, run:
 
 ```bash
 npx -y @roam-research/roam-cli@0.9.1 \
-  reload-dev-extensions --graph maskys
+  reload-dev-extensions --graph <graph-name>
 ```
 
 The keyboard equivalent is `Ctrl-D Ctrl-R`.
@@ -231,14 +231,20 @@ The keyboard equivalent is `Ctrl-D Ctrl-R`.
 Start the bridge:
 
 ```bash
-npm run dev
+ROAM_GRAPH=<graph-name> npm run dev
 ```
 
-In Roam's command palette, run `Codex: Pair local bridge`. The extension asks
-the loopback bridge for its random bearer token. The pairing endpoint accepts
-only an allowed Roam origin, and the extension stores the token in browser
-`localStorage`, not graph-synced extension settings. Then run
-`Codex: Check local bridge`.
+The bridge prints a short-lived, one-use pairing code. In that graph, run
+`Codex: Pair local bridge` from Roam's command palette and enter the code when
+prompted. The endpoint checks both the allowed Roam origin and graph identity,
+then returns the random bearer token. The extension stores that token under a
+graph-scoped key in browser `localStorage`, never in graph-synced extension
+settings. Then run `Codex: Check local bridge`.
+
+Settings → Extensions → Roam Codex provides graph-synced, non-secret defaults
+for the loopback bridge URL, new-conversation model, and graph access mode. The
+bridge URL must use plain HTTP, `127.0.0.1`, an explicit port, and no path. The
+active graph name is always derived from Roam rather than stored as a setting.
 
 `npm run show-token` remains available for diagnostics, but normal pairing does
 not expose or copy the token.
@@ -288,26 +294,33 @@ GET  /models
 GET  /threads/:threadId/messages
 POST /threads/summaries
      Authorization: Bearer <device-local token>
-     {"graph":"maskys","threadIds":["..."]}
+     X-Roam-Graph: <graph-name>
+     {"graph":"<graph-name>","threadIds":["..."]}
 POST /pair
      Origin: https://roamresearch.com
+     {"graph":"<graph-name>","code":"ABCDEF-123456"}
 POST /chat
      Authorization: Bearer <device-local token>
-     {"graph":"maskys","message":"...","promptBlockUid":"abcdefghi","threadId":"optional"}
+     X-Roam-Graph: <graph-name>
+     {"graph":"<graph-name>","message":"...","promptBlockUid":"abcdefghi","threadId":"optional"}
 POST /probe
      Authorization: Bearer <device-local token>
-     {"graph":"maskys","blockUid":"abcdefghi"}
+     X-Roam-Graph: <graph-name>
+     {"graph":"<graph-name>","blockUid":"abcdefghi"}
 POST /runs/:runId/cancel
      Authorization: Bearer <device-local token>
+     X-Roam-Graph: <graph-name>
 ```
 
-`POST /pair` returns the device-local bearer token only to an allowed Roam
-origin. `POST /probe` returns an authenticated NDJSON stream containing a start
-event, normalized progress events, and one completed result or error. The
-bridge validates the request origin, graph, token, body size, block UID, and
-one-active-run-per-block constraint. The cancel endpoint maps the local run ID
-to its app-server thread and turn, sends `turn/interrupt`, and reports an
-interrupted outcome without applying an edit plan.
+`POST /pair` returns the device-local bearer token only after an allowed Roam
+origin supplies the matching graph and current pairing code. The code expires
+after five minutes, allows at most five attempts, and is consumed by its first
+successful exchange. `POST /probe` returns an authenticated NDJSON stream
+containing a start event, normalized progress events, and one completed result
+or error. The bridge validates the request origin, graph, token, body size,
+block UID, and one-active-run-per-block constraint. The cancel endpoint maps the
+local run ID to its app-server thread and turn, sends `turn/interrupt`, and
+reports an interrupted outcome without applying an edit plan.
 
 ## Verification
 

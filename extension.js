@@ -1,7 +1,6 @@
-const BRIDGE_URL = "http://127.0.0.1:47321";
-const GRAPH = "maskys";
-const TOKEN_KEY = "roam-codex-lab.bridge-token";
-const RUNNING_STATUS_KEY = "roam-codex-lab.running-status-uids";
+const DEFAULT_BRIDGE_URL = "http://127.0.0.1:47321";
+const TOKEN_KEY_PREFIX = "roam-codex-lab.bridge-token";
+const RUNNING_STATUS_KEY_PREFIX = "roam-codex-lab.running-status-uids";
 const ACTIVE_BLOCK_UIDS = new Set();
 const ACTIVE_PRESENTATIONS = new Map();
 const RUNNING_BLOCK_CLASS = "roam-codex-running-block";
@@ -15,19 +14,22 @@ const CHAT_CONTROLS_ID = "roam-codex-chat-controls";
 const CHAT_PANEL_CLASS = "roam-codex-chat-panel";
 const SIDEBAR_CHAT_LAUNCHER_ID = "roam-codex-sidebar-chat-launcher";
 const CHAT_STATE_VERSION = 2;
-const CHAT_STATE_KEY = `roam-codex-lab.chat-state.v${CHAT_STATE_VERSION}.${GRAPH}`;
-const INSTALLATION_ID_KEY = `roam-codex-lab.installation-id.${GRAPH}`;
+const CHAT_STATE_KEY_PREFIX = `roam-codex-lab.chat-state.v${CHAT_STATE_VERSION}`;
+const INSTALLATION_ID_KEY_PREFIX = "roam-codex-lab.installation-id";
 const THREAD_PAGE_PREFIX = "Codex/thread/";
 const THREAD_ID_FIELD = "Codex thread::";
 const THREAD_ORIGIN_FIELD = "Origin installation::";
 const THREAD_CREATED_FIELD = "Created at::";
 const THREAD_ACTIVE_FIELD = "Last active at::";
-const CHAT_TRANSCRIPT_HEIGHT_KEY = `roam-codex-lab.chat-transcript-height.${GRAPH}`;
+const CHAT_TRANSCRIPT_HEIGHT_KEY_PREFIX = "roam-codex-lab.chat-transcript-height";
 const CHAT_TRANSCRIPT_MIN_HEIGHT = 140;
 const CHAT_TRANSCRIPT_MAX_HEIGHT = 640;
 const CHAT_SCROLL_BOTTOM_THRESHOLD = 24;
 const CHAT_ACCESS_MODES = new Set(["auto", "read-only", "manual"]);
 const ENABLED_MCP_SERVERS_SETTING = "enabled-mcp-servers";
+const BRIDGE_URL_SETTING = "bridge-url";
+const DEFAULT_ACCESS_SETTING = "default-access";
+const DEFAULT_MODEL_SETTING = "default-model";
 const NATIVE_WINDOW_HEADER_CLASS = "roam-codex-native-window-header";
 const NATIVE_COMPOSER_CLASS = "roam-codex-native-composer";
 let ACTIVE_CHAT_PANEL = null;
@@ -36,6 +38,12 @@ let CHAT_PANEL_OPEN_PROMISE = null;
 let CHAT_PANEL_CLOSE_PROMISE = null;
 let CHAT_TOGGLE_HOTKEY_DISPOSE = null;
 let EXTENSION_SETTINGS = null;
+let EXTENSION_CONFIG = {
+  graph: null,
+  bridgeUrl: DEFAULT_BRIDGE_URL,
+  defaultAccess: "auto",
+  defaultModel: null,
+};
 const CHAT_TOGGLE_HOTKEY_KEY = "__roamCodexToggleHotkeyDispose";
 
 export const RUNNING_BLOCK_TEXT = "[[Codex/running]]";
@@ -44,15 +52,86 @@ export const RUNNING_BLOCK_TEXT = "[[Codex/running]]";
 // visually empty while ensuring the temporary composer block is renderable.
 export const CHAT_COMPOSER_PLACEHOLDER = "\u00A0";
 
-function emptyChatState() {
+export function normalizeBridgeUrl(value) {
+  let url;
+  try {
+    url = new URL(String(value || DEFAULT_BRIDGE_URL));
+  } catch {
+    throw new Error("Bridge URL must be a valid loopback URL.");
+  }
+  if (
+    url.protocol !== "http:" ||
+    url.hostname !== "127.0.0.1" ||
+    !url.port ||
+    url.username ||
+    url.password ||
+    (url.pathname !== "/" && url.pathname !== "") ||
+    url.search ||
+    url.hash
+  ) {
+    throw new Error(
+      "Bridge URL must use http://127.0.0.1 with an explicit port.",
+    );
+  }
+  return url.origin;
+}
+
+function activeGraphName(api = globalThis.window?.roamAlphaAPI) {
+  const graph = typeof api?.graph?.name === "string" ? api.graph.name.trim() : "";
+  if (!graph || graph.length > 200 || /[\u0000-\u001f]/.test(graph)) {
+    throw new Error("Roam's active graph name is unavailable.");
+  }
+  return graph;
+}
+
+function currentGraphName() {
+  return EXTENSION_CONFIG.graph || activeGraphName();
+}
+
+function currentBridgeUrl() {
+  return EXTENSION_CONFIG.bridgeUrl;
+}
+
+function graphHeaderValue(graph) {
+  return encodeURIComponent(graph);
+}
+
+function graphStorageKey(prefix, graph = currentGraphName()) {
+  return `${prefix}.${encodeURIComponent(graph)}`;
+}
+
+export function chatStateKey(graph) {
+  return graphStorageKey(CHAT_STATE_KEY_PREFIX, graph);
+}
+
+function tokenKey(graph) {
+  return graphStorageKey(TOKEN_KEY_PREFIX, graph);
+}
+
+function runningStatusKey(graph) {
+  return graphStorageKey(RUNNING_STATUS_KEY_PREFIX, graph);
+}
+
+function installationIdKey(graph) {
+  return graphStorageKey(INSTALLATION_ID_KEY_PREFIX, graph);
+}
+
+function transcriptHeightKey(graph) {
+  return graphStorageKey(CHAT_TRANSCRIPT_HEIGHT_KEY_PREFIX, graph);
+}
+
+function emptyChatState({
+  defaultAccess = EXTENSION_CONFIG.defaultAccess,
+  defaultModel = EXTENSION_CONFIG.defaultModel,
+} = {}) {
   return {
     version: CHAT_STATE_VERSION,
     activeThreadId: null,
     newConversationPreferences: {
-      model: null,
+      model: defaultModel,
       effort: null,
       speed: null,
-      access: "auto",
+      access: defaultAccess,
     },
     conversations: {},
   };
@@ -80,17 +159,19 @@ function validBlockUid(value) {
 
 export function readChatState({
   storage = window.localStorage,
-  key = CHAT_STATE_KEY,
+  key = chatStateKey(),
+  defaultAccess = EXTENSION_CONFIG.defaultAccess,
+  defaultModel = EXTENSION_CONFIG.defaultModel,
 } = {}) {
   let value;
   try {
     value = JSON.parse(storage.getItem(key) || "null");
   } catch {
-    return emptyChatState();
+    return emptyChatState({ defaultAccess, defaultModel });
   }
 
   if (!value || value.version !== CHAT_STATE_VERSION) {
-    return emptyChatState();
+    return emptyChatState({ defaultAccess, defaultModel });
   }
 
   const conversations = {};
@@ -146,7 +227,7 @@ export function readChatState({
         : null,
       access: CHAT_ACCESS_MODES.has(value.newConversationPreferences?.access)
         ? value.newConversationPreferences.access
-        : "auto",
+        : defaultAccess,
     },
     conversations,
   };
@@ -154,7 +235,7 @@ export function readChatState({
 
 export function writeChatState(
   state,
-  { storage = window.localStorage, key = CHAT_STATE_KEY } = {},
+  { storage = window.localStorage, key = chatStateKey() } = {},
 ) {
   storage.setItem(key, JSON.stringify({ ...state, version: CHAT_STATE_VERSION }));
 }
@@ -166,8 +247,11 @@ function getRoamApi() {
   return window.roamAlphaAPI;
 }
 
-function getToken() {
-  return window.localStorage.getItem(TOKEN_KEY)?.trim() || "";
+function getToken({
+  storage = window.localStorage,
+  graph = currentGraphName(),
+} = {}) {
+  return storage.getItem(tokenKey(graph))?.trim() || "";
 }
 
 function notify(message, intent = "primary") {
@@ -186,7 +270,9 @@ function notify(message, intent = "primary") {
 
 export async function requestProbe(blockUid, {
   fetchImpl = window.fetch.bind(window),
-  token = getToken(),
+  graph = currentGraphName(),
+  bridgeUrl = currentBridgeUrl(),
+  token = getToken({ graph }),
   onProgress = () => {},
   onStarted = () => {},
 } = {}) {
@@ -196,13 +282,14 @@ export async function requestProbe(blockUid, {
     );
   }
 
-  const response = await fetchImpl(`${BRIDGE_URL}/probe`, {
+  const response = await fetchImpl(`${bridgeUrl}/probe`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${token}`,
       "content-type": "application/json",
+      "x-roam-graph": graphHeaderValue(graph),
     },
-    body: JSON.stringify({ graph: GRAPH, blockUid }),
+    body: JSON.stringify({ graph, blockUid }),
   });
 
   if (!response.ok) {
@@ -312,7 +399,9 @@ export async function readProbeStream(
 
 async function bridgeJson(path, {
   fetchImpl = window.fetch.bind(window),
-  token = getToken(),
+  graph = currentGraphName(),
+  bridgeUrl = currentBridgeUrl(),
+  token = getToken({ graph }),
 } = {}) {
   if (!token) {
     throw new Error(
@@ -320,8 +409,11 @@ async function bridgeJson(path, {
     );
   }
 
-  const response = await fetchImpl(`${BRIDGE_URL}${path}`, {
-    headers: { authorization: `Bearer ${token}` },
+  const response = await fetchImpl(`${bridgeUrl}${path}`, {
+    headers: {
+      authorization: `Bearer ${token}`,
+      "x-roam-graph": graphHeaderValue(graph),
+    },
   });
   let body = {};
   try {
@@ -351,7 +443,9 @@ export async function requestPanelMcpServers(options = {}) {
 
 export async function requestPanelThreadSummaries(threadIds, {
   fetchImpl = window.fetch.bind(window),
-  token = getToken(),
+  graph = currentGraphName(),
+  bridgeUrl = currentBridgeUrl(),
+  token = getToken({ graph }),
 } = {}) {
   if (!token) {
     throw new Error(
@@ -367,13 +461,14 @@ export async function requestPanelThreadSummaries(threadIds, {
     throw new Error("Conversation history requires at most 100 unique thread IDs.");
   }
 
-  const response = await fetchImpl(`${BRIDGE_URL}/threads/summaries`, {
+  const response = await fetchImpl(`${bridgeUrl}/threads/summaries`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${token}`,
       "content-type": "application/json",
+      "x-roam-graph": graphHeaderValue(graph),
     },
-    body: JSON.stringify({ graph: GRAPH, threadIds }),
+    body: JSON.stringify({ graph, threadIds }),
   });
   let result = {};
   try {
@@ -410,7 +505,9 @@ export async function requestPanelMessages(threadId, options = {}) {
 
 export async function requestPanelThreadName(threadId, name, {
   fetchImpl = window.fetch.bind(window),
-  token = getToken(),
+  graph = currentGraphName(),
+  bridgeUrl = currentBridgeUrl(),
+  token = getToken({ graph }),
 } = {}) {
   if (!token) {
     throw new Error('No bridge token. Run "Codex: Pair local bridge" first.');
@@ -420,14 +517,15 @@ export async function requestPanelThreadName(threadId, name, {
     throw new Error("A valid conversation and name are required.");
   }
   const response = await fetchImpl(
-    `${BRIDGE_URL}/threads/${encodeURIComponent(threadId)}/name`,
+    `${bridgeUrl}/threads/${encodeURIComponent(threadId)}/name`,
     {
       method: "POST",
       headers: {
         authorization: `Bearer ${token}`,
         "content-type": "application/json",
+        "x-roam-graph": graphHeaderValue(graph),
       },
-      body: JSON.stringify({ graph: GRAPH, name: cleanName }),
+      body: JSON.stringify({ graph, name: cleanName }),
     },
   );
   let result = {};
@@ -444,7 +542,9 @@ export async function requestPanelThreadName(threadId, name, {
 
 export async function requestPanelChat(message, {
   fetchImpl = window.fetch.bind(window),
-  token = getToken(),
+  graph = currentGraphName(),
+  bridgeUrl = currentBridgeUrl(),
+  token = getToken({ graph }),
   promptBlockUid,
   threadId = null,
   model = null,
@@ -467,7 +567,7 @@ export async function requestPanelChat(message, {
   }
 
   const body = {
-    graph: GRAPH,
+    graph,
     message: String(message),
     promptBlockUid,
   };
@@ -479,11 +579,12 @@ export async function requestPanelChat(message, {
   const sanitizedServers = sanitizeEnabledMcpServers(enabledServers);
   if (sanitizedServers.length) body.enabledServers = sanitizedServers;
 
-  const response = await fetchImpl(`${BRIDGE_URL}/chat`, {
+  const response = await fetchImpl(`${bridgeUrl}/chat`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${token}`,
       "content-type": "application/json",
+      "x-roam-graph": graphHeaderValue(graph),
     },
     body: JSON.stringify(body),
   });
@@ -510,7 +611,9 @@ export async function requestPanelChat(message, {
 
 export async function requestRunApproval(runId, approvalId, decision, {
   fetchImpl = window.fetch.bind(window),
-  token = getToken(),
+  graph = currentGraphName(),
+  bridgeUrl = currentBridgeUrl(),
+  token = getToken({ graph }),
 } = {}) {
   if (!token) {
     throw new Error(
@@ -524,12 +627,13 @@ export async function requestRunApproval(runId, approvalId, decision, {
     throw new Error("A valid approval decision is required.");
   }
   const response = await fetchImpl(
-    `${BRIDGE_URL}/runs/${runId}/approvals/${approvalId}`,
+    `${bridgeUrl}/runs/${runId}/approvals/${approvalId}`,
     {
       method: "POST",
       headers: {
         authorization: `Bearer ${token}`,
         "content-type": "application/json",
+        "x-roam-graph": graphHeaderValue(graph),
       },
       body: JSON.stringify({ decision }),
     },
@@ -548,7 +652,9 @@ export async function requestRunApproval(runId, approvalId, decision, {
 
 export async function requestRunCancellation(runId, {
   fetchImpl = window.fetch.bind(window),
-  token = getToken(),
+  graph = currentGraphName(),
+  bridgeUrl = currentBridgeUrl(),
+  token = getToken({ graph }),
 } = {}) {
   if (!token) {
     throw new Error(
@@ -560,10 +666,13 @@ export async function requestRunCancellation(runId, {
   }
 
   const response = await fetchImpl(
-    `${BRIDGE_URL}/runs/${encodeURIComponent(runId)}/cancel`,
+    `${bridgeUrl}/runs/${encodeURIComponent(runId)}/cancel`,
     {
       method: "POST",
-      headers: { authorization: `Bearer ${token}` },
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-roam-graph": graphHeaderValue(graph),
+      },
     },
   );
   let result = {};
@@ -600,7 +709,7 @@ function readableThreadLabel(value, timestamp = Date.now()) {
 
 function storageInstallationId({
   storage = window.localStorage,
-  key = INSTALLATION_ID_KEY,
+  key = installationIdKey(),
   cryptoImpl = globalThis.crypto,
 } = {}) {
   const existing = storage.getItem(key)?.trim();
@@ -946,9 +1055,9 @@ export function buildConversationHistory(state, summaries = []) {
     );
 }
 
-function readRunningStatusUids(storage) {
+function readRunningStatusUids(storage, key = runningStatusKey()) {
   try {
-    const value = JSON.parse(storage.getItem(RUNNING_STATUS_KEY) || "[]");
+    const value = JSON.parse(storage.getItem(key) || "[]");
     return Array.isArray(value)
       ? value.filter((uid) => typeof uid === "string")
       : [];
@@ -957,11 +1066,11 @@ function readRunningStatusUids(storage) {
   }
 }
 
-function writeRunningStatusUids(storage, uids) {
+function writeRunningStatusUids(storage, uids, key = runningStatusKey()) {
   if (uids.length) {
-    storage.setItem(RUNNING_STATUS_KEY, JSON.stringify([...new Set(uids)]));
+    storage.setItem(key, JSON.stringify([...new Set(uids)]));
   } else {
-    storage.removeItem(RUNNING_STATUS_KEY);
+    storage.removeItem(key);
   }
 }
 
@@ -2220,6 +2329,8 @@ export function createChatPanel({
   storage = window.localStorage,
   api = getRoamApi(),
   rootBlockUid,
+  defaultAccess = EXTENSION_CONFIG.defaultAccess,
+  defaultModel = EXTENSION_CONFIG.defaultModel,
   requestChatImpl = requestPanelChat,
   requestModelsImpl = requestPanelModels,
   requestMcpServersImpl = requestPanelMcpServers,
@@ -2273,7 +2384,7 @@ export function createChatPanel({
     throw new Error("The Codex chat panel requires a Roam block.");
   }
 
-  let state = readChatState({ storage });
+  let state = readChatState({ storage, defaultAccess, defaultModel });
   let messages = [];
   let models = [];
   let modelsReady = false;
@@ -2310,7 +2421,7 @@ export function createChatPanel({
   let pickerModel = "";
   let pickerEffort = "";
   let pickerSpeed = "";
-  let pickerAccess = "auto";
+  let pickerAccess = defaultAccess;
   let pickerOpen = false;
   let pickerLevel = null;
   let messageRenderVersion = 0;
@@ -2476,7 +2587,7 @@ export function createChatPanel({
   const readStoredTranscriptHeight = () => {
     let value;
     try {
-      value = Number.parseInt(storage.getItem(CHAT_TRANSCRIPT_HEIGHT_KEY), 10);
+      value = Number.parseInt(storage.getItem(transcriptHeightKey()), 10);
     } catch {
       return null;
     }
@@ -2509,7 +2620,7 @@ export function createChatPanel({
     doc.removeEventListener?.("pointerup", stopTranscriptResize, true);
     if (transcriptHeight === null) return;
     try {
-      storage.setItem(CHAT_TRANSCRIPT_HEIGHT_KEY, String(transcriptHeight));
+      storage.setItem(transcriptHeightKey(), String(transcriptHeight));
     } catch {
       // A device that cannot persist the height still keeps this session's.
     }
@@ -2959,10 +3070,16 @@ export function createChatPanel({
 
   const initPicker = () => {
     const preferred = currentPreferences();
-    const defaultModel = models.find((model) => model.isDefault) || models[0];
-    pickerModel = models.some((model) => model.id === preferred.model)
+    const catalogDefault = models.find((model) => model.isDefault) || models[0];
+    const preferredModelAvailable = models.some(
+      (model) => model.id === preferred.model,
+    );
+    pickerModel = preferredModelAvailable
       ? preferred.model
-      : defaultModel?.id || "";
+      : catalogDefault?.id || "";
+    if (!state.activeThreadId && preferred.model && !preferredModelAvailable) {
+      modelChanged = false;
+    }
     const selected = currentModelEntry();
     const efforts = modelEfforts(selected);
     const defaultEffort = efforts.includes(selected?.defaultReasoningEffort)
@@ -3318,13 +3435,10 @@ export function createChatPanel({
 
   const beginNewConversation = () => {
     if (running) return;
-    const preferences = currentPreferences();
-    const model = pickerModel || preferences.model || null;
-    const effort = pickerEffort || preferences.effort || null;
-    const speed = pickerSpeed || preferences.speed || null;
-    const access = CHAT_ACCESS_MODES.has(pickerAccess)
-      ? pickerAccess
-      : preferences.access || "auto";
+    const model = defaultModel;
+    const effort = null;
+    const speed = null;
+    const access = defaultAccess;
     selectionLoadVersion += 1;
     state.activeThreadId = null;
     state.newConversationPreferences = { model, effort, speed, access };
@@ -4287,11 +4401,18 @@ export function sendActiveChatMessage({
 export async function pairBridge({
   fetchImpl = window.fetch.bind(window),
   storage = window.localStorage,
+  graph = currentGraphName(),
+  bridgeUrl = currentBridgeUrl(),
+  code,
 } = {}) {
-  const response = await fetchImpl(`${BRIDGE_URL}/pair`, {
+  const pairingCode = typeof code === "string" ? code.trim() : "";
+  if (!pairingCode || pairingCode.length > 64 || /[\u0000-\u001f]/.test(pairingCode)) {
+    throw new Error("Enter the one-time pairing code shown by the local bridge.");
+  }
+  const response = await fetchImpl(`${bridgeUrl}/pair`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ graph: GRAPH }),
+    body: JSON.stringify({ graph, code: pairingCode }),
   });
 
   let result = {};
@@ -4306,23 +4427,36 @@ export async function pairBridge({
       result.error || `Bridge pairing returned HTTP ${response.status}.`,
     );
   }
-  if (result.graph !== GRAPH) {
-    throw new Error(`Bridge is connected to graph "${result.graph}".`);
+  if (result.graph !== graph) {
+    throw new Error(
+      `Bridge is configured for graph "${result.graph}"; ` +
+      `restart it with ROAM_GRAPH=${JSON.stringify(graph)}.`,
+    );
   }
 
-  storage.setItem(TOKEN_KEY, result.token);
+  storage.setItem(tokenKey(graph), result.token);
   notify("Local bridge paired on this device.", "success");
   return result;
 }
 
 export async function checkBridge({
   fetchImpl = window.fetch.bind(window),
+  graph = currentGraphName(),
+  bridgeUrl = currentBridgeUrl(),
 } = {}) {
   try {
-    const response = await fetchImpl(`${BRIDGE_URL}/health`);
+    const response = await fetchImpl(`${bridgeUrl}/health`, {
+      headers: { "x-roam-graph": graphHeaderValue(graph) },
+    });
     const result = await response.json();
     if (!response.ok || !result.ok) {
       throw new Error(result.error || `HTTP ${response.status}`);
+    }
+    if (result.graph !== graph) {
+      throw new Error(
+        `bridge serves graph "${result.graph}", but Roam has "${graph}" open; ` +
+        `restart the bridge with ROAM_GRAPH=${JSON.stringify(graph)}`,
+      );
     }
     notify(
       `Bridge is ${result.appServer}; graph is ${result.graph}.`,
@@ -4335,9 +4469,110 @@ export async function checkBridge({
   }
 }
 
+function configuredDefaultAccess(value) {
+  return CHAT_ACCESS_MODES.has(value) ? value : "auto";
+}
+
+function configuredDefaultModel(value) {
+  const model = typeof value === "string" ? singleLine(value) : "";
+  return model && model.length <= 100 ? model : null;
+}
+
+export function configureExtension({ api, settings }) {
+  const graph = activeGraphName(api);
+  let bridgeUrl = DEFAULT_BRIDGE_URL;
+  const savedBridgeUrl = settings?.get?.(BRIDGE_URL_SETTING);
+  if (savedBridgeUrl) {
+    try {
+      bridgeUrl = normalizeBridgeUrl(savedBridgeUrl);
+    } catch (error) {
+      notify(`${error.message} Using ${DEFAULT_BRIDGE_URL}.`, "warning");
+    }
+  }
+  EXTENSION_CONFIG = {
+    graph,
+    bridgeUrl,
+    defaultAccess: configuredDefaultAccess(
+      settings?.get?.(DEFAULT_ACCESS_SETTING),
+    ),
+    defaultModel: configuredDefaultModel(
+      settings?.get?.(DEFAULT_MODEL_SETTING),
+    ),
+  };
+}
+
+export function installSettingsPanel(extensionAPI) {
+  const settings = extensionAPI.settings;
+  const writable = settings.canSet !== false;
+  const readOnlyNote = writable
+    ? ""
+    : " This graph's extension settings can only be changed by an admin.";
+  return settings.panel.create({
+    tabTitle: "Roam Codex",
+    settings: [
+      {
+        id: BRIDGE_URL_SETTING,
+        name: "Local bridge URL",
+        description:
+          "Loopback endpoint including its port. Only 127.0.0.1 is allowed." +
+          readOnlyNote,
+        action: {
+          type: "input",
+          placeholder: DEFAULT_BRIDGE_URL,
+          onChange: (event) => {
+            if (!writable) return;
+            try {
+              EXTENSION_CONFIG.bridgeUrl = normalizeBridgeUrl(event.target.value);
+              event.target.setCustomValidity?.("");
+            } catch (error) {
+              event.target.setCustomValidity?.(error.message);
+            }
+          },
+        },
+      },
+      {
+        id: DEFAULT_ACCESS_SETTING,
+        name: "Default graph access",
+        description:
+          "Seeds new conversations; existing conversations keep their access." +
+          readOnlyNote,
+        action: {
+          type: "select",
+          items: ["auto", "read-only", "manual"],
+          onChange: (value) => {
+            if (writable) EXTENSION_CONFIG.defaultAccess = configuredDefaultAccess(value);
+          },
+        },
+      },
+      {
+        id: DEFAULT_MODEL_SETTING,
+        name: "Default Codex model",
+        description:
+          "Optional model ID for new conversations. Unavailable models fall " +
+          "back to the bridge default." + readOnlyNote,
+        action: {
+          type: "input",
+          placeholder: "Server default",
+          onChange: (event) => {
+            if (writable) {
+              EXTENSION_CONFIG.defaultModel = configuredDefaultModel(
+                event.target.value,
+              );
+            }
+          },
+        },
+      },
+    ],
+  });
+}
+
 export default {
   onload: ({ extensionAPI }) => {
     EXTENSION_SETTINGS = extensionAPI.settings;
+    configureExtension({ api: getRoamApi(), settings: EXTENSION_SETTINGS });
+    void installSettingsPanel(extensionAPI).catch((error) => {
+      notify(`Codex settings could not load: ${error.message}`, "warning");
+    });
     cleanupStaleChatUi();
     ACTIVE_CHAT_PANEL = null;
     CHAT_PANEL_OPEN_PROMISE = null;
@@ -4407,7 +4642,11 @@ export default {
       label: "Codex: Pair local bridge",
       "disable-hotkey": true,
       callback: () => {
-        void pairBridge().catch((error) => {
+        const code = globalThis.window?.prompt?.(
+          "Enter the one-time pairing code shown in the bridge terminal:",
+        );
+        if (code === null || code === undefined) return;
+        void pairBridge({ code }).catch((error) => {
           notify(`Bridge pairing failed: ${error.message}`, "danger");
         });
       },
@@ -4421,6 +4660,12 @@ export default {
   },
   onunload: () => {
     EXTENSION_SETTINGS = null;
+    EXTENSION_CONFIG = {
+      graph: null,
+      bridgeUrl: DEFAULT_BRIDGE_URL,
+      defaultAccess: "auto",
+      defaultModel: null,
+    };
     CHAT_TOGGLE_HOTKEY_DISPOSE?.();
     CHAT_TOGGLE_HOTKEY_DISPOSE = null;
     SIDEBAR_CHAT_LAUNCHER?.dispose?.();

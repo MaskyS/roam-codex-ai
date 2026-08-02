@@ -9,6 +9,7 @@ globalThis.window = {
     removeItem: () => {},
   },
   roamAlphaAPI: {
+    graph: { name: "maskys" },
     ui: {
       toaster: {
         show: () => {},
@@ -25,6 +26,7 @@ const {
   cleanupStaleChatUi,
   clearScratchPromptBlock,
   cleanupStaleRunningStatuses,
+  configureExtension,
   copyRoamText,
   createChatPanel,
   ensureGraphThreadRecord,
@@ -56,7 +58,10 @@ const {
   startRunningPresentation,
   installSidebarChatLauncher,
   installChatToggleHotkey,
+  installSettingsPanel,
   mountSidebarChatLauncher,
+  chatStateKey,
+  normalizeBridgeUrl,
   unmountRoamMarkdown,
   workOnBlock,
   writeChatState,
@@ -2159,8 +2164,8 @@ test("chat clears a scratch composer before requesting a reply", async () => {
   assert.equal(readChatState({ storage }).conversations.thread_12345678.threadId,
     "thread_12345678");
   assert.deepEqual(readChatState({ storage }).newConversationPreferences, {
-    model: "gpt-5.6-sol",
-    effort: "low",
+    model: null,
+    effort: null,
     speed: null,
     access: "auto",
   });
@@ -3269,6 +3274,7 @@ test("pairBridge stores the origin-checked local token", async () => {
   let captured;
   const stored = [];
   const result = await pairBridge({
+    code: "ABCDEF-123456",
     fetchImpl: async (url, init) => {
       captured = { url, init };
       return new Response(
@@ -3286,11 +3292,140 @@ test("pairBridge stores the origin-checked local token", async () => {
 
   assert.equal(captured.url, "http://127.0.0.1:47321/pair");
   assert.equal(captured.init.method, "POST");
-  assert.deepEqual(JSON.parse(captured.init.body), { graph: "maskys" });
+  assert.deepEqual(JSON.parse(captured.init.body), {
+    graph: "maskys",
+    code: "ABCDEF-123456",
+  });
   assert.deepEqual(stored, [
-    ["roam-codex-lab.bridge-token", "paired-token"],
+    ["roam-codex-lab.bridge-token.maskys", "paired-token"],
   ]);
   assert.equal(result.graph, "maskys");
+});
+
+test("bridge configuration is loopback-only and graph-scoped", async (t) => {
+  t.after(() => configureExtension({
+    api: { graph: { name: "maskys" } },
+    settings: { get: () => null },
+  }));
+  assert.equal(
+    normalizeBridgeUrl("http://127.0.0.1:48123/"),
+    "http://127.0.0.1:48123",
+  );
+  for (const invalid of [
+    "https://127.0.0.1:48123",
+    "http://localhost:48123",
+    "http://0.0.0.0:48123",
+    "http://127.0.0.1:48123/path",
+    "http://127.0.0.1",
+  ]) {
+    assert.throws(() => normalizeBridgeUrl(invalid), /127\.0\.0\.1|loopback/);
+  }
+  assert.equal(chatStateKey("Graph One"), "roam-codex-lab.chat-state.v2.Graph%20One");
+  assert.notEqual(chatStateKey("Graph One"), chatStateKey("Graph Two"));
+
+  configureExtension({
+    api: { graph: { name: "Graph Two" } },
+    settings: {
+      get: (key) => ({
+        "bridge-url": "http://127.0.0.1:48123",
+        "default-access": "manual",
+        "default-model": "gpt-test",
+      })[key] ?? null,
+    },
+  });
+  let captured;
+  await requestProbe("abcdefghi", {
+    token: "local-token",
+    fetchImpl: async (url, init) => {
+      captured = { url, init };
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  assert.equal(captured.url, "http://127.0.0.1:48123/probe");
+  assert.deepEqual(JSON.parse(captured.init.body), {
+    graph: "Graph Two",
+    blockUid: "abcdefghi",
+  });
+  assert.equal(captured.init.headers["x-roam-graph"], "Graph%20Two");
+
+  configureExtension({
+    api: { graph: { name: "研究 🧠" } },
+    settings: { get: () => null },
+  });
+  await requestProbe("abcdefghi", {
+    token: "local-token",
+    fetchImpl: async (_url, init) => {
+      captured = { init };
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  assert.equal(
+    captured.init.headers["x-roam-graph"],
+    encodeURIComponent("研究 🧠"),
+  );
+});
+
+test("native settings expose safe defaults and respect read-only installs", async () => {
+  let panel;
+  await installSettingsPanel({
+    settings: {
+      canSet: false,
+      panel: {
+        create: async (config) => {
+          panel = config;
+        },
+      },
+    },
+  });
+  assert.equal(panel.tabTitle, "Roam Codex");
+  assert.deepEqual(
+    panel.settings.map((setting) => setting.id),
+    ["bridge-url", "default-access", "default-model"],
+  );
+  assert.ok(panel.settings.every((setting) =>
+    setting.description.includes("only be changed by an admin")
+  ));
+});
+
+test("configured defaults seed only new conversation preferences", () => {
+  assert.deepEqual(readChatState({
+    storage: { getItem: () => null },
+    defaultAccess: "manual",
+    defaultModel: "gpt-test",
+  }).newConversationPreferences, {
+    model: "gpt-test",
+    effort: null,
+    speed: null,
+    access: "manual",
+  });
+
+  const persisted = {
+    version: 2,
+    activeThreadId: "thread_existing",
+    newConversationPreferences: {},
+    conversations: {
+      thread_existing: {
+        threadId: "thread_existing",
+        model: "gpt-existing",
+        effort: "high",
+        access: "read-only",
+      },
+    },
+  };
+  const state = readChatState({
+    storage: { getItem: () => JSON.stringify(persisted) },
+    defaultAccess: "manual",
+    defaultModel: "gpt-new-default",
+  });
+  assert.equal(state.conversations.thread_existing.model, "gpt-existing");
+  assert.equal(state.conversations.thread_existing.effort, "high");
+  assert.equal(state.conversations.thread_existing.access, "read-only");
 });
 
 test("requestProbe sends the fixed graph, UID, and bearer token", async () => {
@@ -3729,7 +3864,7 @@ test("workOnBlock treats an interrupted turn as a neutral stopped outcome", asyn
 test("extension startup removes only recorded stale running blocks", async () => {
   const values = new Map([
     [
-      "roam-codex-lab.running-status-uids",
+      "roam-codex-lab.running-status-uids.maskys",
       JSON.stringify(["stale-1", "stale-2"]),
     ],
   ]);

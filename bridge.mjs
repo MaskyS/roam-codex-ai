@@ -8,7 +8,7 @@ import {
 } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
-import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { EventEmitter } from "node:events";
@@ -17,15 +17,19 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 export const RUNTIME_HOME = resolve(homedir(), ".roam-better-ai");
-const DEFAULT_GRAPH = "maskys";
 
 export function runtimeCwdForGraph(graph) {
-  const encoded = encodeURIComponent(String(graph || "graph"));
-  const safe = encoded === "." || encoded === ".." ? `_${encoded}` : encoded;
+  const exact = String(graph || "graph");
+  const safe = /^[a-z0-9][a-z0-9._-]{0,79}$/.test(exact)
+    ? exact
+    : `${exact.toLowerCase().replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "").slice(0, 40) || "graph"}-${
+      createHash("sha256").update(exact).digest("base64url").slice(0, 16)
+    }`;
   return resolve(RUNTIME_HOME, "graphs", safe);
 }
 
-export const DEFAULT_RUNTIME_CWD = runtimeCwdForGraph(DEFAULT_GRAPH);
+export const DEFAULT_RUNTIME_CWD = runtimeCwdForGraph("unconfigured");
 const DEFAULT_CODEX_HOME = resolve(
   process.env.CODEX_HOME || resolve(homedir(), ".codex"),
 );
@@ -43,6 +47,8 @@ const MAX_BODY_BYTES = 16 * 1024;
 const MAX_PROGRESS_TEXT_LENGTH = 240;
 const MAX_CHAT_MESSAGE_LENGTH = 8_000;
 const MAX_THREAD_SUMMARY_IDS = 100;
+const PAIRING_CODE_TTL_MS = 5 * 60_000;
+const PAIRING_CODE_MAX_ATTEMPTS = 5;
 const THREAD_ID_PATTERN = /^[A-Za-z0-9_-]{8,128}$/;
 const CHAT_ACCESS_MODES = new Set(["auto", "read-only", "manual"]);
 const RUNTIME_READ_ROAM_TOOLS = [
@@ -842,7 +848,7 @@ export class AppServerClient extends EventEmitter {
 
   async runChat({
     message,
-    graph = DEFAULT_GRAPH,
+    graph,
     promptBlockUid,
     threadId: requestedThreadId = null,
     model = null,
@@ -1097,7 +1103,7 @@ export class AppServerClient extends EventEmitter {
   }
 
   async runProbe({
-    graph = DEFAULT_GRAPH,
+    graph,
     blockUid,
     onProgress = () => {},
     onStarted = () => {},
@@ -1470,6 +1476,40 @@ function isPairingOrigin(origin) {
   return Boolean(origin) && isAllowedOrigin(origin);
 }
 
+function secureStringMatches(received, expected) {
+  const receivedBytes = Buffer.from(String(received));
+  const expectedBytes = Buffer.from(String(expected));
+  return receivedBytes.length === expectedBytes.length &&
+    timingSafeEqual(receivedBytes, expectedBytes);
+}
+
+export function createPairingSession({
+  code = `${randomBytes(3).toString("hex")}-${randomBytes(3).toString("hex")}`
+    .toUpperCase(),
+  now = Date.now,
+  ttlMs = PAIRING_CODE_TTL_MS,
+  maxAttempts = PAIRING_CODE_MAX_ATTEMPTS,
+} = {}) {
+  const pairingCode = String(code).trim().toUpperCase();
+  const expiresAt = now() + ttlMs;
+  let attemptsRemaining = maxAttempts;
+  let consumed = false;
+  return {
+    code: pairingCode,
+    expiresAt,
+    verify(value) {
+      if (consumed || attemptsRemaining <= 0 || now() >= expiresAt) return false;
+      const matches = secureStringMatches(
+        String(value || "").trim().toUpperCase(),
+        pairingCode,
+      );
+      attemptsRemaining -= 1;
+      if (matches) consumed = true;
+      return matches;
+    },
+  };
+}
+
 function bearerMatches(header, token) {
   if (!header?.startsWith("Bearer ")) return false;
   const received = Buffer.from(header.slice("Bearer ".length));
@@ -1545,11 +1585,15 @@ export function createTraceWriter(
 
 export function createBridgeServer({
   token,
-  graph = DEFAULT_GRAPH,
+  graph,
+  pairing = createPairingSession(),
   client = new AppServerClient(),
   trace = createTraceWriter(),
 } = {}) {
   if (!token) throw new Error("A bridge bearer token is required.");
+  if (typeof graph !== "string" || !graph.trim()) {
+    throw new Error("A bridge graph is required.");
+  }
   const activeRunsByBlockUid = new Map();
   const activeRunsByThreadId = new Map();
   const activeRunsById = new Map();
@@ -1577,7 +1621,8 @@ export function createBridgeServer({
       const headers = {
         "access-control-allow-origin": origin || "https://roamresearch.com",
         "access-control-allow-methods": "GET, POST, OPTIONS",
-        "access-control-allow-headers": "authorization, content-type",
+        "access-control-allow-headers":
+          "authorization, content-type, x-roam-graph",
         "access-control-max-age": "600",
         vary: "Origin",
       };
@@ -1588,6 +1633,30 @@ export function createBridgeServer({
       }
       response.writeHead(204, headers);
       response.end();
+      return;
+    }
+
+    let requestedGraph = null;
+    try {
+      requestedGraph = request.headers["x-roam-graph"]
+        ? decodeURIComponent(request.headers["x-roam-graph"])
+        : null;
+    } catch {
+      sendJson(response, 400, { error: "Invalid Roam graph header." }, origin);
+      return;
+    }
+    if (requestedGraph && requestedGraph !== graph) {
+      sendJson(
+        response,
+        409,
+        {
+          error:
+            `This bridge serves graph "${graph}", but the request came from ` +
+            `graph "${requestedGraph}". Restart with ` +
+            `ROAM_GRAPH=${JSON.stringify(requestedGraph)}.`,
+        },
+        origin,
+      );
       return;
     }
 
@@ -1612,6 +1681,40 @@ export function createBridgeServer({
           403,
           { error: "Pairing requires an allowed Roam origin." },
           null,
+        );
+        return;
+      }
+      let body;
+      try {
+        body = await readJsonBody(request);
+      } catch (error) {
+        const status = error.code === "BODY_TOO_LARGE" ? 413 : 400;
+        sendJson(response, status, { error: error.message }, origin);
+        return;
+      }
+      if (body?.graph !== graph) {
+        sendJson(
+          response,
+          409,
+          {
+            error:
+              `This bridge serves graph "${graph}". Restart it with ` +
+              `ROAM_GRAPH=${JSON.stringify(body?.graph || "<active-graph>")}.`,
+          },
+          origin,
+        );
+        return;
+      }
+      if (!pairing.verify(body?.code)) {
+        sendJson(
+          response,
+          403,
+          {
+            error:
+              "Pairing code is invalid or unavailable. Restart the bridge " +
+              "to generate a new code.",
+          },
+          origin,
         );
         return;
       }
@@ -2271,9 +2374,16 @@ async function main() {
 
   const host = process.env.ROAM_CODEX_HOST || DEFAULT_HOST;
   const port = Number(process.env.ROAM_CODEX_PORT || DEFAULT_PORT);
-  const graph = process.env.ROAM_GRAPH || DEFAULT_GRAPH;
+  const graph = process.env.ROAM_GRAPH?.trim();
+  if (!graph) {
+    throw new Error(
+      "ROAM_GRAPH is required. Set it to the active graph name before " +
+      "starting the bridge.",
+    );
+  }
+  const pairing = createPairingSession();
   const client = new AppServerClient({ runtimeCwd: runtimeCwdForGraph(graph) });
-  const server = createBridgeServer({ token, graph, client });
+  const server = createBridgeServer({ token, graph, pairing, client });
 
   await new Promise((resolveListen, rejectListen) => {
     server.once("error", rejectListen);
@@ -2284,7 +2394,9 @@ async function main() {
     [
       `Roam Codex bridge listening on http://${host}:${port}`,
       `Graph: ${graph}`,
-      `Pairing token: npm run show-token`,
+      `Pairing code: ${pairing.code}`,
+      "Pairing code expires in 5 minutes and can be used once.",
+      "Bearer token diagnostics: npm run show-token",
       `Trace: ${resolve(ROOT, ".dev", "last-run.jsonl")}`,
       "",
     ].join("\n"),

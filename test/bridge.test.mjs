@@ -9,6 +9,7 @@ import {
   DEFAULT_RUNTIME_CWD,
   buildProbePrompt,
   createBridgeServer,
+  createPairingSession,
   createProgressNormalizer,
   isAllowedOrigin,
   parseAndValidatePlan,
@@ -24,17 +25,50 @@ test("runtime threads use a stable per-graph working directory", () => {
   assert.notEqual(DEFAULT_RUNTIME_CWD, process.cwd());
   assert.equal(
     DEFAULT_RUNTIME_CWD,
-    resolve(homedir(), ".roam-better-ai", "graphs", "maskys"),
+    resolve(homedir(), ".roam-better-ai", "graphs", "unconfigured"),
   );
-  assert.equal(
-    runtimeCwdForGraph("My Graph!"),
-    resolve(homedir(), ".roam-better-ai", "graphs", "My%20Graph!"),
-  );
-  assert.equal(
-    runtimeCwdForGraph(".."),
-    resolve(homedir(), ".roam-better-ai", "graphs", "_.."),
-  );
+  assert.match(runtimeCwdForGraph("My Graph!"), /\/my-graph-[A-Za-z0-9_-]{16}$/);
+  assert.match(runtimeCwdForGraph(".."), /\/graph-[A-Za-z0-9_-]{16}$/);
   assert.notEqual(runtimeCwdForGraph("a/b"), runtimeCwdForGraph("a?b"));
+  assert.notEqual(
+    runtimeCwdForGraph("Graph").toLowerCase(),
+    runtimeCwdForGraph("graph").toLowerCase(),
+  );
+  assert.ok(runtimeCwdForGraph("🧠".repeat(200)).split("/").at(-1).length < 100);
+});
+
+test("pairing codes expire, bound guesses, and succeed only once", () => {
+  let now = 1_000;
+  const oneTime = createPairingSession({
+    code: "ABCDEF-123456",
+    now: () => now,
+    ttlMs: 1_000,
+    maxAttempts: 2,
+  });
+  assert.equal(oneTime.verify("wrong"), false);
+  assert.equal(oneTime.verify("abcdef-123456"), true);
+  assert.equal(oneTime.verify("ABCDEF-123456"), false);
+
+  const exhausted = createPairingSession({
+    code: "PAIR-ME",
+    now: () => now,
+    ttlMs: 1_000,
+    maxAttempts: 2,
+  });
+  assert.equal(exhausted.verify("wrong-1"), false);
+  assert.equal(exhausted.verify("wrong-2"), false);
+  assert.equal(exhausted.verify("PAIR-ME"), false);
+
+  const restarted = createPairingSession({ code: "fresh-code" });
+  assert.equal(restarted.verify("fresh-code"), true);
+
+  const expired = createPairingSession({
+    code: "TOO-LATE",
+    now: () => now,
+    ttlMs: 1_000,
+  });
+  now = 2_000;
+  assert.equal(expired.verify("TOO-LATE"), false);
 });
 
 test("app-server process starts in the isolated runtime directory", async () => {
@@ -1271,6 +1305,7 @@ test("bridge enforces bearer auth and graph restriction", async (t) => {
   const server = createBridgeServer({
     token: "secret-token",
     graph: "maskys",
+    pairing: createPairingSession({ code: "ABCDEF-123456" }),
     client,
     trace: async (entry) => traceEntries.push(entry),
   });
@@ -1312,15 +1347,59 @@ test("bridge enforces bearer auth and graph restriction", async (t) => {
   });
   assert.equal(untrustedPair.status, 403);
 
+  const missingCode = await fetch(`${base}/pair`, {
+    method: "POST",
+    headers: {
+      origin: "https://roamresearch.com",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ graph: "maskys" }),
+  });
+  assert.equal(missingCode.status, 403);
+
+  const wrongPairGraph = await fetch(`${base}/pair`, {
+    method: "POST",
+    headers: {
+      origin: "https://roamresearch.com",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ graph: "other", code: "ABCDEF-123456" }),
+  });
+  assert.equal(wrongPairGraph.status, 409);
+
+  const incorrectCode = await fetch(`${base}/pair`, {
+    method: "POST",
+    headers: {
+      origin: "https://roamresearch.com",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ graph: "maskys", code: "wrong-code" }),
+  });
+  assert.equal(incorrectCode.status, 403);
+
   const pair = await fetch(`${base}/pair`, {
     method: "POST",
-    headers: { origin: "https://roamresearch.com" },
+    headers: {
+      origin: "https://roamresearch.com",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ graph: "maskys", code: "abcdef-123456" }),
   });
   assert.equal(pair.status, 200);
   assert.deepEqual(await pair.json(), {
     graph: "maskys",
     token: "secret-token",
   });
+
+  const replay = await fetch(`${base}/pair`, {
+    method: "POST",
+    headers: {
+      origin: "https://roamresearch.com",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ graph: "maskys", code: "ABCDEF-123456" }),
+  });
+  assert.equal(replay.status, 403);
 
   const wrongGraph = await fetch(`${base}/probe`, {
     method: "POST",
