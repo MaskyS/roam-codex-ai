@@ -47,8 +47,10 @@ npx roam-codex-bridge
 ```
 
 It checks that the Codex CLI is installed, then installs itself as a background
-service that starts at login and restarts itself if it ever stops. You do not
-need to keep the terminal open, and you never need to run it again.
+service that starts at login and restarts itself if it ever stops. The service
+runs from a private versioned copy under `~/.roam-better-ai/app/`, rather than
+depending on npm's temporary `npx` cache. You do not need to keep the terminal
+open, and you never need to run it again until you choose to update.
 
 If the Codex CLI is missing, the command tells you how to install it:
 
@@ -151,6 +153,9 @@ The active graph always comes from Roam and is not a setting.
   `localStorage`; it is not written to graph content or graph-synced settings.
 - Runtime files and Codex threads use a graph-specific directory under
   `~/.roam-better-ai/graphs/`.
+- The background service executable is copied to a private versioned directory
+  under `~/.roam-better-ai/app/`; uninstall removes that copy while preserving
+  configuration and logs.
 - Roam MCP uses the active graph connection in the user's
   `~/.roam-tools.json`.
 - The runtime receives only the explicit Roam tool allowlist and optional MCP

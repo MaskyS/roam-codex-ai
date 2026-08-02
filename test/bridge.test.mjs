@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter, once } from "node:events";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { PassThrough } from "node:stream";
@@ -22,6 +22,67 @@ import {
   turnFailureError,
   validateRuntimeInstructionSources,
 } from "../bridge.mjs";
+import {
+  SERVICE_RUNTIME_FILES,
+  installServiceRuntime,
+  plistXml,
+} from "../bin.mjs";
+
+test("the LaunchAgent runs a private stable copy instead of the npx cache", async (t) => {
+  const root = resolve(
+    tmpdir(),
+    `roam-better-ai-service-install-${process.pid}-${Date.now()}`,
+  );
+  const sourceRoot = resolve(root, ".npm", "_npx", "cache", "package");
+  const runtimeHome = resolve(root, ".roam-better-ai");
+  await mkdir(sourceRoot, { recursive: true });
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  for (const filename of SERVICE_RUNTIME_FILES) {
+    await writeFile(resolve(sourceRoot, filename), `fixture:${filename}\n`);
+  }
+
+  const installed = await installServiceRuntime({
+    sourceRoot,
+    runtimeHome,
+    version: "9.8.7",
+  });
+  assert.equal(
+    installed.installPath,
+    resolve(runtimeHome, "app", "9.8.7"),
+  );
+  assert.equal(
+    installed.servicePath,
+    resolve(runtimeHome, "app", "9.8.7", "bin.mjs"),
+  );
+  assert.doesNotMatch(installed.servicePath, /\.npm\/_npx/);
+  for (const filename of SERVICE_RUNTIME_FILES) {
+    assert.equal(
+      await readFile(resolve(installed.installPath, filename), "utf8"),
+      `fixture:${filename}\n`,
+    );
+  }
+  assert.equal(
+    (await stat(resolve(installed.installPath, "bin.mjs"))).mode & 0o777,
+    0o700,
+  );
+  assert.equal(
+    (await stat(resolve(installed.installPath, "bridge.mjs"))).mode & 0o777,
+    0o600,
+  );
+
+  const plist = plistXml({
+    nodeBin: "/stable/node",
+    servicePath: installed.servicePath,
+    pathValue: "/stable/bin:/usr/bin",
+  });
+  assert.match(plist, /<string>\/stable\/node<\/string>/);
+  assert.match(
+    plist,
+    /<string>.*\.roam-better-ai\/app\/9\.8\.7\/bin\.mjs<\/string>/,
+  );
+  assert.doesNotMatch(plist, /\.npm\/_npx/);
+});
 
 test("runtime threads use a stable per-graph working directory", () => {
   assert.notEqual(DEFAULT_RUNTIME_CWD, process.cwd());

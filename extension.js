@@ -2518,6 +2518,7 @@ export function createChatPanel({
     "div",
     "roam-codex-chat-transcript-wrap",
   );
+  transcriptWrap.hidden = true;
   const transcript = createPanelElement(doc, "div", "roam-codex-chat-transcript");
   transcript.setAttribute("role", "log");
   transcript.setAttribute("aria-live", "polite");
@@ -2581,7 +2582,7 @@ export function createChatPanel({
   transcriptHandle.setAttribute("role", "separator");
   transcriptHandle.setAttribute("aria-orientation", "horizontal");
   transcriptHandle.setAttribute("aria-label", "Resize the conversation area");
-  transcriptHandle.hidden = false;
+  transcriptHandle.hidden = true;
   body.appendChild(transcriptHandle);
 
   const progress = createPanelElement(doc, "div", "roam-codex-chat-progress");
@@ -2617,8 +2618,11 @@ export function createChatPanel({
 
   const syncTranscriptStatus = ({ scroll = false } = {}) => {
     if (progress.parentNode !== transcript) transcript.appendChild(progress);
-    transcript.hidden = !messages.length && progress.hidden &&
-      approvalCards.size === 0;
+    const hasTranscriptContent = messages.length > 0 || !progress.hidden ||
+      approvalCards.size > 0;
+    transcript.hidden = !hasTranscriptContent;
+    transcriptWrap.hidden = !hasTranscriptContent;
+    transcriptHandle.hidden = !hasTranscriptContent;
     if (scroll && !progress.hidden) {
       transcript.scrollTop = transcript.scrollHeight;
       updateScrollLatestButton();
@@ -2932,7 +2936,6 @@ export function createChatPanel({
     disposeRenderedMessages();
     const renderVersion = messageRenderVersion;
     transcript.replaceChildren();
-    transcriptHandle.hidden = false;
     if (!messages.length) {
       transcript.appendChild(approvalContainer);
       transcript.appendChild(progress);
@@ -4243,7 +4246,10 @@ export function createChatPanel({
       })
       .catch((error) => {
         if (closed) return;
-        if (!["NOT_PAIRED", "BRIDGE_UNREACHABLE"].includes(error.code)) {
+        const connectionSetupFailure =
+          ["NOT_PAIRED", "BRIDGE_UNREACHABLE"].includes(error.code) ||
+          [401, 409].includes(error.status);
+        if (!connectionSetupFailure) {
           pickerButton.textContent = "Models unavailable";
           setProgress(error.message, "error");
         }
