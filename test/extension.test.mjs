@@ -21,7 +21,6 @@ globalThis.window = {
 const {
   CHAT_COMPOSER_PLACEHOLDER,
   RUNNING_BLOCK_TEXT,
-  applyRunPlan,
   buildConversationHistory,
   cleanupStaleChatUi,
   clearScratchPromptBlock,
@@ -38,6 +37,7 @@ const {
   openPromptBlockInSidebar,
   pairBridge,
   readChatState,
+  readProbeStream,
   readGraphThreadIndex,
   readFocusedPromptBlock,
   readPromptOutlineUids,
@@ -2790,11 +2790,16 @@ test("an unpaired panel focuses the pairing input and keeps errors quiet", async
     (element) => element.className === "roam-codex-connection-card",
   );
   assert.equal(card.hidden, false);
-  const input = card.children.find(
-    (child) => child.className === "roam-codex-connection-input",
+  assert.equal(
+    card.children.some(
+      (child) => child.className === "roam-codex-connection-input",
+    ),
+    false,
   );
-  assert.ok(input);
-  assert.equal(input.focused, true);
+  const pairButton = card.children
+    .find((child) => child.className === "roam-codex-connection-actions")
+    ?.children.find((child) => child.textContent === "Pair");
+  assert.ok(pairButton);
   const progressText = elements.find(
     (element) => element.className === "roam-codex-chat-progress-text",
   );
@@ -2837,6 +2842,84 @@ test("Do this block without pairing opens the chat panel instead of a dead end",
   assert.equal(opened, 1);
   assert.equal(toasts.at(-1).intent, "warning");
   assert.match(toasts.at(-1).message, /Pair this device/);
+});
+
+test("a saved conversation on an unpaired device shows only the card", async () => {
+  const doc = createFakePanelDocument();
+  const notPaired = () => {
+    const error = new Error("This device isn't paired with the local Codex bridge yet.");
+    error.code = "NOT_PAIRED";
+    throw error;
+  };
+  const values = new Map([[
+    chatStateKey("maskys"),
+    JSON.stringify({
+      version: 2,
+      activeThreadId: "thread_saved_123",
+      newConversationPreferences: {
+        model: null,
+        effort: null,
+        speed: null,
+        access: "auto",
+      },
+      enabledMcpServers: [],
+      conversations: {
+        thread_saved_123: {
+          threadId: "thread_saved_123",
+          createdAt: 10,
+          updatedAt: 20,
+          model: null,
+          effort: null,
+          speed: null,
+          access: "auto",
+          threadPageUid: null,
+          threadPageTitle: null,
+          originInstallationId: null,
+          lastSeenUpdatedAt: 0,
+          availability: "available",
+          pendingGraphIndex: false,
+        },
+      },
+    }),
+  ]]);
+  const controller = createChatPanel({
+    doc,
+    api: {},
+    storage: {
+      getItem: (key) => values.get(key) ?? null,
+      setItem: (key, value) => values.set(key, value),
+    },
+    rootBlockUid: "root123",
+    setIntervalImpl: () => 1,
+    clearIntervalImpl: () => {},
+    setTimeoutImpl: () => 1,
+    clearTimeoutImpl: () => {},
+    probeConnectionImpl: async () => ({ state: "unpaired", graph: "maskys" }),
+    requestModelsImpl: async () => notPaired(),
+    requestMessagesImpl: async () => notPaired(),
+    requestHistoryImpl: async () => notPaired(),
+    requestGraphIndexImpl: async () => notPaired(),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const elements = panelElements(controller);
+  const card = elements.find(
+    (element) => element.className === "roam-codex-connection-card",
+  );
+  assert.equal(card.hidden, false);
+  const progressText = elements.find(
+    (element) => element.className === "roam-codex-chat-progress-text",
+  );
+  assert.equal(progressText.textContent || "", "");
+  const historyErrors = elements.filter(
+    (element) => element.className === "roam-codex-chat-history-error",
+  );
+  assert.equal(
+    historyErrors.some((element) => (element.textContent || "").includes("paired")),
+    false,
+  );
+  await controller.close();
 });
 
 test("the connection card explains failures and clears once connected", async () => {
@@ -3868,6 +3951,37 @@ test("requestRunCancellation calls the authenticated run endpoint", async () => 
   assert.equal(result.status, "interrupting");
 });
 
+test("a streamed error keeps its Codex classification for the panel", async () => {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(
+        encoder.encode(
+          '{"type":"started","runId":"run-1"}\n' +
+            '{"type":"error","error":"Codex turn did not complete: usage limit hit.",' +
+            '"codexErrorInfo":"usageLimitExceeded",' +
+            '"additionalDetails":"Your limit resets at 9pm.",' +
+            '"httpStatusCode":429}\n',
+        ),
+      );
+      controller.close();
+    },
+  });
+
+  await assert.rejects(
+    () => readProbeStream(
+      new Response(stream, {
+        status: 200,
+        headers: { "content-type": "application/x-ndjson" },
+      }),
+    ),
+    (error) =>
+      error.codexErrorInfo === "usageLimitExceeded" &&
+      error.additionalDetails === "Your limit resets at 9pm." &&
+      error.httpStatusCode === 429,
+  );
+});
+
 test("requestRunSteer posts the message to the authenticated steer endpoint", async () => {
   let captured;
   const result = await requestRunSteer(
@@ -3989,205 +4103,60 @@ test("requestRunApproval answers the authenticated pending approval endpoint", a
   assert.deepEqual(result, { ok: true });
 });
 
-test("applyRunPlan appends edits and puts linked sources in targeted comments", async () => {
-  const generatedUids = ["created-1", "created-2"];
-  const creates = [];
-  const comments = [];
-  const api = {
-    util: {
-      generateUID: () => generatedUids.shift(),
-    },
-    data: {
-      block: {
-        create: async (input) => creates.push(input),
-        addComment: async (input) => {
-          comments.push(input);
-          return {
-            uids: [`reply-${comments.length}`],
-            parentUid: "comments-uid",
-          };
-        },
-      },
-    },
-  };
-
-  const result = await applyRunPlan(
-    "source-uid",
-    {
-      outcome: "applied",
-      research: "completed",
-      edits: [
-        { id: "b1", parent: "source", text: "First result" },
-        { id: "b2", parent: "b1", text: "Nested result" },
-      ],
-      comments: [
-        { target: "source", kind: "note", text: "Source note" },
-        { target: "b2", kind: "question", text: "Which date?" },
-      ],
-      sources: [
-        {
-          target: "b2",
-          title: "Official ] guide",
-          url: "https://authority.example/guide(one)",
-          supports: "The current deadline.",
-        },
-      ],
-    },
-    { api },
-  );
-
-  assert.deepEqual(result, {
-    outcome: "applied",
-    research: "completed",
-    createdUids: ["created-1", "created-2"],
-    sourceCommentUids: ["reply-1"],
-    commentUids: ["reply-1", "reply-2", "reply-3"],
-  });
-  assert.deepEqual(creates, [
-    {
-      location: { "parent-uid": "source-uid", order: "last" },
-      block: { uid: "created-1", string: "First result" },
-    },
-    {
-      location: { "parent-uid": "created-1", order: "last" },
-      block: { uid: "created-2", string: "Nested result" },
-    },
-  ]);
-  assert.deepEqual(comments, [
-    {
-      "block-uid": "created-2",
-      "reply-markdown":
-        "- **Codex** — Sources\n  - [Official \\] guide](https://authority.example/guide%28one%29) — The current deadline.",
-      "open-comment": false,
-    },
-    {
-      "block-uid": "source-uid",
-      "reply-string": "**Codex** — Source note",
-      "open-comment": false,
-    },
-    {
-      "block-uid": "created-2",
-      "reply-string": "**Codex** — Which date?",
-      "open-comment": true,
-    },
-  ]);
-});
-
-test("applyRunPlan opens the first source comment when there is no conversation", async () => {
-  const comments = [];
-  const api = {
-    util: { generateUID: () => "created-1" },
-    data: {
-      block: {
-        create: async () => {},
-        addComment: async (input) => {
-          comments.push(input);
-          return { uids: ["source-reply"], parentUid: "comments-uid" };
-        },
-      },
-    },
-  };
-
-  const result = await applyRunPlan(
-    "source-uid",
-    {
-      outcome: "applied",
-      research: "completed",
-      edits: [{ id: "b1", parent: "source", text: "Current result" }],
-      comments: [],
-      sources: [
-        {
-          target: "b1",
-          title: "Official guide",
-          url: "https://authority.example/guide",
-          supports: "The current result.",
-        },
-      ],
-    },
-    { api },
-  );
-
-  assert.deepEqual(result.sourceCommentUids, ["source-reply"]);
-  assert.equal(comments[0]["open-comment"], true);
-});
-
-test("workOnBlock creates the status first and deletes it after applying edits", async () => {
+test("workOnBlock shows the running status and reports what Codex changed", async () => {
   const values = new Map();
   const storage = {
     getItem: (key) => values.get(key) ?? null,
     setItem: (key, value) => values.set(key, value),
     removeItem: (key) => values.delete(key),
   };
-  const generatedUids = ["status-uid", "edit-uid"];
-  const events = [];
+  const created = [];
+  const deleted = [];
+  const toasts = [];
+  const progressUpdates = [];
   const api = {
-    util: { generateUID: () => generatedUids.shift() },
+    util: { generateUID: () => "status-uid" },
     data: {
       block: {
-        create: async (input) => events.push(["create", input]),
-        delete: async (input) => events.push(["delete", input]),
-        addComment: async () => ({ uids: [] }),
+        create: async (input) => created.push(input),
+        delete: async (input) => deleted.push(input),
       },
     },
   };
-  const notifications = [];
 
-  const result = await workOnBlock("source-uid", {
+  const result = await workOnBlock("block1234", {
     api,
     storage,
-    startPresentation: (statusUid) => {
-      events.push(["presentation-start", statusUid]);
-      const stop = () => events.push(["presentation-stop", statusUid]);
-      stop.update = (progress) =>
-        events.push(["presentation-update", progress.text]);
+    request: async (blockUid, { onProgress, onStarted }) => {
+      assert.equal(blockUid, "block1234");
+      onStarted({ runId: "12345678-1234-1234-1234-123456789abc" });
+      onProgress({ kind: "activity", text: "Reading the selected block" });
+      return { reply: "Added a ferry-versus-flight comparison." };
+    },
+    notifyImpl: (message, intent) => toasts.push({ message, intent }),
+    startPresentation: () => {
+      const stop = () => {};
+      stop.update = (progress) => progressUpdates.push(progress);
+      stop.setCancelHandler = () => {};
       return stop;
     },
-    request: async (_blockUid, { onProgress }) => {
-      events.push(["request"]);
-      onProgress({ kind: "summary", text: "Reading graph context" });
-      return {
-        plan: {
-          outcome: "applied",
-          research: "not_needed",
-          edits: [{ id: "b1", parent: "source", text: "Direct result" }],
-          comments: [],
-          sources: [],
-        },
-      };
-    },
-    notifyImpl: (...args) => notifications.push(args),
   });
 
-  assert.equal(events[0][0], "create");
-  assert.deepEqual(events[0][1], {
-    location: { "parent-uid": "source-uid", order: "last" },
-    block: { uid: "status-uid", string: RUNNING_BLOCK_TEXT },
+  assert.deepEqual(result, {
+    outcome: "completed",
+    reply: "Added a ferry-versus-flight comparison.",
   });
-  assert.deepEqual(events[1], ["presentation-start", "status-uid"]);
-  assert.equal(events[2][0], "request");
-  assert.deepEqual(events[3], [
-    "presentation-update",
-    "Reading graph context",
-  ]);
-  assert.deepEqual(events[4], [
-    "create",
-    {
-      location: { "parent-uid": "source-uid", order: "last" },
-      block: { uid: "edit-uid", string: "Direct result" },
-    },
-  ]);
-  assert.deepEqual(events[5], ["presentation-stop", "status-uid"]);
-  assert.deepEqual(events[6], [
-    "delete",
-    { block: { uid: "status-uid" } },
-  ]);
-  assert.equal(values.size, 0);
-  assert.equal(result.outcome, "applied");
-  assert.equal(result.research, "not_needed");
-  assert.deepEqual(result.sourceCommentUids, []);
-  assert.deepEqual(notifications, [
-    ["Codex updated the outline.", "success"],
-  ]);
+  assert.equal(created.length, 1);
+  assert.equal(created[0].block.string, RUNNING_BLOCK_TEXT);
+  assert.deepEqual(deleted, [{ block: { uid: "status-uid" } }]);
+  assert.deepEqual(progressUpdates, [{
+    kind: "activity",
+    text: "Reading the selected block",
+  }]);
+  assert.deepEqual(toasts, [{
+    message: "Added a ferry-versus-flight comparison.",
+    intent: "success",
+  }]);
 });
 
 test("workOnBlock removes the running status when the bridge fails", async () => {

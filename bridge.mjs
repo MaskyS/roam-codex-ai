@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import {
   appendFile,
   chmod,
@@ -14,6 +14,7 @@ import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { EventEmitter } from "node:events";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 export const RUNTIME_HOME = resolve(homedir(), ".roam-better-ai");
@@ -30,6 +31,102 @@ export function runtimeCwdForGraph(graph) {
 }
 
 export const DEFAULT_RUNTIME_CWD = runtimeCwdForGraph("unconfigured");
+export const BRIDGE_CONFIG_PATH = resolve(RUNTIME_HOME, "config.json");
+export const PAIRING_CODE_PATH = resolve(RUNTIME_HOME, "pairing-code");
+const execFileAsync = promisify(execFile);
+
+export async function readBridgeConfig(path = BRIDGE_CONFIG_PATH) {
+  try {
+    const parsed = JSON.parse(await readFile(path, "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+export async function writeBridgeConfig(config, path = BRIDGE_CONFIG_PATH) {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await writeFile(path, `${JSON.stringify(config, null, 2)}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+}
+
+export function validPairingGraphName(value) {
+  return typeof value === "string" &&
+    value.trim().length > 0 &&
+    value.length <= 200 &&
+    !/[\u0000-\u001f]/.test(value);
+}
+
+export async function ensureRuntimeGraphAccess({
+  graph,
+  home = homedir(),
+  execFileImpl = execFileAsync,
+} = {}) {
+  try {
+    const store = JSON.parse(
+      await readFile(resolve(home, ".roam-tools.json"), "utf8"),
+    );
+    const graphs = Array.isArray(store?.graphs) ? store.graphs : [];
+    if (graphs.some((entry) => entry?.nickname === graph || entry?.name === graph)) {
+      return { connected: true, alreadyConnected: true };
+    }
+  } catch {
+    // No store yet: fall through to the connect attempt.
+  }
+
+  try {
+    await execFileImpl(
+      "npx",
+      [
+        "-y",
+        "@roam-research/roam-mcp",
+        "connect",
+        "--graph",
+        graph,
+        "--nickname",
+        graph,
+        "--access-level",
+        "full",
+      ],
+      { timeout: 120_000 },
+    );
+    return { connected: true, alreadyConnected: false };
+  } catch (error) {
+    return { connected: false, error: error?.message || "connect failed" };
+  }
+}
+
+export async function requestPairingConsent({
+  graph,
+  platform = process.platform,
+  execFileImpl = execFileAsync,
+} = {}) {
+  if (platform !== "darwin") return { supported: false };
+  const message =
+    `Roam graph ${JSON.stringify(graph)} wants to use your local Codex bridge.`;
+  const script =
+    `display dialog ${JSON.stringify(message)} ` +
+    'with title "Roam Codex bridge" buttons {"Deny", "Allow"} ' +
+    'default button "Deny" cancel button "Deny" with icon caution ' +
+    "giving up after 60";
+  try {
+    const { stdout } = await execFileImpl("osascript", ["-e", script], {
+      timeout: 70_000,
+    });
+    const text = String(stdout);
+    return {
+      supported: true,
+      allowed: text.includes("button returned:Allow") &&
+        !text.includes("gave up:true"),
+    };
+  } catch (error) {
+    if (error?.code === "ENOENT") return { supported: false };
+    return { supported: true, allowed: false };
+  }
+}
+
 const DEFAULT_CODEX_HOME = resolve(
   process.env.CODEX_HOME || resolve(homedir(), ".codex"),
 );
@@ -110,6 +207,29 @@ export function scanConfigMcpServerNames(configToml) {
   return [...names].sort();
 }
 
+export function turnFailureError(turn) {
+  const info = turn?.error?.codexErrorInfo ?? null;
+  const kind = typeof info === "string"
+    ? info
+    : info && typeof info === "object"
+      ? Object.keys(info)[0] || null
+      : null;
+  const detail = info && typeof info === "object"
+    ? Object.values(info)[0] || null
+    : null;
+  const message = turn?.error?.message ||
+    `status ${turn?.status || "unknown"}`;
+  const error = new Error(`Codex turn did not complete: ${message}`);
+  if (kind) error.codexErrorInfo = kind;
+  if (detail && Number.isFinite(detail.httpStatusCode)) {
+    error.httpStatusCode = detail.httpStatusCode;
+  }
+  if (typeof turn?.error?.additionalDetails === "string") {
+    error.additionalDetails = turn.error.additionalDetails;
+  }
+  return error;
+}
+
 function missingThreadError(error) {
   return /not found|does not exist|no rollout/i.test(error?.message || "");
 }
@@ -129,10 +249,7 @@ function threadSummary(thread) {
   };
 }
 
-export function runtimeAppServerArgs({
-  roamHome = resolve(ROOT, ".dev", "roam-home"),
-  disableServers = [],
-} = {}) {
+export function runtimeAppServerArgs({ disableServers = [] } = {}) {
   const disabledServers = [...new Set(disableServers)]
     .filter((server) =>
       typeof server === "string" &&
@@ -159,8 +276,6 @@ export function runtimeAppServerArgs({
     'mcp_servers.roam.args=["--yes","@roam-research/roam-mcp"]',
     "-c",
     "mcp_servers.roam.enabled=true",
-    "-c",
-    `mcp_servers.roam.env={HOME=${JSON.stringify(roamHome)}}`,
     "-c",
     `mcp_servers.roam.enabled_tools=${JSON.stringify(RUNTIME_CHAT_ROAM_TOOLS)}`,
     ...(disabledServers.length
@@ -291,156 +406,20 @@ function chatAccessInstruction(accessMode) {
   return "Access mode: Auto. Carry out explicitly requested Roam changes with the available tools without asking for a separate confirmation.";
 }
 
-export const PLAN_SCHEMA = {
-  type: "object",
-  properties: {
-    outcome: {
-      type: "string",
-      enum: ["applied", "needs_input", "no_change"],
-    },
-    research: {
-      type: "string",
-      enum: ["completed", "not_needed", "unavailable"],
-    },
-    edits: {
-      type: "array",
-      items: {
-        type: "object",
-        properties: {
-          id: {
-            type: "string",
-            pattern: "^b[1-9][0-9]*$",
-          },
-          parent: {
-            type: "string",
-            minLength: 1,
-            maxLength: 20,
-          },
-          text: {
-            type: "string",
-            minLength: 1,
-            maxLength: 500,
-          },
-        },
-        required: ["id", "parent", "text"],
-        additionalProperties: false,
-      },
-      maxItems: 12,
-    },
-    comments: {
-      type: "array",
-      items: {
-        type: "object",
-        properties: {
-          target: {
-            type: "string",
-            minLength: 1,
-            maxLength: 20,
-          },
-          kind: {
-            type: "string",
-            enum: ["question", "note", "warning"],
-          },
-          text: {
-            type: "string",
-            minLength: 1,
-            maxLength: 500,
-          },
-        },
-        required: ["target", "kind", "text"],
-        additionalProperties: false,
-      },
-      maxItems: 4,
-    },
-    sources: {
-      type: "array",
-      items: {
-        type: "object",
-        properties: {
-          target: {
-            type: "string",
-            minLength: 1,
-            maxLength: 20,
-          },
-          title: {
-            type: "string",
-            minLength: 1,
-            maxLength: 200,
-          },
-          url: {
-            type: "string",
-            minLength: 1,
-            maxLength: 2048,
-          },
-          supports: {
-            type: "string",
-            minLength: 1,
-            maxLength: 300,
-          },
-        },
-        required: ["target", "title", "url", "supports"],
-        additionalProperties: false,
-      },
-      maxItems: 10,
-    },
-  },
-  required: ["outcome", "research", "edits", "comments", "sources"],
-  additionalProperties: false,
-};
-
-export function buildProbePrompt({ graph, blockUid }) {
+export function buildWorkPrompt({ graph, blockUid }) {
   return [
     `Work on Roam block UID "${blockUid}" in graph "${graph}".`,
-    `First call get_graph_guidelines for graph "${graph}", then call`,
-    "get_block for the target UID with one level of child context.",
-    "Call get_comments for the same target block and use its replies as",
-    "conversation context. Replies beginning with **Codex** — are earlier",
-    "assistant messages; other comments may be user follow-ups.",
-    "Use breadcrumb or parent context returned by the read tools when useful.",
+    "Read that block with its children and comments before doing anything.",
+    "Follow its page and block references as part of the instruction.",
     "Silently ignore the temporary child [[Codex/running]].",
-    "The user invoked an editing command, so return useful new outline blocks",
-    "rather than a proposal or a chat response. The extension may only append",
-    "new descendants beneath the invoked source block; it will not rewrite,",
-    "move, or delete existing blocks.",
-    'Use edit id "b1", "b2", and so on. Set each edit parent to "source"',
-    "or to the id of an earlier edit, producing a topologically ordered flat",
-    "list. Put only durable user content in edits: no run state, IDs,",
-    "interpretation labels, proposal wrappers, or Codex metadata.",
-    "Write concise, natural Roam content that is immediately useful. Treat",
-    "the main outline as the user's working surface and comments as its",
-    "supporting layer. Include contextual links where they genuinely improve",
-    "understanding or actionability. The outline should remain useful with",
-    "comments closed, but do not repeat supporting material merely to make it",
-    "self-contained.",
-    "Determine whether the requested work depends on current or external",
-    "facts. Real-world procedures, locations, requirements, prices, hours,",
-    "schedules, availability, laws, products, and public people require web",
-    "research. For those tasks, use live web search before planning edits,",
-    'set research to "completed", and provide direct source URLs.',
-    "Prefer official and primary sources. Cross-check material claims when",
-    "more than one authoritative source exists. Do not cite a search-results",
-    "page, an AI summary, or a source you did not actually inspect.",
-    'Set research to "not_needed" only for work fully answerable from the',
-    'graph context. If required research cannot be completed, set research',
-    'to "unavailable", outcome to "no_change", return no edits or sources,',
-    "and add a warning comment explaining what prevented verification.",
-    "Keep provenance, source lists, verification details, uncertainty, and",
-    "discussion in comments. Return source metadata through the sources array;",
-    "do not create Sources, Citations, or References blocks in edits.",
-    "Each source must target the most specific edit it supports, or source",
-    "when it supports the invoked block generally. Give it a descriptive",
-    "title, its direct http(s) URL, and a concise explanation of what it",
-    "supports. The extension renders each targeted source group as a native",
-    "Roam comment. Research marked completed requires at least one source.",
-    "Use comments for questions, caveats, explanations, or anything that",
-    "should not interrupt the user's outline. A comment target is either",
-    '"source" or any edit id. Attach it to the most specific relevant block.',
-    'If essential information is missing, return outcome "needs_input", no',
-    "edits, and at least one question comment. If useful edits can be made,",
-    'return outcome "applied"; optional non-blocking comments may accompany',
-    'them. If no edit is appropriate, return outcome "no_change", no edits,',
-    "and a concise explanatory comment.",
-    "Do not repeat earlier content. Do not perform writes.",
+    "The user invoked an editing command, so carry the work out in the graph",
+    "rather than describing it back. Write the durable result beneath the",
+    "invoked block, and put sources, caveats, and questions in native",
+    "comments on the block they support.",
+    "Use live web search when the task depends on current or external facts,",
+    "and cite direct source URLs in comments rather than in the outline.",
+    "Preserve the invoked block and every existing block around it.",
+    "Return a one-line summary of what you changed as the final reply.",
   ].join(" ");
 }
 
@@ -896,6 +875,9 @@ export class AppServerClient extends EventEmitter {
     graph,
     promptBlockUid,
     threadId: requestedThreadId = null,
+    instructions = RUNTIME_CHAT_INSTRUCTIONS,
+    ephemeral = false,
+    serviceName = "roam_codex_chat",
     model = null,
     effort = null,
     serviceTier,
@@ -968,7 +950,7 @@ export class AppServerClient extends EventEmitter {
         enabledServers: activeServers,
       }),
       developerInstructions: runtimeInstructions(
-        `${RUNTIME_CHAT_INSTRUCTIONS}\n\n${chatAccessInstruction(accessMode)}`,
+        `${instructions}\n\n${chatAccessInstruction(accessMode)}`,
         graph,
       ),
     };
@@ -981,7 +963,8 @@ export class AppServerClient extends EventEmitter {
         })
       : await this.request("thread/start", {
           ...threadOptions,
-          serviceName: "roam_codex_chat",
+          serviceName,
+          ...(ephemeral ? { ephemeral: true } : {}),
         });
     validateRuntimeInstructionSources(threadResult?.instructionSources, {
       codexHome: this.codexHome,
@@ -1098,9 +1081,7 @@ export class AppServerClient extends EventEmitter {
         throw rpcError("Codex turn was stopped.", "TURN_INTERRUPTED");
       }
       if (turn?.status !== "completed") {
-        const detail = turn?.error?.message ||
-          `status ${turn?.status || "unknown"}`;
-        throw new Error(`Codex turn did not complete: ${detail}`);
+        throw turnFailureError(turn);
       }
 
       const items = Array.isArray(turn.items) ? turn.items : [];
@@ -1147,366 +1128,28 @@ export class AppServerClient extends EventEmitter {
     child.kill("SIGTERM");
   }
 
-  async runProbe({
+  async runWork({
     graph,
     blockUid,
-    onProgress = () => {},
-    onStarted = () => {},
+    accessMode = "auto",
+    enabledServers = [],
+    ...rest
   }) {
-    await this.start();
-
-    const threadResult = await this.request("thread/start", {
-      cwd: this.runtimeCwd,
-      approvalPolicy: "never",
-      sandbox: "read-only",
-      config: runtimeThreadConfig(RUNTIME_READ_ROAM_TOOLS, {
-        knownServers: this.knownMcpServers || [],
-      }),
-      serviceName: "roam_codex_lab",
+    if (!/^[A-Za-z0-9_-]{6,64}$/.test(blockUid || "")) {
+      throw rpcError("A valid Roam block UID is required.", "BLOCK_UID_INVALID");
+    }
+    return this.runChat({
+      ...rest,
+      message: buildWorkPrompt({ graph, blockUid }),
+      graph,
+      promptBlockUid: blockUid,
+      threadId: null,
+      accessMode,
+      enabledServers,
+      instructions: RUNTIME_WORK_INSTRUCTIONS,
       ephemeral: true,
-      developerInstructions: runtimeInstructions(
-        RUNTIME_WORK_INSTRUCTIONS,
-        graph,
-      ),
+      serviceName: "roam_codex_work",
     });
-
-    validateRuntimeInstructionSources(threadResult?.instructionSources, {
-      codexHome: this.codexHome,
-    });
-
-    const threadId = threadResult?.thread?.id;
-    if (!threadId) {
-      throw new Error("App-server did not return a thread id.");
-    }
-
-    const prompt = buildProbePrompt({ graph, blockUid });
-
-    const buffered = [];
-    const completedAgentMessages = [];
-    const normalizeProgress = createProgressNormalizer(onProgress);
-    let turnId = null;
-    let completeTurn = null;
-    let resolveCompletion;
-    let rejectCompletion;
-
-    const completion = new Promise((resolveTurn, rejectTurn) => {
-      resolveCompletion = resolveTurn;
-      rejectCompletion = rejectTurn;
-    });
-    const rejectOnClientFailure = (error) => rejectCompletion(error);
-
-    const processNotification = ({ method, params }) => {
-      if (!turnId) {
-        buffered.push({ method, params });
-        return;
-      }
-      if (params.threadId && params.threadId !== threadId) return;
-      const notificationTurnId = params.turnId || params.turn?.id;
-      if (notificationTurnId && notificationTurnId !== turnId) return;
-
-      normalizeProgress({ method, params });
-
-      if (
-        method === "item/completed" &&
-        params.item?.type === "agentMessage" &&
-        typeof params.item.text === "string"
-      ) {
-        completedAgentMessages.push(params.item);
-      }
-
-      if (method === "turn/completed") {
-        completeTurn = params.turn;
-        resolveCompletion(params.turn);
-      }
-    };
-
-    this.on("notification", processNotification);
-    this.once("exit", rejectOnClientFailure);
-    this.once("protocolError", rejectOnClientFailure);
-
-    try {
-      const turnResult = await this.request("turn/start", {
-        threadId,
-        input: [{ type: "text", text: prompt }],
-        approvalPolicy: "never",
-        sandboxPolicy: { type: "readOnly", networkAccess: false },
-        summary: "concise",
-        outputSchema: PLAN_SCHEMA,
-      });
-      turnId = turnResult?.turn?.id;
-      if (!turnId) {
-        throw new Error("App-server did not return a turn id.");
-      }
-      await onStarted({ threadId, turnId });
-
-      const earlyNotifications = buffered.splice(0);
-      for (const notification of earlyNotifications) {
-        processNotification(notification);
-      }
-
-      const turn = completeTurn || (await completion);
-      if (turn?.status === "interrupted") {
-        throw rpcError("Codex turn was stopped.", "TURN_INTERRUPTED");
-      }
-      if (turn?.status !== "completed") {
-        const detail = turn?.error?.message || `status ${turn?.status || "unknown"}`;
-        throw new Error(`Codex turn did not complete: ${detail}`);
-      }
-
-      const items = Array.isArray(turn.items) ? turn.items : [];
-      const allAgentMessages = [
-        ...completedAgentMessages,
-        ...items.filter((item) => item?.type === "agentMessage"),
-      ];
-      const finalMessage =
-        [...allAgentMessages]
-          .reverse()
-          .find((item) => item.phase === "final_answer") ||
-        allAgentMessages.at(-1);
-
-      if (!finalMessage?.text) {
-        throw new Error("Codex completed without a final agent message.");
-      }
-
-      return {
-        threadId,
-        turnId,
-        plan: parseAndValidatePlan(finalMessage.text),
-      };
-    } finally {
-      this.off("notification", processNotification);
-      this.off("exit", rejectOnClientFailure);
-      this.off("protocolError", rejectOnClientFailure);
-      try {
-        await this.request("thread/unsubscribe", { threadId }, 5_000);
-      } catch {
-        // The turn result is authoritative; teardown is best-effort.
-      }
-    }
-  }
-}
-
-export function parseAndValidatePlan(text) {
-  const normalized = String(text)
-    .trim()
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/\s*```$/, "");
-
-  let value;
-  try {
-    value = JSON.parse(normalized);
-  } catch {
-    throw new Error("Codex returned invalid edit-plan JSON.");
-  }
-
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Codex edit plan must be a JSON object.");
-  }
-
-  assertExactKeys(
-    value,
-    ["outcome", "research", "edits", "comments", "sources"],
-    "edit plan",
-  );
-  if (!["applied", "needs_input", "no_change"].includes(value.outcome)) {
-    throw new Error("Codex edit-plan outcome is invalid.");
-  }
-  if (
-    !["completed", "not_needed", "unavailable"].includes(value.research)
-  ) {
-    throw new Error("Codex edit-plan research state is invalid.");
-  }
-  if (!Array.isArray(value.edits) || value.edits.length > 12) {
-    throw new Error("Codex edit plan must contain at most 12 edits.");
-  }
-  if (!Array.isArray(value.comments) || value.comments.length > 4) {
-    throw new Error("Codex edit plan must contain at most 4 comments.");
-  }
-  if (!Array.isArray(value.sources) || value.sources.length > 10) {
-    throw new Error("Codex edit plan must contain at most 10 sources.");
-  }
-
-  const knownTargets = new Set(["source"]);
-  const edits = value.edits.map((edit, index) => {
-    if (!edit || typeof edit !== "object" || Array.isArray(edit)) {
-      throw new Error(`Codex edit ${index + 1} must be an object.`);
-    }
-    assertExactKeys(edit, ["id", "parent", "text"], `edit ${index + 1}`);
-
-    const id = validateText(edit.id, `edits[${index}].id`, 20);
-    if (!/^b[1-9][0-9]*$/.test(id)) {
-      throw new Error(`Codex edit id "${id}" is invalid.`);
-    }
-    if (knownTargets.has(id)) {
-      throw new Error(`Codex edit id "${id}" is duplicated.`);
-    }
-
-    const parent = validateText(
-      edit.parent,
-      `edits[${index}].parent`,
-      20,
-    );
-    if (!knownTargets.has(parent)) {
-      throw new Error(
-        `Codex edit "${id}" must refer to "source" or an earlier edit.`,
-      );
-    }
-
-    const validated = {
-      id,
-      parent,
-      text: validateText(edit.text, `edits[${index}].text`, 500),
-    };
-    knownTargets.add(id);
-    return validated;
-  });
-
-  const comments = value.comments.map((comment, index) => {
-    if (!comment || typeof comment !== "object" || Array.isArray(comment)) {
-      throw new Error(`Codex comment ${index + 1} must be an object.`);
-    }
-    assertExactKeys(
-      comment,
-      ["target", "kind", "text"],
-      `comment ${index + 1}`,
-    );
-
-    const target = validateText(
-      comment.target,
-      `comments[${index}].target`,
-      20,
-    );
-    if (!knownTargets.has(target)) {
-      throw new Error(`Codex comment target "${target}" is invalid.`);
-    }
-    if (!["question", "note", "warning"].includes(comment.kind)) {
-      throw new Error(`Codex comment kind "${comment.kind}" is invalid.`);
-    }
-    return {
-      target,
-      kind: comment.kind,
-      text: validateText(comment.text, `comments[${index}].text`, 500),
-    };
-  });
-
-  const sources = value.sources.map((source, index) => {
-    if (!source || typeof source !== "object" || Array.isArray(source)) {
-      throw new Error(`Codex source ${index + 1} must be an object.`);
-    }
-    assertExactKeys(
-      source,
-      ["target", "title", "url", "supports"],
-      `source ${index + 1}`,
-    );
-
-    const target = validateText(
-      source.target,
-      `sources[${index}].target`,
-      20,
-    );
-    if (!knownTargets.has(target)) {
-      throw new Error(`Codex source target "${target}" is invalid.`);
-    }
-    return {
-      target,
-      title: validateText(source.title, `sources[${index}].title`, 200),
-      url: validateHttpUrl(source.url, `sources[${index}].url`),
-      supports: validateText(
-        source.supports,
-        `sources[${index}].supports`,
-        300,
-      ),
-    };
-  });
-
-  if (value.outcome === "applied" && edits.length === 0) {
-    throw new Error('An "applied" Codex plan must contain an edit.');
-  }
-  if (value.outcome !== "applied" && edits.length > 0) {
-    throw new Error(
-      `A "${value.outcome}" Codex plan cannot contain edits.`,
-    );
-  }
-  if (
-    value.outcome === "needs_input" &&
-    !comments.some((comment) => comment.kind === "question")
-  ) {
-    throw new Error(
-      'A "needs_input" Codex plan must contain a question comment.',
-    );
-  }
-  if (value.outcome === "no_change" && comments.length === 0) {
-    throw new Error(
-      'A "no_change" Codex plan must contain an explanatory comment.',
-    );
-  }
-  if (value.research === "completed" && sources.length === 0) {
-    throw new Error(
-      'A Codex plan with completed research must contain a source.',
-    );
-  }
-  if (value.research !== "completed" && sources.length > 0) {
-    throw new Error(
-      `A Codex plan with research "${value.research}" cannot contain sources.`,
-    );
-  }
-  if (
-    value.research === "unavailable" &&
-    (value.outcome !== "no_change" ||
-      edits.length > 0 ||
-      !comments.some((comment) => comment.kind === "warning"))
-  ) {
-    throw new Error(
-      "Unavailable research requires no changes and a warning comment.",
-    );
-  }
-
-  return {
-    outcome: value.outcome,
-    research: value.research,
-    edits,
-    comments,
-    sources,
-  };
-}
-
-function validateText(value, field, maxLength) {
-  if (typeof value !== "string" || !value.trim()) {
-    throw new Error(`Codex field "${field}" must be non-empty text.`);
-  }
-  const trimmed = value.trim();
-  if (trimmed.length > maxLength) {
-    throw new Error(`Codex field "${field}" is too long.`);
-  }
-  return trimmed;
-}
-
-function validateHttpUrl(value, field) {
-  const text = validateText(value, field, 2048);
-  let url;
-  try {
-    url = new URL(text);
-  } catch {
-    throw new Error(`Codex field "${field}" must be a valid URL.`);
-  }
-  if (
-    !["http:", "https:"].includes(url.protocol) ||
-    url.username ||
-    url.password
-  ) {
-    throw new Error(`Codex field "${field}" must be a public http(s) URL.`);
-  }
-  return url.href;
-}
-
-function assertExactKeys(value, keys, label) {
-  const expected = new Set(keys);
-  const unexpected = Object.keys(value).filter((key) => !expected.has(key));
-  const missing = keys.filter((key) => !Object.hasOwn(value, key));
-  if (unexpected.length || missing.length) {
-    throw new Error(
-      `Codex ${label} has missing or unexpected fields.`,
-    );
   }
 }
 
@@ -1630,15 +1273,43 @@ export function createTraceWriter(
 
 export function createBridgeServer({
   token,
-  graph,
-  pairing = createPairingSession(),
-  client = new AppServerClient(),
+  graph: initialGraph = null,
+  client: initialClient = null,
+  createClient = (boundGraph) =>
+    new AppServerClient({ runtimeCwd: runtimeCwdForGraph(boundGraph) }),
+  onBind = async () => {},
+  requestConsent = requestPairingConsent,
+  ensureGraphAccess = ensureRuntimeGraphAccess,
+  pairingCodePath = PAIRING_CODE_PATH,
   trace = createTraceWriter(),
 } = {}) {
   if (!token) throw new Error("A bridge bearer token is required.");
-  if (typeof graph !== "string" || !graph.trim()) {
-    throw new Error("A bridge graph is required.");
-  }
+  let graph = typeof initialGraph === "string" && initialGraph.trim()
+    ? initialGraph.trim()
+    : null;
+  let client = initialClient || (graph ? createClient(graph) : null);
+  let pairingSession = null;
+  let consentInFlight = false;
+
+  const bindGraph = async (nextGraph) => {
+    if (graph === nextGraph && client) return;
+    const previousClient = client;
+    graph = nextGraph;
+    client = createClient(nextGraph);
+    if (previousClient) {
+      void Promise.resolve(previousClient.stop()).catch(() => {});
+    }
+    await onBind(nextGraph);
+    void Promise.resolve(ensureGraphAccess({ graph: nextGraph }))
+      .then((result) => trace({
+        event: result.connected
+          ? "graph.access.ready"
+          : "graph.access.unavailable",
+        graph: nextGraph,
+        ...(result.alreadyConnected ? { alreadyConnected: true } : {}),
+      }))
+      .catch(() => {});
+  };
   const activeRunsByBlockUid = new Map();
   const activeRunsByThreadId = new Map();
   const activeRunsById = new Map();
@@ -1655,7 +1326,7 @@ export function createBridgeServer({
     return true;
   };
 
-  return createServer(async (request, response) => {
+  const server = createServer(async (request, response) => {
     const origin = request.headers.origin;
     if (!isAllowedOrigin(origin)) {
       sendJson(response, 403, { error: "Origin is not allowed." }, null);
@@ -1690,15 +1361,15 @@ export function createBridgeServer({
       sendJson(response, 400, { error: "Invalid Roam graph header." }, origin);
       return;
     }
-    if (requestedGraph && requestedGraph !== graph) {
+    if (graph && requestedGraph && requestedGraph !== graph) {
       sendJson(
         response,
         409,
         {
           error:
-            `This bridge serves graph "${graph}", but the request came from ` +
-            `graph "${requestedGraph}". Restart with ` +
-            `ROAM_GRAPH=${JSON.stringify(requestedGraph)}.`,
+            `This bridge is paired to graph "${graph}". ` +
+            "Pair this graph from the Roam panel to switch.",
+          code: "GRAPH_MISMATCH",
         },
         origin,
       );
@@ -1713,7 +1384,7 @@ export function createBridgeServer({
           ok: true,
           graph,
           version: BRIDGE_VERSION,
-          appServer: client.ready ? "ready" : "idle",
+          appServer: client?.ready ? "ready" : "idle",
         },
         origin,
       );
@@ -1738,33 +1409,93 @@ export function createBridgeServer({
         sendJson(response, status, { error: error.message }, origin);
         return;
       }
-      if (body?.graph !== graph) {
+      if (!validPairingGraphName(body?.graph)) {
+        sendJson(response, 400, { error: "A valid graph name is required." }, origin);
+        return;
+      }
+      const pairingGraph = body.graph.trim();
+
+      if (typeof body.code === "string" && body.code.trim()) {
+        if (!pairingSession?.verify(body.code)) {
+          sendJson(
+            response,
+            403,
+            {
+              error:
+                "That pairing code is invalid or expired. Click Pair again " +
+                "for a fresh one.",
+            },
+            origin,
+          );
+          return;
+        }
+        pairingSession = null;
+        await bindGraph(pairingGraph);
+        await trace({ event: "pair.bound", graph: pairingGraph, via: "code" });
+        sendJson(response, 200, { graph: pairingGraph, token }, origin);
+        return;
+      }
+
+      if (consentInFlight) {
         sendJson(
           response,
           409,
-          {
-            error:
-              `This bridge serves graph "${graph}". Restart it with ` +
-              `ROAM_GRAPH=${JSON.stringify(body?.graph || "<active-graph>")}.`,
-          },
+          { error: "A pairing request is already waiting for consent." },
           origin,
         );
         return;
       }
-      if (!pairing.verify(body?.code)) {
+      consentInFlight = true;
+      let consent;
+      try {
+        consent = await requestConsent({ graph: pairingGraph });
+      } finally {
+        consentInFlight = false;
+      }
+      if (!consent.supported) {
+        pairingSession = createPairingSession();
+        try {
+          await mkdir(dirname(pairingCodePath), {
+            recursive: true,
+            mode: 0o700,
+          });
+          await writeFile(pairingCodePath, `${pairingSession.code}\n`, {
+            encoding: "utf8",
+            mode: 0o600,
+          });
+        } catch {
+          // The code is still verifiable; only the on-disk copy failed.
+        }
+        sendJson(response, 200, { codeRequired: true }, origin);
+        return;
+      }
+      if (!consent.allowed) {
         sendJson(
           response,
           403,
-          {
-            error:
-              "Pairing code is invalid or unavailable. Restart the bridge " +
-              "to generate a new code.",
-          },
+          { error: "Pairing was declined on this computer." },
           origin,
         );
         return;
       }
-      sendJson(response, 200, { graph, token }, origin);
+      pairingSession = null;
+      await bindGraph(pairingGraph);
+      await trace({ event: "pair.bound", graph: pairingGraph, via: "dialog" });
+      sendJson(response, 200, { graph: pairingGraph, token }, origin);
+      return;
+    }
+
+    if (!client) {
+      sendJson(
+        response,
+        409,
+        {
+          error:
+            "The bridge isn't paired to a graph yet. Pair from the Roam panel.",
+          code: "NOT_BOUND",
+        },
+        origin,
+      );
       return;
     }
 
@@ -2208,12 +1939,23 @@ export function createBridgeServer({
           durationMs: Date.now() - startedAt,
           error: error.message,
           code: error.code,
+          codexErrorInfo: error.codexErrorInfo || null,
+          additionalDetails: error.additionalDetails || null,
         });
         writeNdjson(response, {
           type: "error",
           runId,
           error: error.message || "Chat failed.",
           code: error.code,
+          ...(error.codexErrorInfo
+            ? { codexErrorInfo: error.codexErrorInfo }
+            : {}),
+          ...(Number.isFinite(error.httpStatusCode)
+            ? { httpStatusCode: error.httpStatusCode }
+            : {}),
+          ...(error.additionalDetails
+            ? { additionalDetails: error.additionalDetails }
+            : {}),
         });
       } finally {
         for (const pendingApproval of activeRun.pendingApprovals.values()) {
@@ -2239,7 +1981,7 @@ export function createBridgeServer({
       }
       const run = activeRunsById.get(approvalMatch[1]);
       const pendingApproval = run?.pendingApprovals?.get(approvalMatch[2]);
-      if (!run || run.kind !== "chat" || !pendingApproval) {
+      if (!run || !pendingApproval) {
         sendJson(response, 404, { error: "That approval is no longer pending." }, origin);
         return;
       }
@@ -2452,11 +2194,16 @@ export function createBridgeServer({
       );
       return;
     }
+    const workAccessMode = body.accessMode || "auto";
+    if (!CHAT_ACCESS_MODES.has(workAccessMode)) {
+      sendJson(response, 400, { error: "Invalid accessMode." }, origin);
+      return;
+    }
     if (activeRunsByBlockUid.has(blockUid)) {
       sendJson(
         response,
         409,
-        { error: "A probe is already running for this block." },
+        { error: "Codex is already working on this block." },
         origin,
       );
       return;
@@ -2465,24 +2212,26 @@ export function createBridgeServer({
     const runId = randomUUID();
     const startedAt = Date.now();
     const activeRun = {
-      kind: "probe",
+      kind: "work",
       runId,
       blockUid,
       threadId: null,
       turnId: null,
       cancelRequested: false,
       interruptPromise: null,
+      pendingApprovals: new Map(),
     };
     activeRunsByBlockUid.set(blockUid, activeRun);
     activeRunsById.set(runId, activeRun);
-    await trace({ runId, event: "probe.started", graph, blockUid });
+    await trace({ runId, event: "work.started", graph, blockUid });
     startNdjson(response, origin);
     writeNdjson(response, { type: "started", runId });
 
     try {
-      const result = await client.runProbe({
+      const result = await client.runWork({
         graph,
         blockUid,
+        accessMode: workAccessMode,
         onProgress: (progress) => {
           writeNdjson(response, { type: "progress", ...progress });
         },
@@ -2491,6 +2240,31 @@ export function createBridgeServer({
           activeRun.turnId = turnId;
           if (activeRun.cancelRequested) await interruptRun(activeRun);
         },
+        onApproval: ({ itemId, questions }) => new Promise((resolveDecision) => {
+          if (response.destroyed || response.writableEnded) {
+            resolveDecision("reject");
+            return;
+          }
+          const approvalId = randomUUID();
+          activeRun.pendingApprovals.set(approvalId, {
+            resolve: resolveDecision,
+            itemId,
+          });
+          writeNdjson(response, {
+            type: "approval",
+            approvalId,
+            questions: Array.isArray(questions)
+              ? questions.map((question) => ({
+                  header: typeof question?.header === "string"
+                    ? question.header
+                    : "Roam change",
+                  question: typeof question?.question === "string"
+                    ? question.question
+                    : "Allow this Roam change?",
+                }))
+              : [],
+          });
+        }),
       });
       const payload = {
         runId,
@@ -2501,13 +2275,12 @@ export function createBridgeServer({
       };
       await trace({
         runId,
-        event: "probe.completed",
+        event: "work.completed",
         graph,
         blockUid,
         durationMs: payload.durationMs,
         threadId: result.threadId,
         turnId: result.turnId,
-        plan: result.plan,
       });
       writeNdjson(response, { type: "completed", result: payload });
     } catch (error) {
@@ -2515,26 +2288,43 @@ export function createBridgeServer({
         runId,
         event:
           error.code === "TURN_INTERRUPTED"
-            ? "probe.interrupted"
-            : "probe.failed",
+            ? "work.interrupted"
+            : "work.failed",
         graph,
         blockUid,
         durationMs: Date.now() - startedAt,
         error: error.message,
         code: error.code,
+        codexErrorInfo: error.codexErrorInfo || null,
+        additionalDetails: error.additionalDetails || null,
       });
       writeNdjson(response, {
         type: "error",
         runId,
-        error: error.message || "Probe failed.",
+        error: error.message || "The task could not be completed.",
         code: error.code,
+        ...(error.codexErrorInfo
+          ? { codexErrorInfo: error.codexErrorInfo }
+          : {}),
+        ...(Number.isFinite(error.httpStatusCode)
+          ? { httpStatusCode: error.httpStatusCode }
+          : {}),
+        ...(error.additionalDetails
+          ? { additionalDetails: error.additionalDetails }
+          : {}),
       });
     } finally {
+      for (const pendingApproval of activeRun.pendingApprovals.values()) {
+        pendingApproval.resolve("reject");
+      }
+      activeRun.pendingApprovals.clear();
       activeRunsByBlockUid.delete(blockUid);
       activeRunsById.delete(runId);
       response.end();
     }
   });
+  server.stopClient = () => Promise.resolve(client?.stop()).catch(() => {});
+  return server;
 }
 
 export async function ensureBridgeToken(
@@ -2564,25 +2354,27 @@ export async function ensureBridgeToken(
   return token;
 }
 
-async function main() {
+export async function startBridge({
+  host = process.env.ROAM_CODEX_HOST || DEFAULT_HOST,
+  port = Number(process.env.ROAM_CODEX_PORT || DEFAULT_PORT),
+} = {}) {
   const token = await ensureBridgeToken();
-  if (process.argv.includes("--show-token")) {
-    process.stdout.write(`${token}\n`);
-    return;
-  }
-
-  const host = process.env.ROAM_CODEX_HOST || DEFAULT_HOST;
-  const port = Number(process.env.ROAM_CODEX_PORT || DEFAULT_PORT);
-  const graph = process.env.ROAM_GRAPH?.trim();
-  if (!graph) {
-    throw new Error(
-      "ROAM_GRAPH is required. Set it to the active graph name before " +
-      "starting the bridge.",
-    );
-  }
-  const pairing = createPairingSession();
-  const client = new AppServerClient({ runtimeCwd: runtimeCwdForGraph(graph) });
-  const server = createBridgeServer({ token, graph, pairing, client });
+  const config = await readBridgeConfig();
+  const graph = typeof config.graph === "string" && config.graph.trim()
+    ? config.graph.trim()
+    : null;
+  const server = createBridgeServer({
+    token,
+    graph,
+    createClient: (boundGraph) => new AppServerClient({
+      runtimeCwd: runtimeCwdForGraph(boundGraph),
+      command: config.codexBin || process.env.CODEX_BIN || "codex",
+    }),
+    onBind: async (boundGraph) => {
+      const current = await readBridgeConfig();
+      await writeBridgeConfig({ ...current, graph: boundGraph });
+    },
+  });
 
   await new Promise((resolveListen, rejectListen) => {
     server.once("error", rejectListen);
@@ -2592,21 +2384,24 @@ async function main() {
   process.stdout.write(
     [
       `Roam Codex bridge listening on http://${host}:${port}`,
-      `Graph: ${graph}`,
-      `Pairing code: ${pairing.code}`,
-      "Pairing code expires in 5 minutes and can be used once.",
-      "Bearer token diagnostics: npm run show-token",
-      `Trace: ${resolve(ROOT, ".dev", "last-run.jsonl")}`,
+      graph
+        ? `Graph: ${graph}`
+        : "Graph: not paired yet — open the Codex panel in Roam and click Pair.",
       "",
     ].join("\n"),
   );
 
   const shutdown = async () => {
     await new Promise((resolveClose) => server.close(resolveClose));
-    await client.stop();
+    await server.stopClient();
   };
   process.once("SIGINT", () => void shutdown().finally(() => process.exit(0)));
   process.once("SIGTERM", () => void shutdown().finally(() => process.exit(0)));
+  return server;
+}
+
+async function main() {
+  await startBridge();
 }
 
 const isMain =
