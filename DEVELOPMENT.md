@@ -14,7 +14,7 @@ is the runtime agent.
 
 ```text
 Roam Desktop
-  ├─ extension.js ── native sidebar/composer, transcript, settings, run marker
+  ├─ extension.js ── generated native UI, settings, and run-marker entry point
   └─ 127.0.0.1 bridge
        └─ codex app-server
             └─ user's graph connection in ~/.roam-tools.json
@@ -25,8 +25,9 @@ and the runtime never executes inside this builder repository.
 
 ## Source map
 
-- `extension.js` — extension lifecycle, commands, chat panel, graph-scoped
-  browser state, bridge requests, and temporary run-marker lifecycle.
+- `src/extension.jsx` — extension lifecycle, commands, React-owned chat UI,
+  graph-scoped browser state, bridge requests, and temporary run-marker lifecycle.
+- `extension.js` — ignored build output loaded by Roam and produced by esbuild.
 - `extension.css` — panel and local running-state presentation.
 - `bridge.mjs` — loopback HTTP authentication, App Server JSON-RPC client,
   runtime isolation, stream normalization, and request validation.
@@ -231,6 +232,7 @@ panel.
 The required local check is:
 
 ```bash
+npm ci
 npm run check
 ```
 

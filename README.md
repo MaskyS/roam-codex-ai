@@ -65,9 +65,14 @@ Developer Mode, choose **Load extension**, and select the cloned folder.
 
 ```bash
 git clone https://github.com/MaskyS/roam-codex-ai.git
+cd roam-codex-ai
+npm ci
+npm run build
 ```
 
-No package installation or build step is required for the extension.
+The build uses esbuild only to turn the extension's JSX source into the
+`extension.js` file loaded by Roam. React itself comes from Roam and is not
+included in the build.
 
 ### 3. Pair Roam with the bridge
 

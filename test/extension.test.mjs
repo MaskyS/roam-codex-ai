@@ -12,10 +12,87 @@ globalThis.window = {
   roamAlphaAPI: {
     graph: { name: "maskys" },
     ui: {
+      react: {
+        BlockString: ({ string }) => window.React.createElement("span", {}, string),
+      },
       toaster: {
         show: () => {},
       },
     },
+  },
+};
+
+const reactRoots = [];
+const deferredReactCommits = [];
+let deferReactCommits = false;
+const flushReactCommits = () => {
+  for (const commit of deferredReactCommits.splice(0)) commit();
+};
+window.React = {
+  createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+};
+window.ReactDOM = {};
+window.ReactDOMClient = {
+  createRoot(container) {
+    const renderNode = (node) => {
+      if (node == null || node === false) return null;
+      if (Array.isArray(node)) return node.map(renderNode).filter(Boolean);
+      if (typeof node === "string" || typeof node === "number") return String(node);
+      if (typeof node.type === "function") {
+        return renderNode(node.type({ ...node.props, children: node.children }));
+      }
+      const element = container.ownerDocument.createElement(node.type);
+      for (const [name, value] of Object.entries(node.props)) {
+        if (name === "children" || name === "key" || value == null) continue;
+        if (name === "ref" && typeof value === "function") {
+          value(element);
+        } else if (name.startsWith("on") && typeof value === "function") {
+          element.addEventListener(name.slice(2).toLowerCase(), (event = {}) =>
+            value({ ...event, currentTarget: element, target: event.target || element }));
+        } else if (name === "className") element.className = value;
+        else if (name === "style" && typeof value === "object") {
+          element.style ||= {};
+          Object.assign(element.style, value);
+        }
+        else if (name.startsWith("data-")) {
+          const key = name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+          element.dataset[key] = value;
+        }
+        else if (name === "disabled" || name === "hidden") element[name] = value;
+        else element.setAttribute(name, value);
+      }
+      for (const child of node.children.flat(Infinity)) {
+        const rendered = renderNode(child);
+        for (const value of (Array.isArray(rendered) ? rendered : [rendered])) {
+          if (typeof value === "string") {
+            element.textContent = `${element.textContent || ""}${value}`;
+          }
+          else if (value) element.appendChild(value);
+        }
+      }
+      return element;
+    };
+    const root = {
+      unmounted: false,
+      render(node) {
+        if (this.unmounted) throw new Error("Cannot update an unmounted root.");
+        const commit = () => {
+          if (this.unmounted) return;
+          const rendered = renderNode(node);
+          container.replaceChildren(
+            ...(Array.isArray(rendered) ? rendered : [rendered]).filter(Boolean),
+          );
+        };
+        if (deferReactCommits) deferredReactCommits.push(commit);
+        else commit();
+      },
+      unmount() {
+        this.unmounted = true;
+        container.replaceChildren();
+      },
+    };
+    reactRoots.push(root);
+    return root;
   },
 };
 
@@ -27,6 +104,10 @@ test("only a visible connection card opts into flex layout", () => {
   assert.match(
     css,
     /\.roam-codex-connection-card:not\(\[hidden\]\)\s*\{\s*display:\s*flex;\s*\}/,
+  );
+  assert.match(
+    css,
+    /\.roam-codex-chat-resize\[hidden\]\s*\{\s*display:\s*none;\s*\}/,
   );
 });
 
@@ -159,6 +240,12 @@ test("the chat transcript renders every message with Roam and unmounts it", asyn
   const doc = createFakePanelDocument();
   const api = {
     ui: {
+      react: {
+        BlockString: ({ string }) => {
+          rendered.push(string);
+          return window.React.createElement("span", {}, `rendered:${string}`);
+        },
+      },
       components: {
         renderString: async ({ el, string }) => {
           rendered.push(string);
@@ -217,13 +304,12 @@ test("the chat transcript renders every message with Roam and unmounts it", asyn
 
   await controller.send();
   await Promise.resolve();
-  assert.deepEqual(rendered, [
-    "Question about [[Project]]",
+  assert.deepEqual([...new Set(rendered)], [
     "Question about [[Project]]",
     "See **bold** and ((block123))",
   ]);
-  assert.equal(unmounted.length, 1);
-  const copyButtons = panelElements(controller).filter(
+  assert.equal(unmounted.length, 0);
+  let copyButtons = panelElements(controller).filter(
     (element) => element.className === "roam-codex-chat-copy",
   );
   assert.equal(copyButtons.length, 2);
@@ -233,12 +319,18 @@ test("the chat transcript renders every message with Roam and unmounts it", asyn
     stopPropagation() {},
   });
   assert.deepEqual(copied, ["Question about [[Project]]"]);
+  copyButtons = panelElements(controller).filter(
+    (element) => element.className === "roam-codex-chat-copy",
+  );
   assert.equal(copyButtons[0].dataset.state, "copied");
   assert.equal(copyButtons[0].title, "Copied");
   await copyButtons[1].listeners.click({
     preventDefault() {},
     stopPropagation() {},
   });
+  copyButtons = panelElements(controller).filter(
+    (element) => element.className === "roam-codex-chat-copy",
+  );
   assert.equal(copyButtons[1].dataset.state, "error");
   assert.equal(copyButtons[1].title, "Could not copy Roam text");
   assert.equal(pendingTimers.size, 2);
@@ -246,7 +338,7 @@ test("the chat transcript renders every message with Roam and unmounts it", asyn
   const unmountedBeforeClose = unmounted.length;
   await controller.close();
   await Promise.resolve();
-  assert.ok(unmounted.length >= unmountedBeforeClose + 2);
+  assert.equal(unmounted.length, unmountedBeforeClose);
   assert.deepEqual(clearedTimers, [1, 2]);
   assert.equal(pendingTimers.size, 0);
 });
@@ -257,6 +349,7 @@ function createFakePanelDocument() {
     const classes = new Set();
     let ownText = "";
     const element = {
+      ownerDocument: null,
       tagName,
       children: [],
       listeners: {},
@@ -314,9 +407,10 @@ function createFakePanelDocument() {
         ownText = String(value);
       },
     };
+    element.ownerDocument = doc;
     return element;
   };
-  return {
+  const doc = {
     createElement: makeElement,
     listeners: documentListeners,
     addEventListener(name, handler) {
@@ -326,6 +420,7 @@ function createFakePanelDocument() {
       if (documentListeners[name] === handler) delete documentListeners[name];
     },
   };
+  return doc;
 }
 
 function panelElements(controller) {
@@ -339,6 +434,47 @@ function panelElements(controller) {
   visit(controller.controlsElement);
   return elements;
 }
+
+test("chat panel tolerates React committing its roots after render returns", async () => {
+  const doc = createFakePanelDocument();
+  let controller;
+  deferReactCommits = true;
+  try {
+    controller = createChatPanel({
+      doc,
+      api: {},
+      storage: { getItem: () => null, setItem: () => {} },
+      rootBlockUid: "root123",
+      setTimeoutImpl: () => 1,
+      clearTimeoutImpl: () => {},
+      requestModelsImpl: async () => [],
+      requestMessagesImpl: async () => [],
+      requestHistoryImpl: async () => ({
+        threads: [],
+        missingThreadIds: [],
+        unavailableThreadIds: [],
+      }),
+    });
+    assert.equal(
+      panelElements(controller).some(
+        (element) => element.className === "roam-codex-chat-transcript",
+      ),
+      false,
+    );
+    deferReactCommits = false;
+    flushReactCommits();
+    assert.equal(
+      panelElements(controller).some(
+        (element) => element.className === "roam-codex-chat-transcript",
+      ),
+      true,
+    );
+  } finally {
+    deferReactCommits = false;
+    flushReactCommits();
+    await controller?.close();
+  }
+});
 
 test("chat state keeps versioned conversation records without a parallel draft", () => {
   const values = new Map();
@@ -2107,19 +2243,28 @@ test("chat clears a scratch composer before requesting a reply", async () => {
     ).hidden,
     true,
   );
-  const pickerButton = allElements.find(
+  let pickerButton = allElements.find(
     (element) => element.className === "roam-codex-chat-picker-button",
   );
-  const pickerMenu = allElements.find(
+  let pickerMenu = allElements.find(
     (element) => element.className === "roam-codex-chat-picker-menu",
   );
-  const pickerSubmenu = allElements.find(
+  let pickerSubmenu = allElements.find(
     (element) => element.className === "roam-codex-chat-picker-submenu",
   );
   assert.equal(pickerButton.textContent, "GPT-5.6-Sol · Low");
   assert.equal(pickerMenu.hidden, true);
   assert.equal(pickerSubmenu.hidden, true);
   pickerButton.listeners.click();
+  pickerButton = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-button",
+  );
+  pickerMenu = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-menu",
+  );
+  pickerSubmenu = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-submenu",
+  );
   assert.equal(pickerMenu.hidden, false);
   assert.deepEqual(
     pickerMenu.children.map((row) => row.children?.[0]?.textContent),
@@ -2130,6 +2275,9 @@ test("chat clears a scratch composer before requesting a reply", async () => {
     ["GPT-5.6-Sol", "Low", "Auto"],
   );
   pickerMenu.children[1].listeners.mouseenter();
+  pickerSubmenu = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-submenu",
+  );
   assert.deepEqual(
     pickerMenu.children.map((row) => row.children?.[0]?.textContent),
     ["Model", "Effort", "Access"],
@@ -2145,6 +2293,12 @@ test("chat clears a scratch composer before requesting a reply", async () => {
     [true, false, false],
   );
   pickerButton.listeners.click();
+  pickerMenu = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-menu",
+  );
+  pickerSubmenu = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-submenu",
+  );
   assert.equal(pickerMenu.hidden, true);
   assert.equal(pickerSubmenu.hidden, true);
   assert.equal(chatRequests, 0);
@@ -2409,7 +2563,7 @@ test("rapid history selections cannot render a stale transcript", async () => {
   ]);
   await Promise.resolve();
 
-  const transcript = elements.find(
+  const transcript = panelElements(controller).find(
     (element) => element.className === "roam-codex-chat-transcript",
   );
   assert.match(transcript.textContent, /Older question/);
@@ -2564,25 +2718,25 @@ test("Send stays alongside Stop while a turn runs and names its shortcut", async
   });
 
   const elements = panelElements(controller);
-  const sendButton = elements.find(
+  let sendButton = elements.find(
     (element) => element.className === "roam-codex-chat-send",
   );
-  const stopButton = elements.find(
+  let stopButton = elements.find(
     (element) => element.className === "roam-codex-chat-stop",
   );
   const shortcut = sendButton.children.find(
     (element) => element.className === "roam-codex-chat-send-kbd",
   );
-  const progressMeta = elements.find(
+  let progressMeta = elements.find(
     (element) => element.className === "roam-codex-chat-progress-meta",
   );
-  const progressTimer = elements.find(
+  let progressTimer = elements.find(
     (element) => element.className === "roam-codex-chat-progress-timer",
   );
-  const progress = elements.find(
+  let progress = elements.find(
     (element) => element.className === "roam-codex-chat-progress",
   );
-  const transcript = elements.find(
+  let transcript = elements.find(
     (element) => element.className === "roam-codex-chat-transcript",
   );
   const actions = elements.find(
@@ -2604,6 +2758,24 @@ test("Send stays alongside Stop while a turn runs and names its shortcut", async
   assert.equal(preventedMouseFocus, 1);
 
   const sending = controller.send();
+  sendButton = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-send",
+  );
+  stopButton = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-stop",
+  );
+  progressMeta = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-progress-meta",
+  );
+  progressTimer = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-progress-timer",
+  );
+  progress = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-progress",
+  );
+  transcript = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-transcript",
+  );
   assert.equal(sendButton.hidden, false);
   assert.equal(sendButton.disabled, true);
   assert.equal(stopButton.hidden, false);
@@ -2614,6 +2786,15 @@ test("Send stays alongside Stop while a turn runs and names its shortcut", async
 
   finishTurn();
   await sending;
+  sendButton = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-send",
+  );
+  stopButton = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-stop",
+  );
+  progressMeta = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-progress-meta",
+  );
   assert.equal(sendButton.hidden, false);
   assert.equal(stopButton.hidden, true);
   assert.equal(progressMeta.hidden, true);
@@ -2671,6 +2852,14 @@ test("Send during an active turn steers it instead of starting a new one", async
   await new Promise((resolve) => setTimeout(resolve, 0));
   await new Promise((resolve) => setTimeout(resolve, 0));
 
+  const steerButton = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-send is-steering",
+  );
+  assert.equal(steerButton.hidden, false);
+  assert.equal(steerButton.disabled, false);
+  assert.match(steerButton.textContent, /^Steer/);
+  assert.match(steerButton.title, /current turn/);
+
   const steering = controller.send();
   await controller.send();
   await new Promise((resolve) => setImmediate(resolve));
@@ -2685,6 +2874,49 @@ test("Send during an active turn steers it instead of starting a new one", async
   finishTurn();
   await sending;
   await controller.close();
+});
+
+test("closing during a turn lets React roots unmount while cleanup waits for idle", async () => {
+  let finishTurn;
+  const turn = new Promise((resolve) => {
+    finishTurn = resolve;
+  });
+  const controller = createChatPanel({
+    doc: createFakePanelDocument(),
+    api: {},
+    storage: {
+      getItem: () => null,
+      setItem: () => {},
+    },
+    rootBlockUid: "root123",
+    readPromptImpl: async () => ({ uid: "root123", text: "Keep working" }),
+    requestChatImpl: async (_message, { onStarted }) => {
+      onStarted({ runId: "12345678-1234-1234-1234-123456789abc" });
+      await turn;
+      return { threadId: "thread_close_1234", turnId: "turn-1", reply: "Done" };
+    },
+    requestModelsImpl: async () => [],
+    requestMessagesImpl: async () => [],
+    requestHistoryImpl: async () => ({
+      threads: [],
+      missingThreadIds: [],
+      unavailableThreadIds: [],
+    }),
+    onClose: ({ whenIdle }) => whenIdle(),
+  });
+
+  await Promise.resolve();
+  const sending = controller.send();
+  await new Promise((resolve) => setImmediate(resolve));
+  const closing = controller.close();
+  let closed = false;
+  void closing.then(() => { closed = true; });
+  await Promise.resolve();
+  assert.equal(closed, false);
+
+  finishTurn();
+  await Promise.all([sending, closing]);
+  assert.equal(closed, true);
 });
 
 test("a rejected steer resends the intact draft once the turn settles", async () => {
@@ -2769,7 +3001,7 @@ test("a rejected steer resends the intact draft once the turn settles", async ()
   await controller.close();
 });
 
-test("an unpaired panel focuses the pairing input and keeps errors quiet", async () => {
+test("an unpaired panel offers codeless pairing and keeps errors quiet", async () => {
   const doc = createFakePanelDocument();
   const notPaired = () => {
     const error = new Error("This device isn't paired with the local Codex bridge yet.");
@@ -2867,6 +3099,61 @@ test("an invalid bridge token stays in the connection card, not the transcript",
   assert.equal(progressText.textContent || "", "");
   assert.equal(transcriptWrap.hidden, true);
   assert.equal(transcriptHandle.hidden, true);
+  await controller.close();
+});
+
+test("fallback pairing focuses the code and submits it with Enter", async () => {
+  const doc = createFakePanelDocument();
+  const pairCalls = [];
+  const controller = createChatPanel({
+    doc,
+    api: {},
+    storage: { getItem: () => null, setItem: () => {} },
+    rootBlockUid: "root123",
+    setIntervalImpl: () => 1,
+    clearIntervalImpl: () => {},
+    setTimeoutImpl: () => 1,
+    clearTimeoutImpl: () => {},
+    probeConnectionImpl: async () => ({ state: "unpaired", graph: "maskys" }),
+    pairRequest: async (options) => {
+      pairCalls.push(options);
+      if (pairCalls.length === 1) {
+        const error = new Error("A pairing code is required.");
+        error.code = "CODE_REQUIRED";
+        throw error;
+      }
+    },
+    requestModelsImpl: async () => [],
+    requestMessagesImpl: async () => [],
+    requestHistoryImpl: async () => ({
+      threads: [],
+      missingThreadIds: [],
+      unavailableThreadIds: [],
+    }),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  let card = panelElements(controller).find(
+    (element) => element.className === "roam-codex-connection-card",
+  );
+  const pairButton = card.children
+    .find((child) => child.className === "roam-codex-connection-actions")
+    ?.children.find((child) => child.textContent === "Pair");
+  pairButton.listeners.click();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  card = panelElements(controller).find(
+    (element) => element.className === "roam-codex-connection-card",
+  );
+  const input = card.children.find(
+    (child) => child.className === "roam-codex-connection-input",
+  );
+  assert.equal(input.focused, true);
+  input.value = "pair-123";
+  input.listeners.keydown({ key: "Enter" });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.deepEqual(pairCalls, [{}, { code: "pair-123" }]);
   await controller.close();
 });
 
@@ -3023,7 +3310,7 @@ test("the connection card explains failures and clears once connected", async ()
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   const elements = panelElements(controller);
-  const card = elements.find(
+  let card = elements.find(
     (element) => element.className === "roam-codex-connection-card",
   );
   const transcriptWrap = elements.find(
@@ -3046,6 +3333,9 @@ test("the connection card explains failures and clears once connected", async ()
   probeState = { state: "connected", graph: "maskys" };
   await timers.at(-1)();
   await new Promise((resolve) => setTimeout(resolve, 0));
+  card = panelElements(controller).find(
+    (element) => element.className === "roam-codex-connection-card",
+  );
   assert.equal(card.hidden, false);
   const signIn = card.children
     .find((child) => child.className === "roam-codex-connection-actions")
@@ -3058,12 +3348,73 @@ test("the connection card explains failures and clears once connected", async ()
   authState = { auth: "authenticated", method: "chatgpt" };
   await timers.at(-1)();
   await new Promise((resolve) => setTimeout(resolve, 0));
+  card = panelElements(controller).find(
+    (element) => element.className === "roam-codex-connection-card",
+  );
   assert.equal(card.hidden, true);
   await controller.close();
 });
 
+test("the model picker clears a stale catalog error after reconnecting", async () => {
+  const timers = [];
+  const doc = createFakePanelDocument();
+  let modelRequests = 0;
+  const controller = createChatPanel({
+    doc,
+    api: {},
+    storage: {
+      getItem: () => null,
+      setItem: () => {},
+    },
+    rootBlockUid: "root123",
+    setIntervalImpl: () => 1,
+    clearIntervalImpl: () => {},
+    setTimeoutImpl: (callback) => {
+      timers.push(callback);
+      return timers.length;
+    },
+    clearTimeoutImpl: () => {},
+    probeConnectionImpl: async () => ({ state: "connected", graph: "maskys" }),
+    authRequest: async () => ({ auth: "authenticated", method: "chatgpt" }),
+    requestModelsImpl: async () => {
+      modelRequests += 1;
+      if (modelRequests === 1) throw new Error("Catalog unavailable");
+      return [{
+        id: "gpt-test",
+        displayName: "GPT Test",
+        isDefault: true,
+        supportedReasoningEfforts: [],
+        serviceTiers: [],
+      }];
+    },
+    requestMessagesImpl: async () => [],
+    requestHistoryImpl: async () => ({
+      threads: [],
+      missingThreadIds: [],
+      unavailableThreadIds: [],
+    }),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  let picker = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-button",
+  );
+  assert.equal(picker.textContent, "Models unavailable");
+
+  await timers.at(-1)();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  picker = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-button",
+  );
+  assert.equal(picker.textContent, "GPT Test");
+  assert.equal(picker.disabled, false);
+  await controller.close();
+});
+
 test("the transcript resize handle drags, clamps, and persists its height", async () => {
-  const values = new Map();
+  const values = new Map([
+    ["roam-codex-lab.chat-transcript-height.maskys", "640"],
+  ]);
   const doc = createFakePanelDocument();
   const controller = createChatPanel({
     doc,
@@ -3091,7 +3442,7 @@ test("the transcript resize handle drags, clamps, and persists its height", asyn
   const handle = panelElements(controller).find(
     (element) => element.className === "roam-codex-chat-resize",
   );
-  const transcript = panelElements(controller).find(
+  let transcript = panelElements(controller).find(
     (element) => element.className === "roam-codex-chat-transcript",
   );
   const transcriptWrap = panelElements(controller).find(
@@ -3101,6 +3452,9 @@ test("the transcript resize handle drags, clamps, and persists its height", asyn
   assert.equal(transcriptWrap.hidden, true);
 
   await controller.send();
+  transcript = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-transcript",
+  );
   assert.equal(handle.hidden, false);
   assert.equal(transcriptWrap.hidden, false);
   assert.equal(handle.role, "separator");
@@ -3194,8 +3548,10 @@ test("the transcript offers a reduced-motion scroll-to-latest control", async ()
   transcript.listeners.scroll();
   assert.equal(scrollLatest.hidden, true);
 
+  const controlsRoot = reactRoots.at(-1);
+  assert.equal(controlsRoot.unmounted, false);
   await controller.close();
-  assert.equal(transcript.listeners.scroll, undefined);
+  assert.equal(controlsRoot.unmounted, true);
 });
 
 test("the panel close control removes the native window before closing", async () => {
@@ -3322,24 +3678,30 @@ test("the picker offers Speed from serviceTiers and sends the chosen tier", asyn
   await Promise.resolve();
 
   const elements = panelElements(controller);
-  const pickerButton = elements.find(
+  let pickerButton = elements.find(
     (element) => element.className === "roam-codex-chat-picker-button",
   );
-  const pickerMenu = elements.find(
+  let pickerMenu = elements.find(
     (element) => element.className === "roam-codex-chat-picker-menu",
   );
-  const pickerSubmenu = elements.find(
+  let pickerSubmenu = elements.find(
     (element) => element.className === "roam-codex-chat-picker-submenu",
   );
   assert.equal(pickerButton.textContent, "GPT-5.6-Sol · Low");
 
   pickerButton.listeners.click();
+  pickerMenu = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-menu",
+  );
   assert.deepEqual(
     pickerMenu.children.map((row) => row.children?.[0]?.textContent),
     ["Model", "Effort", "Speed", "Access"],
   );
   assert.equal(pickerMenu.children[2].children[1].textContent, "Standard");
   pickerMenu.children[2].listeners.mouseenter();
+  pickerSubmenu = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-submenu",
+  );
   assert.deepEqual(
     pickerMenu.children.map((row) => row.children?.[0]?.textContent),
     ["Model", "Effort", "Speed", "Access"],
@@ -3349,6 +3711,15 @@ test("the picker offers Speed from serviceTiers and sends the chosen tier", asyn
     ["Standard (Default)", "Fast"],
   );
   pickerSubmenu.children[1].listeners.click();
+  pickerButton = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-button",
+  );
+  pickerMenu = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-menu",
+  );
+  pickerSubmenu = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-submenu",
+  );
   assert.equal(pickerMenu.hidden, true);
   assert.equal(pickerSubmenu.hidden, true);
   assert.equal(pickerButton.textContent, "GPT-5.6-Sol · Low");
@@ -3414,18 +3785,24 @@ test("the Tools picker reads and persists MCP consent through extension settings
     (element) => element.className === "roam-codex-chat-picker-submenu",
   );
   pickerButton.listeners.click();
+  const openToolsMenu = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-menu",
+  );
   assert.deepEqual(
-    pickerMenu.children.map((row) => row.children?.[0]?.textContent),
+    openToolsMenu.children.map((row) => row.children?.[0]?.textContent),
     ["Model", "Effort", "Access", "Tools"],
   );
-  assert.equal(pickerMenu.children[3].children[1].textContent, "Roam + 1");
-  pickerMenu.children[3].listeners.mouseenter();
+  assert.equal(openToolsMenu.children[3].children[1].textContent, "Roam + 1");
+  openToolsMenu.children[3].listeners.mouseenter();
+  const openToolsSubmenu = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-submenu",
+  );
   assert.deepEqual(
-    pickerSubmenu.children.map((option) => option.children?.[0]?.textContent),
+    openToolsSubmenu.children.map((option) => option.children?.[0]?.textContent),
     ["Roam", "felt", "paper"],
   );
-  assert.equal(pickerSubmenu.children[1]["aria-checked"], "true");
-  pickerSubmenu.children[2].listeners.click();
+  assert.equal(openToolsSubmenu.children[1]["aria-checked"], "true");
+  openToolsSubmenu.children[2].listeners.click();
   await Promise.resolve();
   assert.deepEqual(settingsWrites, [["felt", "paper"]]);
 
@@ -3508,14 +3885,20 @@ test("Manual access shows Allow and Reject before a Roam write continues", async
     (element) => element.className === "roam-codex-chat-picker-submenu",
   );
   pickerButton.listeners.click();
-  const accessRow = pickerMenu.children.at(-1);
+  const openAccessMenu = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-menu",
+  );
+  const accessRow = openAccessMenu.children.at(-1);
   assert.equal(accessRow.children[0].textContent, "Access");
   accessRow.listeners.mouseenter();
+  const openAccessSubmenu = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-submenu",
+  );
   assert.deepEqual(
-    pickerSubmenu.children.map((option) => option.children[0].textContent),
+    openAccessSubmenu.children.map((option) => option.children[0].textContent),
     ["Auto", "Read only", "Manual"],
   );
-  pickerSubmenu.children[2].listeners.click();
+  openAccessSubmenu.children[2].listeners.click();
 
   const sendPromise = controller.send();
   await Promise.resolve();

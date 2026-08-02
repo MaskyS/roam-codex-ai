@@ -1,3 +1,10 @@
+import {
+  ChatControls,
+  ChatHistory,
+  ChatTranscript,
+  ConnectionCard,
+} from "./chat-components.jsx";
+
 const DEFAULT_BRIDGE_URL = "http://127.0.0.1:47321";
 const TOKEN_KEY_PREFIX = "roam-codex-lab.bridge-token";
 const RUNNING_STATUS_KEY_PREFIX = "roam-codex-lab.running-status-uids";
@@ -1595,11 +1602,12 @@ async function waitForChatPanelHost(
 
 function createPanelElement(doc, tag, className, text = "") {
   const element = doc.createElement(tag);
+  // Minimal test documents do not provide this native DOM back-reference.
+  if (!element.ownerDocument) element.ownerDocument = doc;
   if (className) element.className = className;
   if (text) element.textContent = text;
   return element;
 }
-
 export function renderRoamMarkdown(
   element,
   string,
@@ -2422,11 +2430,13 @@ export function createChatPanel({
   let messages = [];
   let models = [];
   let modelsReady = false;
+  let modelsError = "";
   let mcpServers = [];
   let connection = { state: "checking" };
   let connectionRetryTimer = null;
   let connectionProbeVersion = 0;
   let connectionNote = "";
+  let connectionCardVisible = false;
   let pairingCodeRequired = false;
   let enabledMcpServers = sanitizeEnabledMcpServers(
     readEnabledMcpServersImpl(),
@@ -2464,10 +2474,11 @@ export function createChatPanel({
   let pickerAccess = defaultAccess;
   let pickerOpen = false;
   let pickerLevel = null;
-  let messageRenderVersion = 0;
-  const renderedMessageNodes = new Set();
+  let stopDisabled = false;
   const copyFeedbackTimers = new Map();
+  const copyStates = new Map();
   const approvalCards = new Map();
+  let progressState = { text: "", kind: "", running: false, elapsed: "" };
 
   const panel = createPanelElement(doc, "section", CHAT_PANEL_CLASS);
   panel.id = CHAT_PANEL_ID;
@@ -2505,13 +2516,8 @@ export function createChatPanel({
 
   const body = createPanelElement(doc, "div", "roam-codex-chat-body");
 
-  const connectionCard = createPanelElement(
-    doc,
-    "section",
-    "roam-codex-connection-card",
-  );
-  connectionCard.hidden = true;
-  body.appendChild(connectionCard);
+  const connectionMount = createPanelElement(doc, "div");
+  body.appendChild(connectionMount);
 
   const transcriptWrap = createPanelElement(
     doc,
@@ -2519,10 +2525,9 @@ export function createChatPanel({
     "roam-codex-chat-transcript-wrap",
   );
   transcriptWrap.hidden = true;
-  const transcript = createPanelElement(doc, "div", "roam-codex-chat-transcript");
-  transcript.setAttribute("role", "log");
-  transcript.setAttribute("aria-live", "polite");
-  transcriptWrap.appendChild(transcript);
+  let transcript = null;
+  const transcriptMount = createPanelElement(doc, "div");
+  transcriptWrap.appendChild(transcriptMount);
   const scrollLatestButton = panelButton(
     doc,
     "roam-codex-chat-scroll-latest",
@@ -2543,6 +2548,10 @@ export function createChatPanel({
   body.appendChild(transcriptWrap);
 
   const updateScrollLatestButton = () => {
+    if (!transcript) {
+      scrollLatestButton.hidden = true;
+      return;
+    }
     const scrollHeight = Number(transcript.scrollHeight) || 0;
     const clientHeight = Number(transcript.clientHeight) || 0;
     const scrollTop = Number(transcript.scrollTop) || 0;
@@ -2557,6 +2566,7 @@ export function createChatPanel({
       distanceFromBottom <= CHAT_SCROLL_BOTTOM_THRESHOLD;
   };
   const scrollToLatest = () => {
+    if (!transcript) return;
     const reduceMotion = Boolean(
       matchMediaImpl?.("(prefers-reduced-motion: reduce)")?.matches,
     );
@@ -2571,7 +2581,6 @@ export function createChatPanel({
     }
     scrollLatestButton.hidden = true;
   };
-  transcript.addEventListener("scroll", updateScrollLatestButton);
   scrollLatestButton.addEventListener("click", scrollToLatest);
 
   const transcriptHandle = createPanelElement(
@@ -2585,49 +2594,12 @@ export function createChatPanel({
   transcriptHandle.hidden = true;
   body.appendChild(transcriptHandle);
 
-  const progress = createPanelElement(doc, "div", "roam-codex-chat-progress");
-  progress.setAttribute("aria-live", "polite");
-  progress.hidden = true;
-  const progressMeta = createPanelElement(
-    doc,
-    "span",
-    "roam-codex-chat-progress-meta",
-  );
-  progressMeta.hidden = true;
-  const progressTimer = createPanelElement(
-    doc,
-    "span",
-    "roam-codex-chat-progress-timer",
-  );
-  progressMeta.appendChild(progressTimer);
-  progress.appendChild(progressMeta);
-  const progressText = createPanelElement(
-    doc,
-    "span",
-    "roam-codex-chat-progress-text",
-  );
-  progress.appendChild(progressText);
-  const approvalContainer = createPanelElement(
-    doc,
-    "div",
-    "roam-codex-chat-approvals",
-  );
-  approvalContainer.hidden = true;
-  transcript.appendChild(approvalContainer);
-  transcript.appendChild(progress);
-
-  const syncTranscriptStatus = ({ scroll = false } = {}) => {
-    if (progress.parentNode !== transcript) transcript.appendChild(progress);
-    const hasTranscriptContent = messages.length > 0 || !progress.hidden ||
-      approvalCards.size > 0;
-    transcript.hidden = !hasTranscriptContent;
-    transcriptWrap.hidden = !hasTranscriptContent;
-    transcriptHandle.hidden = !hasTranscriptContent;
-    if (scroll && !progress.hidden) {
-      transcript.scrollTop = transcript.scrollHeight;
-      updateScrollLatestButton();
-    }
-  };
+  const createRoot = window.ReactDOMClient?.createRoot;
+  if (!window.React?.createElement || !createRoot)
+    throw new Error("Codex chat requires Roam's React 18 globals.");
+  const connectionRoot = createRoot(connectionMount);
+  const transcriptRoot = createRoot(transcriptMount);
+  const historyRoot = createRoot(historyPopover);
 
   const clampTranscriptHeight = (value) => Math.min(
     CHAT_TRANSCRIPT_MAX_HEIGHT,
@@ -2648,8 +2620,10 @@ export function createChatPanel({
   const applyTranscriptHeight = (height) => {
     setElementStyle(transcriptWrap, "height", `${height}px`);
     setElementStyle(transcriptWrap, "maxHeight", `${height}px`);
-    setElementStyle(transcript, "height", `${height}px`);
-    setElementStyle(transcript, "maxHeight", `${height}px`);
+    if (transcript) {
+      setElementStyle(transcript, "height", `${height}px`);
+      setElementStyle(transcript, "maxHeight", `${height}px`);
+    }
   };
   let transcriptHeight = readStoredTranscriptHeight() ??
     CHAT_TRANSCRIPT_MAX_HEIGHT;
@@ -2679,7 +2653,7 @@ export function createChatPanel({
   };
   transcriptHandle.addEventListener("pointerdown", (event) => {
     if (!Number.isFinite(event?.clientY)) return;
-    const measured = transcript.getBoundingClientRect?.()?.height;
+    const measured = transcript?.getBoundingClientRect?.()?.height;
     transcriptResize = {
       startY: event.clientY,
       startHeight: Number.isFinite(measured) && measured > 0
@@ -2691,67 +2665,9 @@ export function createChatPanel({
     event.preventDefault?.();
   });
 
-  const modelRow = createPanelElement(doc, "div", "roam-codex-chat-model-row");
-  const pickerWrap = createPanelElement(doc, "div", "roam-codex-chat-picker");
-  const pickerButton = panelButton(
-    doc,
-    "roam-codex-chat-picker-button",
-    "Loading models…",
-    "Choose the model, reasoning effort, speed, and access",
-  );
-  pickerButton.setAttribute("aria-label", "Model, effort, speed, and access");
-  pickerButton.setAttribute("aria-haspopup", "menu");
-  pickerButton.setAttribute("aria-expanded", "false");
-  pickerButton.disabled = true;
-  pickerWrap.appendChild(pickerButton);
-  const pickerMenu = createPanelElement(
-    doc,
-    "div",
-    "roam-codex-chat-picker-menu",
-  );
-  pickerMenu.setAttribute("role", "menu");
-  pickerMenu.setAttribute("aria-label", "Model, effort, speed, and access options");
-  pickerMenu.hidden = true;
-  pickerWrap.appendChild(pickerMenu);
-  const pickerSubmenu = createPanelElement(
-    doc,
-    "div",
-    "roam-codex-chat-picker-submenu",
-  );
-  pickerSubmenu.setAttribute("role", "menu");
-  pickerSubmenu.hidden = true;
-  pickerWrap.appendChild(pickerSubmenu);
-  modelRow.appendChild(pickerWrap);
-  const actions = createPanelElement(doc, "div", "roam-codex-chat-actions");
-  const stopButton = panelButton(
-    doc,
-    "roam-codex-chat-stop",
-    "Stop",
-    "Stop the current Codex turn",
-  );
-  stopButton.hidden = true;
-  actions.appendChild(stopButton);
   const sendShortcutIsMac = /Mac|iP(?:hone|ad|od)/i.test(
     navigatorImpl?.platform || navigatorImpl?.userAgent || "",
   );
-  const sendButton = panelButton(
-    doc,
-    "roam-codex-chat-send",
-    "Send",
-    `Send the focused block in this chat's Block Outline (${
-      sendShortcutIsMac ? "Option" : "Alt"
-    }+Enter, rebindable in Settings → Hotkeys)`,
-  );
-  const sendShortcut = createPanelElement(
-    doc,
-    "kbd",
-    "roam-codex-chat-send-kbd",
-    sendShortcutIsMac ? "⌥↵" : "Alt ↵",
-  );
-  sendShortcut.setAttribute("aria-hidden", "true");
-  sendButton.appendChild(sendShortcut);
-  actions.appendChild(sendButton);
-  modelRow.appendChild(actions);
   panel.appendChild(body);
 
   const controls = createPanelElement(
@@ -2760,7 +2676,7 @@ export function createChatPanel({
     "roam-codex-chat-controls",
   );
   controls.id = CHAT_CONTROLS_ID;
-  controls.appendChild(modelRow);
+  const controlsRoot = createRoot(controls);
 
   const persist = () => writeChatState(state, { storage });
   const currentRecord = () => state.activeThreadId
@@ -2924,187 +2840,94 @@ export function createChatPanel({
     return graphRecord;
   };
 
-  const disposeRenderedMessages = () => {
-    messageRenderVersion += 1;
-    for (const element of renderedMessageNodes) {
-      void unmountRoamMarkdown(element, { api });
+  const handleCopy = async (message, button, roleLabel) => {
+    const previousTimer = copyFeedbackTimers.get(message);
+    if (previousTimer !== undefined) clearTimeoutImpl(previousTimer);
+    copyFeedbackTimers.delete(message);
+    copyStates.set(message, "copying");
+    renderMessages();
+    try {
+      await copyTextImpl(message.text);
+      if (closed) return;
+      copyStates.set(message, "copied");
+    } catch {
+      if (closed) return;
+      copyStates.set(message, "error");
     }
-    renderedMessageNodes.clear();
+    renderMessages();
+    const timer = setTimeoutImpl(() => {
+      copyFeedbackTimers.delete(message);
+      if (closed) return;
+      copyStates.set(message, "idle");
+      renderMessages();
+    }, 1_400);
+    copyFeedbackTimers.set(message, timer);
   };
 
-  const renderMessages = () => {
-    disposeRenderedMessages();
-    const renderVersion = messageRenderVersion;
-    transcript.replaceChildren();
-    if (!messages.length) {
-      transcript.appendChild(approvalContainer);
-      transcript.appendChild(progress);
-      syncTranscriptStatus();
-      scrollLatestButton.hidden = true;
-      return;
-    }
-
-    for (const message of messages) {
-      if (!message || !["user", "assistant"].includes(message.role)) continue;
-      const article = createPanelElement(
-        doc,
-        "article",
-        `roam-codex-chat-message roam-codex-chat-message-${message.role}`,
-      );
-      const roleLabel = message.role === "user" ? "You" : "Codex";
-      const copyButton = panelButton(
-        doc,
-        "roam-codex-chat-copy",
-        "",
-        "Copy Roam text",
-      );
-      copyButton.setAttribute(
-        "aria-label",
-        `Copy ${roleLabel} message as Roam text`,
-      );
-      copyButton.dataset.state = "idle";
-      copyButton.addEventListener("click", async (event) => {
-        event?.preventDefault?.();
-        event?.stopPropagation?.();
-        const previousTimer = copyFeedbackTimers.get(copyButton);
-        if (previousTimer !== undefined) clearTimeoutImpl(previousTimer);
-        copyFeedbackTimers.delete(copyButton);
-        copyButton.dataset.state = "copying";
-        try {
-          await copyTextImpl(message.text);
-          if (closed) return;
-          copyButton.dataset.state = "copied";
-          copyButton.title = "Copied";
-          copyButton.setAttribute("aria-label", "Copied Roam text");
-        } catch {
-          if (closed) return;
-          copyButton.dataset.state = "error";
-          copyButton.title = "Could not copy Roam text";
-          copyButton.setAttribute("aria-label", "Could not copy Roam text");
-        }
-        const timer = setTimeoutImpl(() => {
-          copyFeedbackTimers.delete(copyButton);
-          if (closed) return;
-          copyButton.dataset.state = "idle";
-          copyButton.title = "Copy Roam text";
-          copyButton.setAttribute(
-            "aria-label",
-            `Copy ${roleLabel} message as Roam text`,
-          );
-        }, 1_400);
-        copyFeedbackTimers.set(copyButton, timer);
-      });
-      article.appendChild(copyButton);
-      const messageText = createPanelElement(
-        doc,
-        "div",
-        "roam-codex-chat-message-text",
-      );
-      renderedMessageNodes.add(messageText);
-      void renderRoamMarkdown(messageText, message.text, { api })
-        .then((rendered) => {
-          if (
-            rendered &&
-            (closed || renderVersion !== messageRenderVersion ||
-              !renderedMessageNodes.has(messageText))
-          ) {
-            void unmountRoamMarkdown(messageText, { api });
-          }
-        });
-      article.appendChild(messageText);
-      transcript.appendChild(article);
-    }
-    transcript.appendChild(approvalContainer);
-    transcript.appendChild(progress);
-    syncTranscriptStatus();
-    transcript.scrollTop = transcript.scrollHeight;
-    updateScrollLatestButton();
+  const renderMessages = ({ scroll = true } = {}) => {
+    if (closed) return;
+    const hasTranscriptContent = messages.length > 0 ||
+      approvalCards.size > 0 ||
+      Boolean(progressState.text || progressState.running);
+    transcriptWrap.hidden = !hasTranscriptContent;
+    transcriptHandle.hidden = !hasTranscriptContent;
+    transcriptRoot.render(window.React.createElement(ChatTranscript, {
+      messages,
+      approvals: [...approvalCards.values()],
+      progress: progressState,
+      copyStates,
+      BlockString: api.ui?.react?.BlockString || getRoamApi().ui.react.BlockString,
+      onCopy: handleCopy,
+      onDecide: decideApproval,
+      transcriptRef: (node) => {
+        transcript = node;
+        if (!node) return;
+        if (scroll) node.scrollTop = node.scrollHeight;
+        updateScrollLatestButton();
+      },
+      onScroll: updateScrollLatestButton,
+      height: transcriptHeight,
+    }));
   };
 
   const setProgress = (text = "", kind = "") => {
-    progressText.textContent = singleLine(text);
-    progress.dataset.kind = kind;
-    progress.hidden = !progressText.textContent && progressMeta.hidden;
-    syncTranscriptStatus({ scroll: !progress.hidden });
+    progressState = { ...progressState, text: singleLine(text), kind };
+    renderMessages({ scroll: Boolean(progressState.text || progressState.running) });
   };
 
   const removeApprovalCard = (approvalId) => {
     if (!approvalCards.has(approvalId)) return;
     approvalCards.delete(approvalId);
-    approvalContainer.replaceChildren(...approvalCards.values());
-    approvalContainer.hidden = approvalCards.size === 0;
+    renderApprovalCards();
   };
-
   const clearApprovalCards = () => {
     approvalCards.clear();
-    approvalContainer.replaceChildren();
-    approvalContainer.hidden = true;
+    renderApprovalCards();
   };
-
+  const decideApproval = (approvalId, decision) => {
+    const approval = approvalCards.get(approvalId);
+    if (!runId || !approval || approval.state === "submitting") return;
+    approval.state = "submitting";
+    renderApprovalCards();
+    void approvalRequest(runId, approvalId, decision)
+      .then(() => {
+        removeApprovalCard(approvalId);
+        setProgress("Continuing", "activity");
+      })
+      .catch((error) => {
+        approval.state = "error";
+        renderApprovalCards();
+        setProgress(error.message || "Could not answer the approval.", "error");
+      });
+  };
+  const renderApprovalCards = () => {
+    if (closed) return;
+    renderMessages();
+  };
   const renderApproval = ({ approvalId, questions }) => {
     if (approvalCards.has(approvalId)) return;
-    const card = createPanelElement(doc, "section", "roam-codex-chat-approval");
-    card.setAttribute("aria-label", "Roam change approval");
-    const title = createPanelElement(
-      doc,
-      "div",
-      "roam-codex-chat-approval-title",
-      questions.find((question) => question?.header)?.header || "Allow Roam change?",
-    );
-    card.appendChild(title);
-    for (const question of questions) {
-      if (!question?.question) continue;
-      card.appendChild(createPanelElement(
-        doc,
-        "div",
-        "roam-codex-chat-approval-question",
-        question.question,
-      ));
-    }
-    const approvalActions = createPanelElement(
-      doc,
-      "div",
-      "roam-codex-chat-approval-actions",
-    );
-    const rejectButton = panelButton(
-      doc,
-      "roam-codex-chat-approval-reject",
-      "Reject",
-      "Reject this Roam change",
-    );
-    const acceptButton = panelButton(
-      doc,
-      "roam-codex-chat-approval-accept",
-      "Allow",
-      "Allow this Roam change",
-    );
-    const decide = (decision) => {
-      if (!runId) return;
-      rejectButton.disabled = true;
-      acceptButton.disabled = true;
-      card.dataset.state = "submitting";
-      void approvalRequest(runId, approvalId, decision)
-        .then(() => {
-          removeApprovalCard(approvalId);
-          setProgress("Continuing", "activity");
-        })
-        .catch((error) => {
-          card.dataset.state = "error";
-          rejectButton.disabled = false;
-          acceptButton.disabled = false;
-          setProgress(error.message || "Could not answer the approval.", "error");
-        });
-    };
-    rejectButton.addEventListener("click", () => decide("reject"));
-    acceptButton.addEventListener("click", () => decide("accept"));
-    approvalActions.appendChild(rejectButton);
-    approvalActions.appendChild(acceptButton);
-    card.appendChild(approvalActions);
-    approvalCards.set(approvalId, card);
-    approvalContainer.appendChild(card);
-    approvalContainer.hidden = false;
-    transcript.hidden = false;
-    transcript.scrollTop = transcript.scrollHeight;
+    approvalCards.set(approvalId, { approvalId, questions, state: "" });
+    renderApprovalCards();
   };
 
   const currentModelEntry = () =>
@@ -3156,310 +2979,184 @@ export function createChatPanel({
     return parts.join(" · ");
   };
 
-  const renderPickerButton = () => {
-    if (!modelsReady) return;
-    const tier = modelTierChoices(currentModelEntry()).find(
-      (entry) => entry.id === pickerSpeed,
-    );
-    pickerButton.dataset.speed = tier?.id === "priority"
-      ? "fast"
-      : "standard";
-    pickerButton.textContent = pickerLabel();
-    pickerButton.setAttribute("aria-expanded", String(pickerOpen));
-  };
-
   const closePicker = ({ restoreFocus = false } = {}) => {
     pickerOpen = false;
     pickerLevel = null;
-    pickerMenu.hidden = true;
-    pickerSubmenu.hidden = true;
-    pickerSubmenu.replaceChildren();
-    pickerButton.setAttribute("aria-expanded", "false");
-    if (restoreFocus) pickerButton.focus?.();
-  };
-
-  const syncPickerRows = () => {
-    for (const row of pickerMenu.children || []) {
-      const open = row.dataset?.level === pickerLevel;
-      row.className = row.className.replace(/\s+is-open/g, "") +
-        (open ? " is-open" : "");
-      row.setAttribute?.("aria-expanded", String(open));
+    renderControls();
+    if (restoreFocus) {
+      controls.querySelector?.(".roam-codex-chat-picker-button")?.focus?.();
     }
   };
 
-  const renderPickerSubmenu = () => {
-    pickerSubmenu.replaceChildren();
-    if (!pickerLevel) {
-      pickerSubmenu.hidden = true;
-      return;
-    }
+  const pickerOptions = () => {
     const selected = currentModelEntry();
-    pickerSubmenu.hidden = false;
-    pickerSubmenu.setAttribute(
-      "aria-label",
-      `${effortLabel(pickerLevel)} options`,
-    );
-
-    const addOption = (label, active, onPick, description = "") => {
-      const option = panelButton(
-        doc,
-        `roam-codex-chat-picker-option${active ? " is-active" : ""}`,
-        "",
-        description,
-      );
-      option.setAttribute("role", "menuitemradio");
-      option.setAttribute("aria-checked", String(active));
-      option.appendChild(createPanelElement(
-        doc,
-        "span",
-        "roam-codex-chat-picker-option-label",
-        label,
-      ));
-      if (description) {
-        option.appendChild(createPanelElement(
-          doc,
-          "span",
-          "roam-codex-chat-picker-option-description",
-          description,
-        ));
-      }
-      option.addEventListener("click", () => {
-        onPick();
-        closePicker({ restoreFocus: true });
-        renderPickerButton();
-      });
-      pickerSubmenu.appendChild(option);
-    };
-
     if (pickerLevel === "model") {
-      for (const model of models) {
-        if (!model || typeof model.id !== "string") continue;
-        const displayName = model.displayName || model.id;
-        addOption(
-          model.isDefault ? `${displayName} (Default)` : displayName,
-          model.id === pickerModel,
-          () => {
-            if (model.id === pickerModel) return;
-            pickerModel = model.id;
-            modelChanged = true;
-            effortChanged = true;
-            speedChanged = true;
-            const next = currentModelEntry();
-            const efforts = modelEfforts(next);
-            if (!efforts.includes(pickerEffort)) {
-              const defaultEffort = efforts.includes(
-                next?.defaultReasoningEffort,
-              )
-                ? next.defaultReasoningEffort
-                : null;
-              pickerEffort = defaultEffort || efforts[0] || "";
-            }
-            if (!modelTierChoices(next).some(
-              (tier) => tier.id === pickerSpeed,
-            )) {
-              pickerSpeed = defaultTierIdFor(next);
-            }
-            savePreferences();
-          },
-          model.description || "",
-        );
-      }
-      return;
+      return models.filter((model) => model?.id).map((model) => ({
+        id: model.id,
+        label: `${model.displayName || model.id}${model.isDefault ? " (Default)" : ""}`,
+        active: model.id === pickerModel,
+        description: model.description || "",
+      }));
     }
-
     if (pickerLevel === "effort") {
       const efforts = modelEfforts(selected);
       const defaultEffort = efforts.includes(selected?.defaultReasoningEffort)
         ? selected.defaultReasoningEffort
         : null;
-      for (const effort of efforts) {
-        addOption(
-          effort === defaultEffort
-            ? `${effortLabel(effort)} (Default)`
-            : effortLabel(effort),
-          effort === pickerEffort,
-          () => {
-            if (effort === pickerEffort) return;
-            pickerEffort = effort;
-            effortChanged = true;
-            savePreferences();
-          },
-          selected?.supportedReasoningEfforts?.find(
-            (entry) => entry?.reasoningEffort === effort,
-          )?.description || "",
-        );
-      }
-      return;
+      return efforts.map((effort) => ({
+        id: effort,
+        label: `${effortLabel(effort)}${effort === defaultEffort ? " (Default)" : ""}`,
+        active: effort === pickerEffort,
+        description: selected?.supportedReasoningEfforts?.find(
+          (entry) => entry?.reasoningEffort === effort,
+        )?.description || "",
+      }));
     }
-
     if (pickerLevel === "speed") {
       const defaultTier = defaultTierIdFor(selected);
-      for (const tier of modelTierChoices(selected)) {
-        const name = tier.name || tier.id;
-        addOption(
-          tier.id === defaultTier ? `${name} (Default)` : name,
-          tier.id === pickerSpeed,
-          () => {
-            if (tier.id === pickerSpeed) return;
-            pickerSpeed = tier.id;
-            speedChanged = true;
-            savePreferences();
-          },
-          tier.description || "",
-        );
-      }
-      return;
+      return modelTierChoices(selected).map((tier) => ({
+        id: tier.id,
+        label: `${tier.name || tier.id}${tier.id === defaultTier ? " (Default)" : ""}`,
+        active: tier.id === pickerSpeed,
+        description: tier.description || "",
+      }));
     }
-
     if (pickerLevel === "access") {
-      const choices = [
+      return [
         ["auto", "Auto", "Allow requested Roam changes without asking"],
         ["read-only", "Read only", "Do not expose Roam write tools"],
         ["manual", "Manual", "Ask before each Roam write"],
-      ];
-      for (const [id, label, description] of choices) {
-        addOption(
-          label,
-          id === pickerAccess,
-          () => {
-            if (id === pickerAccess) return;
-            pickerAccess = id;
-            savePreferences();
-          },
-          description,
-        );
-      }
-      return;
+      ].map(([id, label, description]) => ({
+        id, label, description, active: id === pickerAccess,
+      }));
     }
-
     if (pickerLevel === "tools") {
-      const addToggle = (label, active, onToggle, description = "") => {
-        const option = panelButton(
-          doc,
-          `roam-codex-chat-picker-option${active ? " is-active" : ""}`,
-          "",
-          description,
-        );
-        option.setAttribute("role", "menuitemcheckbox");
-        option.setAttribute("aria-checked", String(active));
-        option.appendChild(createPanelElement(
-          doc,
-          "span",
-          "roam-codex-chat-picker-option-label",
-          label,
-        ));
-        if (description) {
-          option.appendChild(createPanelElement(
-            doc,
-            "span",
-            "roam-codex-chat-picker-option-description",
-            description,
-          ));
-        }
-        if (onToggle) {
-          option.addEventListener("click", () => {
-            onToggle();
-            renderPickerMenu();
-          });
-        } else {
-          option.disabled = true;
-        }
-        pickerSubmenu.appendChild(option);
-        return option;
-      };
-
-      addToggle("Roam", true, null, "Graph tools are always available");
-      for (const name of mcpServers) {
-        const active = enabledMcpServers.includes(name);
-        addToggle(name, active, () => {
-          const previous = enabledMcpServers;
-          const next = new Set(enabledMcpServers);
-          if (active) next.delete(name);
-          else next.add(name);
-          enabledMcpServers = sanitizeEnabledMcpServers([...next]);
-          void Promise.resolve(writeEnabledMcpServersImpl(enabledMcpServers))
-            .catch(() => {
-              enabledMcpServers = previous;
-              if (pickerOpen) renderPickerMenu();
-            });
-        });
-      }
+      return [{
+        id: "Roam", label: "Roam", active: true, toggle: true,
+        disabled: true, description: "Graph tools are always available",
+      }, ...mcpServers.map((name) => ({
+        id: name, label: name, active: enabledMcpServers.includes(name), toggle: true,
+      }))];
     }
+    return [];
   };
 
-  const openPickerLevel = (level) => {
-    pickerLevel = level;
-    syncPickerRows();
-    renderPickerSubmenu();
-  };
-
-  const renderPickerMenu = () => {
-    pickerMenu.replaceChildren();
+  const pickerRows = () => {
     const selected = currentModelEntry();
-
     const tiers = modelTierChoices(selected);
     const currentTier = tiers.find((tier) => tier.id === pickerSpeed);
     const rows = [
-      ["Model", selected?.displayName || selected?.id || "—", "model"],
-      ["Effort", pickerEffort ? effortLabel(pickerEffort) : "—", "effort"],
+      { label: "Model", value: selected?.displayName || selected?.id || "—", level: "model" },
+      { label: "Effort", value: pickerEffort ? effortLabel(pickerEffort) : "—", level: "effort" },
     ];
     if (tiers.length) {
-      rows.push(["Speed", currentTier?.name || currentTier?.id || "—", "speed"]);
+      rows.push({ label: "Speed", value: currentTier?.name || currentTier?.id || "—", level: "speed" });
     }
-    rows.push(["Access", effortLabel(pickerAccess), "access"]);
+    rows.push({ label: "Access", value: effortLabel(pickerAccess), level: "access" });
     if (mcpServers.length) {
       const enabledCount = enabledMcpServers
         .filter((name) => mcpServers.includes(name))
         .length;
-      rows.push([
-        "Tools",
-        enabledCount ? `Roam + ${enabledCount}` : "Roam only",
-        "tools",
-      ]);
+      rows.push({ label: "Tools", value: enabledCount ? `Roam + ${enabledCount}` : "Roam only", level: "tools" });
     }
-    for (const [label, value, level] of rows) {
-      const row = panelButton(
-        doc,
-        "roam-codex-chat-picker-item",
-        "",
-        `Choose ${label.toLowerCase()}`,
-      );
-      row.setAttribute("role", "menuitem");
-      row.setAttribute("aria-haspopup", "menu");
-      row.dataset.level = level;
-      row.appendChild(createPanelElement(
-        doc,
-        "span",
-        "roam-codex-chat-picker-item-label",
-        label,
-      ));
-      row.appendChild(createPanelElement(
-        doc,
-        "span",
-        "roam-codex-chat-picker-item-value",
-        value,
-      ));
-      const chevron = createPanelElement(
-        doc,
-        "span",
-        "roam-codex-chat-picker-item-chevron",
-        "›",
-      );
-      chevron.setAttribute("aria-hidden", "true");
-      row.appendChild(chevron);
-      const open = () => openPickerLevel(level);
-      row.addEventListener("mouseenter", open);
-      row.addEventListener("focus", open);
-      row.addEventListener("click", open);
-      row.addEventListener("keydown", (event) => {
-        if (!["ArrowRight", "Enter", " "].includes(event.key)) return;
-        event.preventDefault?.();
-        open();
-      });
-      pickerMenu.appendChild(row);
+    return rows;
+  };
+
+  const pickPickerOption = (id) => {
+    if (pickerLevel === "tools") {
+      const previous = enabledMcpServers;
+      const next = new Set(enabledMcpServers);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      enabledMcpServers = sanitizeEnabledMcpServers([...next]);
+      renderControls();
+      void Promise.resolve(writeEnabledMcpServersImpl(enabledMcpServers))
+        .catch(() => {
+          enabledMcpServers = previous;
+          renderControls();
+        });
+      return;
     }
-    syncPickerRows();
-    renderPickerSubmenu();
+    if (pickerLevel === "model" && id !== pickerModel) {
+      pickerModel = id;
+      modelChanged = true;
+      effortChanged = true;
+      speedChanged = true;
+      const selected = currentModelEntry();
+      const efforts = modelEfforts(selected);
+      if (!efforts.includes(pickerEffort)) {
+        pickerEffort = efforts.includes(selected?.defaultReasoningEffort)
+          ? selected.defaultReasoningEffort
+          : efforts[0] || "";
+      }
+      if (!modelTierChoices(selected).some((tier) => tier.id === pickerSpeed)) {
+        pickerSpeed = defaultTierIdFor(selected);
+      }
+      savePreferences();
+    } else if (pickerLevel === "effort" && id !== pickerEffort) {
+      pickerEffort = id;
+      effortChanged = true;
+      savePreferences();
+    } else if (pickerLevel === "speed" && id !== pickerSpeed) {
+      pickerSpeed = id;
+      speedChanged = true;
+      savePreferences();
+    } else if (pickerLevel === "access" && id !== pickerAccess) {
+      pickerAccess = id;
+      savePreferences();
+    }
+    closePicker({ restoreFocus: true });
+  };
+
+  const stopTurn = () => {
+    if (!runId) return;
+    stopDisabled = true;
+    setProgress("Stopping", "activity");
+    renderControls();
+    void cancelRequest(runId).catch((error) => {
+      stopDisabled = false;
+      setProgress(error.message || "Could not stop the turn.", "error");
+      renderControls();
+    });
+  };
+
+  const renderControls = () => {
+    if (closed) return;
+    const tier = modelTierChoices(currentModelEntry()).find(
+      (entry) => entry.id === pickerSpeed,
+    );
+    controlsRoot.render(window.React.createElement(ChatControls, {
+      picker: {
+        label: modelsError || (modelsReady ? pickerLabel() : "Loading models…"),
+        disabled: running || !modelsReady,
+        open: pickerOpen,
+        level: pickerLevel,
+        speed: tier?.id === "priority" ? "fast" : "standard",
+        rows: pickerRows(),
+        options: pickerOptions(),
+      },
+      running,
+      steering: running && Boolean(runId),
+      sendDisabled: !modelsReady || (running && (!runId || steerPending)),
+      stopDisabled,
+      shortcutIsMac: sendShortcutIsMac,
+      levelLabel: effortLabel,
+      actions: {
+        togglePicker: () => {
+          if (running || !modelsReady) return;
+          pickerOpen = !pickerOpen;
+          pickerLevel = null;
+          renderControls();
+        },
+        openPickerLevel: (level) => {
+          pickerLevel = level;
+          renderControls();
+        },
+        pick: pickPickerOption,
+        send: () => void send(),
+        stop: stopTurn,
+      },
+    }));
   };
 
   const historyItems = () => buildConversationHistory(
@@ -3502,7 +3199,7 @@ export function createChatPanel({
     renderMessages();
     if (modelsReady) {
       initPicker();
-      renderPickerButton();
+      renderControls();
     }
     renderConversationButton();
     closeHistory();
@@ -3541,7 +3238,7 @@ export function createChatPanel({
     renderMessages();
     if (modelsReady) {
       initPicker();
-      renderPickerButton();
+      renderControls();
     }
     renderConversationButton();
     closeHistory();
@@ -3596,73 +3293,17 @@ export function createChatPanel({
   };
 
   const renderHistory = () => {
-    historyPopover.replaceChildren();
-    const newButton = panelButton(
-      doc,
-      "roam-codex-chat-history-item roam-codex-chat-history-new",
-      "+ New chat",
-      "Start a new conversation",
-    );
-    newButton.setAttribute("role", "menuitem");
-    newButton.disabled = running;
-    if (!state.activeThreadId) {
-      newButton.className += " is-active";
-      newButton.setAttribute("aria-current", "true");
-    }
-    newButton.addEventListener("click", beginNewConversation);
-    historyPopover.appendChild(newButton);
-
+    if (closed) return;
     const items = historyItems();
-    if (!items.length) {
-      historyPopover.appendChild(createPanelElement(
-        doc,
-        "div",
-        "roam-codex-chat-history-empty",
-        historyError || "No previous chats yet.",
-      ));
-      return;
-    }
-
-    for (const item of items) {
-      const button = panelButton(
-        doc,
-        "roam-codex-chat-history-item",
-        "",
-        `Resume ${item.title}`,
-      );
-      button.setAttribute("role", "menuitem");
-      button.dataset.threadId = item.threadId;
-      button.dataset.availability = item.availability;
-      button.disabled = running;
-      if (item.active) {
-        button.className += " is-active";
-        button.setAttribute("aria-current", "true");
-      }
-      button.appendChild(createPanelElement(
-        doc,
-        "span",
-        "roam-codex-chat-history-title",
-        item.title,
-      ));
-      button.appendChild(createPanelElement(
-        doc,
-        "span",
-        "roam-codex-chat-history-date",
-        ["missing", "unavailable"].includes(item.availability)
-          ? "Unavailable"
-          : conversationDateLabel(item.updatedAt),
-      ));
-      button.addEventListener("click", () => void selectConversation(item.threadId));
-      historyPopover.appendChild(button);
-    }
-    if (historyError) {
-      historyPopover.appendChild(createPanelElement(
-        doc,
-        "div",
-        "roam-codex-chat-history-error",
-        historyError,
-      ));
-    }
+    historyRoot.render(window.React.createElement(ChatHistory, {
+      items,
+      activeThreadId: state.activeThreadId,
+      error: historyError,
+      running,
+      dateLabel: conversationDateLabel,
+      onNew: beginNewConversation,
+      onSelect: (threadId) => void selectConversation(threadId),
+    }));
   };
 
   const loadHistory = async ({ reconcileActive = false } = {}) => {
@@ -3775,11 +3416,14 @@ export function createChatPanel({
         resolveIdle = resolve;
       });
       runStartedAt = now();
-      progressTimer.textContent = formatRunningElapsed(0);
-      progressMeta.hidden = false;
+      progressState = { ...progressState, running: true, elapsed: formatRunningElapsed(0) };
       if (setIntervalImpl && clearIntervalImpl && elapsedIntervalId === null) {
         elapsedIntervalId = setIntervalImpl(() => {
-          progressTimer.textContent = formatRunningElapsed(now() - runStartedAt);
+          progressState = {
+            ...progressState,
+            elapsed: formatRunningElapsed(now() - runStartedAt),
+          };
+          renderMessages({ scroll: false });
         }, 1000);
       }
     } else if (!value && running) {
@@ -3787,38 +3431,19 @@ export function createChatPanel({
       resolveIdle = null;
     }
     if (!value) {
-      progressMeta.hidden = true;
+      progressState = { ...progressState, running: false };
       if (clearIntervalImpl && elapsedIntervalId !== null) {
         clearIntervalImpl(elapsedIntervalId);
       }
       elapsedIntervalId = null;
     }
-    progress.hidden = !progressText.textContent && progressMeta.hidden;
-    syncTranscriptStatus({ scroll: value });
+    renderMessages({ scroll: value });
     running = value;
     if (value && pickerOpen) closePicker();
-    pickerButton.disabled = value || !modelsReady;
     conversationButton.disabled = value;
-    stopButton.hidden = !value;
-    stopButton.disabled = false;
-    syncSendButton();
+    stopDisabled = false;
+    renderControls();
     if (historyOpen) renderHistory();
-  };
-
-  const syncSendButton = () => {
-    const steering = running && Boolean(runId);
-    sendButton.hidden = false;
-    sendButton.disabled = !modelsReady || (running && (!runId || steerPending));
-    sendButton.classList?.toggle?.("is-steering", steering);
-    const label = sendButton.firstChild;
-    if (label && typeof label.nodeValue === "string") {
-      label.nodeValue = steering ? "Steer" : "Send";
-    }
-    sendButton.title = steering
-      ? "Add the focused block to Codex's current turn without stopping it"
-      : `Send the focused block in this chat's Block Outline (${
-        sendShortcutIsMac ? "Option" : "Alt"
-      }+Enter, rebindable in Settings → Hotkeys)`;
   };
 
   const clearComposerForSubmit = async (prompt) => {
@@ -3945,12 +3570,12 @@ export function createChatPanel({
     if (running) {
       if (runId && !steerPending) {
         steerPending = true;
-        syncSendButton();
+        renderControls();
         try {
           return await steerActiveTurn(runId);
         } finally {
           steerPending = false;
-          syncSendButton();
+          renderControls();
         }
       }
       return null;
@@ -4009,7 +3634,7 @@ export function createChatPanel({
         enabledServers: enabledMcpServers,
         onStarted: ({ runId: startedRunId }) => {
           runId = startedRunId;
-          syncSendButton();
+          renderControls();
         },
         onThread: ({ threadId }) => {
           rememberThread(threadId);
@@ -4132,7 +3757,7 @@ export function createChatPanel({
 
   const handleDocumentClick = (event) => {
     if (historyOpen && !header.contains?.(event.target)) closeHistory();
-    if (pickerOpen && !pickerWrap.contains?.(event.target)) closePicker();
+    if (pickerOpen && !controls.contains?.(event.target)) closePicker();
   };
 
   const close = () => {
@@ -4152,10 +3777,12 @@ export function createChatPanel({
     doc.removeEventListener?.("click", handleDocumentClick, true);
     doc.removeEventListener?.("visibilitychange", handleVisibilityChange);
     doc.defaultView?.removeEventListener?.("focus", handleWindowFocus);
-    transcript.removeEventListener?.("scroll", updateScrollLatestButton);
     for (const timer of copyFeedbackTimers.values()) clearTimeoutImpl(timer);
     copyFeedbackTimers.clear();
-    disposeRenderedMessages();
+    connectionRoot.unmount();
+    transcriptRoot.unmount();
+    historyRoot.unmount();
+    controlsRoot.unmount();
     header.remove();
     panel.remove();
     controls.remove();
@@ -4166,13 +3793,6 @@ export function createChatPanel({
     return closePromise;
   };
 
-  // Keep Roam's native block editor focused until send() snapshots it. A
-  // normal button mouse-down otherwise moves focus into the controls before
-  // readFocusedPromptBlock() can identify the composer window.
-  sendButton.addEventListener("mousedown", (event) => {
-    event.preventDefault?.();
-  });
-  sendButton.addEventListener("click", () => void send());
   closeButton.addEventListener("click", () => {
     const removeWindow = api.ui?.rightSidebar?.removeWindow;
     const removal = typeof removeWindow === "function"
@@ -4204,28 +3824,6 @@ export function createChatPanel({
   doc.addEventListener?.("click", handleDocumentClick, true);
   doc.addEventListener?.("visibilitychange", handleVisibilityChange);
   doc.defaultView?.addEventListener?.("focus", handleWindowFocus);
-  pickerButton.addEventListener("click", () => {
-    if (running || !modelsReady) return;
-    if (pickerOpen) {
-      closePicker();
-      return;
-    }
-    pickerOpen = true;
-    pickerLevel = null;
-    pickerMenu.hidden = false;
-    pickerButton.setAttribute("aria-expanded", "true");
-    renderPickerMenu();
-  });
-  stopButton.addEventListener("click", () => {
-    if (!runId) return;
-    stopButton.disabled = true;
-    setProgress("Stopping", "activity");
-    void cancelRequest(runId).catch((error) => {
-      stopButton.disabled = false;
-      setProgress(error.message || "Could not stop the turn.", "error");
-    });
-  });
-
   renderMessages();
   setProgress();
   renderConversationButton();
@@ -4240,8 +3838,9 @@ export function createChatPanel({
         if (closed) return;
         models = Array.isArray(availableModels) ? availableModels : [];
         modelsReady = true;
+        modelsError = "";
         initPicker();
-        renderPickerButton();
+        renderControls();
         setRunning(running);
       })
       .catch((error) => {
@@ -4250,7 +3849,8 @@ export function createChatPanel({
           ["NOT_PAIRED", "BRIDGE_UNREACHABLE"].includes(error.code) ||
           [401, 409].includes(error.status);
         if (!connectionSetupFailure) {
-          pickerButton.textContent = "Models unavailable";
+          modelsError = "Models unavailable";
+          renderControls();
           setProgress(error.message, "error");
         }
         scheduleConnectionRetry();
@@ -4263,7 +3863,7 @@ export function createChatPanel({
       .then((servers) => {
         if (closed) return;
         mcpServers = Array.isArray(servers) ? servers : [];
-        if (pickerOpen) renderPickerMenu();
+        renderControls();
       })
       .catch(() => {
         // Without a server list the picker simply omits the Tools row.
@@ -4272,109 +3872,24 @@ export function createChatPanel({
 
   const renderConnectionCard = ({ focusInput = false } = {}) => {
     if (closed) return;
-    connectionCard.replaceChildren();
-    if (connection.state === "connected") {
-      connectionCard.hidden = true;
-      return;
-    }
-    const wasHidden = connectionCard.hidden === true;
-    connectionCard.hidden = false;
-    if (wasHidden) {
-      const reduceMotion = Boolean(
+    const visible = connection.state !== "connected";
+    const reveal = visible && !connectionCardVisible;
+    connectionCardVisible = visible;
+    connectionRoot.render(window.React.createElement(ConnectionCard, {
+      connection,
+      note: connectionNote,
+      pairingCodeRequired,
+      focusInput,
+      reveal,
+      reduceMotion: Boolean(
         matchMediaImpl?.("(prefers-reduced-motion: reduce)")?.matches,
-      );
-      connectionCard.scrollIntoView?.({
-        block: "nearest",
-        behavior: reduceMotion ? "auto" : "smooth",
-      });
-    }
-    const addTitle = (text) => connectionCard.appendChild(
-      createPanelElement(doc, "h3", "roam-codex-connection-title", text),
-    );
-    const addText = (text) => connectionCard.appendChild(
-      createPanelElement(doc, "p", "roam-codex-connection-text", text),
-    );
-    const actions = createPanelElement(
-      doc,
-      "div",
-      "roam-codex-connection-actions",
-    );
-    const addAction = (label, onActivate) => {
-      const button = panelButton(
-        doc,
-        "roam-codex-connection-button",
-        label,
-        "",
-      );
-      button.addEventListener("click", () => void onActivate());
-      actions.appendChild(button);
-    };
-
-    const addPairingControls = (label) => {
-      if (pairingCodeRequired) {
-        const input = createPanelElement(
-          doc,
-          "input",
-          "roam-codex-connection-input",
-        );
-        input.setAttribute("type", "text");
-        input.setAttribute("aria-label", "Bridge pairing code");
-        input.addEventListener("keydown", (event) => {
-          if (event.key === "Enter") void startPairing(input.value);
-        });
-        connectionCard.appendChild(input);
-        if (focusInput) input.focus?.();
-        addAction(label, () => startPairing(input.value));
-      } else {
-        addAction(label, () => startPairing());
-      }
-    };
-
-    if (connection.state === "checking") {
-      addTitle("Connecting to the local Codex bridge…");
-    } else if (connection.state === "wrong-graph") {
-      addTitle("The bridge is paired to a different graph");
-      addText(
-        connection.detail ||
-          "Pairing switches the bridge over to this graph.",
-      );
-      addPairingControls("Use this graph instead");
-    } else if (connection.state === "unpaired") {
-      addTitle("Pair this device with the bridge");
-      addText(
-        pairingCodeRequired
-          ? "Enter the one-time pairing code."
-          : "Click Pair, then choose Allow in the dialog that opens on this computer.",
-      );
-      addPairingControls("Pair");
-    } else if (connection.state === "signed-out") {
-      addTitle("Sign in to Codex");
-      addText(
-        "The bridge is running, but Codex has no signed-in ChatGPT account.",
-      );
-      addAction("Sign in", startLogin);
-    } else {
-      addTitle("The Codex bridge isn't running");
-      addText(
-        "Start it on this computer; this panel reconnects by itself.",
-      );
-      connectionCard.appendChild(createPanelElement(
-        doc,
-        "code",
-        "roam-codex-connection-command",
-        "npx roam-codex-bridge",
-      ));
-      addAction("Try again", refreshConnection);
-    }
-    if (connectionNote) {
-      connectionCard.appendChild(createPanelElement(
-        doc,
-        "p",
-        "roam-codex-connection-note",
-        connectionNote,
-      ));
-    }
-    if (actions.children.length) connectionCard.appendChild(actions);
+      ),
+      actions: {
+        pair: startPairing,
+        login: startLogin,
+        retry: refreshConnection,
+      },
+    }));
   };
 
   const scheduleConnectionRetry = () => {

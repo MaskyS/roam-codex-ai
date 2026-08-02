@@ -5,10 +5,12 @@
   "type": "module",
   "description": "Local bridge that connects the Roam Codex extension to the Codex App Server.",
   "scripts": {
+    "build": "esbuild src/extension.jsx --bundle --format=esm --platform=browser --target=es2022 --jsx-factory=window.React.createElement --outfile=extension.js",
     "dev": "node --watch bridge.mjs",
+    "dev:extension": "npm run build -- --watch",
     "start": "node bridge.mjs",
-    "test": "node --test",
-    "check": "node --check bridge.mjs && node --check extension.js && node --check bin.mjs && node --test"
+    "test": "npm run build && node --test",
+    "check": "npm run build && node --check bridge.mjs && node --check extension.js && node --check bin.mjs && node --test"
   },
   "engines": {
     "node": ">=20"
@@ -24,5 +26,7 @@
     "README.md"
   ],
   "license": "MIT",
-  "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e"
+  "devDependencies": {
+    "esbuild": "0.25.8"
+  }
 }
