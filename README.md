@@ -5,7 +5,7 @@ Chat in the right sidebar, ask Codex to read or change the active graph, or run
 a focused block as a direct graph task. Conversations stay attached to the
 graph while Codex runs locally through its official App Server.
 
-![Roam Codex chat beside a Harbor Notes workshop page](./docs/images/roam-codex-chat-panel.png)
+![Roam Codex chat beside a Harbor Notes workshop page](./docs/images/roam-codex-chat-panel.webp)
 
 ## What you can do
 
@@ -100,7 +100,7 @@ Write in the native composer and select **Send**. Its picker contains the model,
 reasoning effort, graph access, and optional tools. During a turn, another
 composer message can **Steer** it, while **Stop** interrupts it.
 
-![An active Codex turn with the Steer and Stop controls](./docs/images/roam-codex-steering.png)
+![An active Codex turn with the Steer and Stop controls](./docs/images/roam-codex-steering.webp)
 
 The conversation title opens history. History shows compact activity ages such
 as `5m ago` and `3d ago`. Hover or keyboard-focus a conversation to reveal its
@@ -112,12 +112,12 @@ access defaults configured under **Settings → Extensions → Roam Codex**.
 
 Focus an ordinary block and choose `Codex: Do this block`.
 
-![Codex: Do this block in Roam's command palette](./docs/images/roam-codex-do-this-block.png)
+![Codex: Do this block in Roam's command palette](./docs/images/roam-codex-do-this-block.webp)
 
 Codex preserves the source and appends the result beneath it through Roam MCP.
 These one-shot runs use the fast service tier by default.
 
-![A preserved source block with the generated outline beneath it](./docs/images/roam-codex-block-result.png)
+![A preserved source block with the generated outline beneath it](./docs/images/roam-codex-block-result.webp)
 
 A temporary `[[Codex/running]]` child appears while the task runs and is removed
 after success, failure, or Stop. Research sources, questions, and caveats are
