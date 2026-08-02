@@ -29,6 +29,8 @@ const THREAD_ID_FIELD = "Codex thread::";
 const THREAD_ORIGIN_FIELD = "Origin installation::";
 const THREAD_CREATED_FIELD = "Created at::";
 const THREAD_ACTIVE_FIELD = "Last active at::";
+const AGENT_GUIDELINES_PAGE_TITLE = "roam/agent guidelines";
+const MAX_GRAPH_GUIDELINES_LENGTH = 20_000;
 const CHAT_TRANSCRIPT_HEIGHT_KEY_PREFIX = "roam-codex-lab.chat-transcript-height";
 const CHAT_TRANSCRIPT_MIN_HEIGHT = 140;
 const CHAT_TRANSCRIPT_MAX_HEIGHT = 640;
@@ -336,9 +338,23 @@ async function bridgeFetch(fetchImpl, url, init) {
 
 function missingTokenError() {
   const error = new Error(
-    "This device isn't paired with the local Codex bridge yet.",
+    "Pair this device with the local Codex bridge to continue.",
   );
   error.code = "NOT_PAIRED";
+  return error;
+}
+
+function bridgeResponseError(response, body = {}) {
+  if (response.status === 401) {
+    const error = missingTokenError();
+    error.status = response.status;
+    return error;
+  }
+  const error = new Error(
+    body.error || `Bridge returned HTTP ${response.status}.`,
+  );
+  error.status = response.status;
+  if (typeof body.code === "string") error.code = body.code;
   return error;
 }
 
@@ -361,12 +377,16 @@ export async function requestProbe(blockUid, {
   graph = currentGraphName(),
   bridgeUrl = currentBridgeUrl(),
   token = getToken({ graph }),
+  graphGuidelines,
   onProgress = () => {},
   onStarted = () => {},
 } = {}) {
   if (!token) {
     throw missingTokenError();
   }
+
+  const body = { graph, blockUid };
+  if (graphGuidelines !== undefined) body.graphGuidelines = graphGuidelines;
 
   const response = await bridgeFetch(fetchImpl, `${bridgeUrl}/probe`, {
     method: "POST",
@@ -375,7 +395,7 @@ export async function requestProbe(blockUid, {
       "content-type": "application/json",
       "x-roam-graph": graphHeaderValue(graph),
     },
-    body: JSON.stringify({ graph, blockUid }),
+    body: JSON.stringify(body),
   });
 
   if (!response.ok) {
@@ -385,7 +405,7 @@ export async function requestProbe(blockUid, {
     } catch {
       // A useful status error is emitted below.
     }
-    throw new Error(body.error || `Bridge returned HTTP ${response.status}.`);
+    throw bridgeResponseError(response, body);
   }
 
   if (
@@ -515,11 +535,7 @@ async function bridgeJson(path, {
     // A useful status error is emitted below.
   }
   if (!response.ok) {
-    const error = new Error(
-      body.error || `Bridge returned HTTP ${response.status}.`,
-    );
-    error.status = response.status;
-    throw error;
+    throw bridgeResponseError(response, body);
   }
   return body;
 }
@@ -565,11 +581,7 @@ export async function requestPanelLogin({
     // A useful status error is emitted below.
   }
   if (!response.ok || typeof result.authUrl !== "string") {
-    const error = new Error(
-      result.error || `Bridge returned HTTP ${response.status}.`,
-    );
-    error.status = response.status;
-    throw error;
+    throw bridgeResponseError(response, result);
   }
   return { loginId: result.loginId || null, authUrl: result.authUrl };
 }
@@ -658,9 +670,7 @@ export async function requestPanelThreadSummaries(threadIds, {
     // A useful status error is emitted below.
   }
   if (!response.ok) {
-    throw new Error(
-      result.error || `Bridge returned HTTP ${response.status}.`,
-    );
+    throw bridgeResponseError(response, result);
   }
   return {
     threads: Array.isArray(result.threads) ? result.threads : [],
@@ -717,7 +727,42 @@ export async function requestPanelThreadName(threadId, name, {
     // A useful status error is emitted below.
   }
   if (!response.ok) {
-    throw new Error(result.error || `Bridge returned HTTP ${response.status}.`);
+    throw bridgeResponseError(response, result);
+  }
+  return result;
+}
+
+export async function requestPanelThreadDelete(threadId, {
+  fetchImpl = window.fetch.bind(window),
+  graph = currentGraphName(),
+  bridgeUrl = currentBridgeUrl(),
+  token = getToken({ graph }),
+} = {}) {
+  if (!token) {
+    throw missingTokenError();
+  }
+  if (!validThreadId(threadId)) {
+    throw new Error("Cannot delete a conversation without a valid thread ID.");
+  }
+  const response = await bridgeFetch(
+    fetchImpl,
+    `${bridgeUrl}/threads/${encodeURIComponent(threadId)}`,
+    {
+      method: "DELETE",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-roam-graph": graphHeaderValue(graph),
+      },
+    },
+  );
+  let result = {};
+  try {
+    result = await response.json();
+  } catch {
+    // A useful status error is emitted below.
+  }
+  if (!response.ok) {
+    throw bridgeResponseError(response, result);
   }
   return result;
 }
@@ -728,6 +773,7 @@ export async function requestPanelChat(message, {
   bridgeUrl = currentBridgeUrl(),
   token = getToken({ graph }),
   promptBlockUid,
+  graphGuidelines,
   threadId = null,
   model = null,
   effort = null,
@@ -751,6 +797,7 @@ export async function requestPanelChat(message, {
     message: String(message),
     promptBlockUid,
   };
+  if (graphGuidelines !== undefined) body.graphGuidelines = graphGuidelines;
   if (threadId) body.threadId = threadId;
   if (model) body.model = model;
   if (effort) body.effort = effort;
@@ -776,9 +823,7 @@ export async function requestPanelChat(message, {
     } catch {
       // A useful status error is emitted below.
     }
-    throw new Error(
-      result.error || `Bridge returned HTTP ${response.status}.`,
-    );
+    throw bridgeResponseError(response, result);
   }
 
   return readProbeStream(response, {
@@ -824,7 +869,7 @@ export async function requestRunApproval(runId, approvalId, decision, {
     // A useful status error is emitted below.
   }
   if (!response.ok) {
-    throw new Error(result.error || `Bridge returned HTTP ${response.status}.`);
+    throw bridgeResponseError(response, result);
   }
   return result;
 }
@@ -860,7 +905,7 @@ export async function requestRunCancellation(runId, {
     // A useful status error is emitted below.
   }
   if (!response.ok) {
-    throw new Error(result.error || `Bridge returned HTTP ${response.status}.`);
+    throw bridgeResponseError(response, result);
   }
   return result;
 }
@@ -898,12 +943,7 @@ export async function requestRunSteer(runId, message, {
     // A useful status error is emitted below.
   }
   if (!response.ok) {
-    const error = new Error(
-      result.error || `Bridge returned HTTP ${response.status}.`,
-    );
-    error.status = response.status;
-    error.code = result.code;
-    throw error;
+    throw bridgeResponseError(response, result);
   }
   return result;
 }
@@ -1086,6 +1126,59 @@ async function exactPageUid(api, title) {
   ) || null;
 }
 
+function orderedOutlineChildren(block) {
+  return [...(block?.[":block/children"] || [])].sort((left, right) => {
+    const leftOrder = Number.isFinite(left?.[":block/order"])
+      ? left[":block/order"]
+      : Number.MAX_SAFE_INTEGER;
+    const rightOrder = Number.isFinite(right?.[":block/order"])
+      ? right[":block/order"]
+      : Number.MAX_SAFE_INTEGER;
+    return leftOrder - rightOrder;
+  });
+}
+
+function appendGuidelineOutline(lines, block, depth) {
+  const value = typeof block?.[":block/string"] === "string"
+    ? block[":block/string"].trim()
+    : "";
+  if (value) {
+    const indent = "  ".repeat(depth);
+    const continuation = `\n${"  ".repeat(depth + 1)}`;
+    lines.push(`${indent}- ${value.replace(/\r?\n/g, continuation)}`);
+  }
+  for (const child of orderedOutlineChildren(block)) {
+    appendGuidelineOutline(lines, child, value ? depth + 1 : depth);
+  }
+}
+
+export async function readGraphAgentGuidelines({
+  api = getRoamApi(),
+  maxLength = MAX_GRAPH_GUIDELINES_LENGTH,
+} = {}) {
+  const pageUid = await Promise.resolve(
+    exactPageUid(api, AGENT_GUIDELINES_PAGE_TITLE),
+  );
+  if (!pageUid) return "";
+
+  const pattern = [
+    "[:block/uid :node/title :block/string :block/order",
+    "{:block/children ...}]",
+  ].join(" ");
+  const page = api.data?.async?.pull
+    ? await api.data.async.pull(pattern, [":block/uid", pageUid])
+    : api.data?.pull?.(pattern, [":block/uid", pageUid]);
+  if (!page) return "";
+
+  const lines = [];
+  for (const child of orderedOutlineChildren(page)) {
+    appendGuidelineOutline(lines, child, 0);
+  }
+  const text = lines.join("\n").trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
 function generatedRoamUid(api) {
   return api.util?.generateUID?.() || Math.random().toString(36).slice(2, 11);
 }
@@ -1225,6 +1318,30 @@ export async function updateGraphThreadActivity(
   return { ...record, lastActiveAt: timestamp };
 }
 
+export async function deleteGraphThreadRecord(
+  record,
+  { api = getRoamApi() } = {},
+) {
+  if (
+    !validThreadId(record?.threadId) ||
+    !validBlockUid(record?.threadPageUid) ||
+    typeof record?.threadPageTitle !== "string" ||
+    !record.threadPageTitle.startsWith(THREAD_PAGE_PREFIX)
+  ) {
+    throw new Error("Refusing to delete an invalid Codex thread page.");
+  }
+  if (!api.data?.page?.delete) {
+    throw new Error("Roam page deletion is unavailable.");
+  }
+  await api.data.page.delete({
+    page: { uid: record.threadPageUid },
+  });
+  return {
+    threadId: record.threadId,
+    threadPageUid: record.threadPageUid,
+  };
+}
+
 function serverTimestampMs(value) {
   if (!Number.isFinite(value)) return 0;
   return value < 1_000_000_000_000 ? value * 1_000 : value;
@@ -1238,6 +1355,20 @@ function conversationDateLabel(value) {
     hour: "numeric",
     minute: "2-digit",
   }).format(new Date(value));
+}
+
+export function conversationAgeLabel(value, currentTime = Date.now()) {
+  if (!Number.isFinite(value) || value <= 0) return "";
+  const elapsed = Math.max(0, currentTime - value);
+  const minute = 60_000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  if (elapsed < minute) return "now";
+  if (elapsed < hour) return `${Math.floor(elapsed / minute)}m ago`;
+  if (elapsed < day) return `${Math.floor(elapsed / hour)}h ago`;
+  if (elapsed < 30 * day) return `${Math.floor(elapsed / day)}d ago`;
+  if (elapsed < 365 * day) return `${Math.floor(elapsed / (30 * day))}mo ago`;
+  return `${Math.floor(elapsed / (365 * day))}y ago`;
 }
 
 export function buildConversationHistory(state, summaries = []) {
@@ -1583,9 +1714,17 @@ export async function workOnBlock(
   let failure;
 
   try {
+    let graphGuidelines;
+    try {
+      graphGuidelines = await readGraphAgentGuidelines({ api });
+    } catch {
+      // The runtime can fall back to the MCP guideline tool when the live
+      // page could not be read through Roam's local API.
+    }
     statusUid = await createRunningStatus(blockUid, { api, storage });
     stopPresentation = startPresentation(statusUid);
     result = await request(blockUid, {
+      graphGuidelines,
       onProgress: (progress) => stopPresentation?.update?.(progress),
       onStarted: ({ runId }) => {
         stopPresentation?.setCancelHandler?.(() => cancelRequest(runId));
@@ -1748,6 +1887,40 @@ export function findSidebarChatLauncherPlacement(doc = globalThis.document) {
   return { sidebar, content, header, nativeToggle };
 }
 
+export function placeChatHeader(
+  controller,
+  { doc = globalThis.document, host = null } = {},
+) {
+  const chatHeader = controller?.headerElement;
+  if (!chatHeader) return false;
+  const placement = findSidebarChatLauncherPlacement(doc);
+  const launcher = doc?.getElementById?.(SIDEBAR_CHAT_LAUNCHER_ID);
+  if (
+    placement?.header &&
+    launcher?.parentNode === placement.header
+  ) {
+    if (
+      chatHeader.parentNode !== placement.header ||
+      launcher.nextSibling !== chatHeader
+    ) {
+      placement.header.insertBefore(
+        chatHeader,
+        launcher.nextSibling || placement.nativeToggle || null,
+      );
+    }
+    return true;
+  }
+  if (host && controller?.element) {
+    if (
+      chatHeader.parentNode !== host ||
+      chatHeader.nextSibling !== controller.element
+    ) {
+      host.insertBefore(chatHeader, controller.element);
+    }
+  }
+  return false;
+}
+
 function activeChatPanelIsOpen() {
   return Boolean(ACTIVE_CHAT_PANEL?.element?.isConnected);
 }
@@ -1903,9 +2076,11 @@ export function installSidebarChatLauncher({
         ? mountOptions.isChatOpenImpl()
         : activeChatPanelIsOpen();
       updateSidebarChatLauncherState(mountedButton, isOpen);
+      placeChatHeader(ACTIVE_CHAT_PANEL, { doc });
       return mountedButton;
     }
     mountedButton = mountSidebarChatLauncher({ doc, ...mountOptions });
+    placeChatHeader(ACTIVE_CHAT_PANEL, { doc });
     return mountedButton;
   };
   const schedule = () => {
@@ -2102,49 +2277,59 @@ function resetChatPromptSnapshot(
 
 export async function readFocusedPromptBlock(
   rootBlockUid,
-  { api = getRoamApi() } = {},
+  {
+    api = getRoamApi(),
+    preferredBlockUid = null,
+  } = {},
 ) {
   const sidebarWindow = findSidebarBlockWindow(rootBlockUid, { api });
   const focused = api.ui?.getFocusedBlock?.();
-  if (
-    !sidebarWindow?.["window-id"] ||
-    !validBlockUid(focused?.["block-uid"]) ||
-    focused["window-id"] !== sidebarWindow["window-id"]
-  ) {
-    throw new Error("Focus the Roam block you want to send in the Block Outline.");
+  if (!sidebarWindow?.["window-id"]) {
+    throw new Error("The chat composer is no longer available.");
   }
 
-  const uid = focused["block-uid"];
   const pattern = "[:block/uid :block/string {:block/children ...}]";
-  const pull = api.data?.async?.pull
-    ? await api.data.async.pull(pattern, [":block/uid", uid])
-    : api.data?.pull?.(pattern, [":block/uid", uid]);
-  let rootPull = pull;
-  if (uid !== rootBlockUid) {
-    rootPull = api.data?.async?.pull
-      ? await api.data.async.pull(pattern, [":block/uid", rootBlockUid])
-      : api.data?.pull?.(pattern, [":block/uid", rootBlockUid]);
+  const rootPull = api.data?.async?.pull
+    ? await api.data.async.pull(pattern, [":block/uid", rootBlockUid])
+    : api.data?.pull?.(pattern, [":block/uid", rootBlockUid]);
+  if (!rootPull) {
+    throw new Error("The chat composer is no longer available.");
   }
-  let promptPull = pull;
-  let text = normalizeChatPromptText(promptPull?.[":block/string"]);
-  if (!text && rootPull) {
-    const focusedPath = findChatPromptPath(rootPull, uid) || [];
-    promptPull = focusedPath
-      .slice(0, -1)
-      .reverse()
-      .find((block) => normalizeChatPromptText(block?.[":block/string"])) ||
-      promptPull;
-    text = normalizeChatPromptText(promptPull?.[":block/string"]);
+
+  const focusedBlockUid =
+    focused?.["window-id"] === sidebarWindow["window-id"] &&
+      validBlockUid(focused?.["block-uid"])
+      ? focused["block-uid"]
+      : null;
+  const candidateUids = [...new Set([
+    focusedBlockUid,
+    validBlockUid(preferredBlockUid) ? preferredBlockUid : null,
+    rootBlockUid,
+  ].filter(Boolean))];
+
+  for (const uid of candidateUids) {
+    const path = findChatPromptPath(rootPull, uid);
+    if (!path) continue;
+    let promptPull = path.at(-1);
+    let text = normalizeChatPromptText(promptPull?.[":block/string"]);
+    if (!text) {
+      promptPull = path
+        .slice(0, -1)
+        .reverse()
+        .find((block) => normalizeChatPromptText(block?.[":block/string"])) ||
+        promptPull;
+      text = normalizeChatPromptText(promptPull?.[":block/string"]);
+    }
+    if (!text) continue;
+    return {
+      uid: promptPull[":block/uid"],
+      text,
+      outline: snapshotChatPromptOutline(promptPull),
+      rootOutline: snapshotChatPromptOutline(rootPull),
+    };
   }
-  if (!text) {
-    throw new Error("Write a message in this Roam outline before sending.");
-  }
-  return {
-    uid: promptPull[":block/uid"],
-    text,
-    outline: snapshotChatPromptOutline(promptPull),
-    rootOutline: snapshotChatPromptOutline(rootPull),
-  };
+
+  throw new Error("Write a message in the chat composer before sending.");
 }
 
 async function pullUid(uid, api) {
@@ -2443,12 +2628,14 @@ export function createChatPanel({
   requestMessagesImpl = requestPanelMessages,
   requestHistoryImpl = requestPanelThreadSummaries,
   requestThreadNameImpl = requestPanelThreadName,
+  requestDeleteThreadImpl = requestPanelThreadDelete,
   requestGraphIndexImpl = () => readGraphThreadIndex({ api }),
   ensureGraphThreadImpl = (input) => ensureGraphThreadRecord({
     ...input,
     api,
     storage,
   }),
+  deleteGraphThreadImpl = (record) => deleteGraphThreadRecord(record, { api }),
   updateGraphActivityImpl = (record, timestamp) =>
     updateGraphThreadActivity(record, timestamp, { api }),
   copyTextImpl = copyRoamText,
@@ -2458,7 +2645,8 @@ export function createChatPanel({
   clearIntervalImpl = globalThis.clearInterval?.bind(globalThis),
   matchMediaImpl = globalThis.matchMedia?.bind(globalThis),
   navigatorImpl = globalThis.navigator,
-  readPromptImpl = () => readFocusedPromptBlock(rootBlockUid, { api }),
+  readPromptImpl = ({ preferredBlockUid = null } = {}) =>
+    readFocusedPromptBlock(rootBlockUid, { api, preferredBlockUid }),
   clearScratchPromptImpl = (prompt) =>
     clearScratchPromptBlock(prompt, {
       api,
@@ -2518,6 +2706,8 @@ export function createChatPanel({
   const threadIndexPromises = new Map();
   const mirroredThreadNames = new Set();
   let historyOpen = false;
+  let historyMenuThreadId = null;
+  let deletingThreadId = null;
   let historyLoadVersion = 0;
   let selectionLoadVersion = 0;
   let historyError = "";
@@ -2537,10 +2727,22 @@ export function createChatPanel({
   let pickerOpen = false;
   let pickerLevel = null;
   let stopDisabled = false;
+  let lastComposerBlockUid = rootBlockUid;
   const copyFeedbackTimers = new Map();
   const copyStates = new Map();
   const approvalCards = new Map();
   let progressState = { text: "", kind: "", running: false, elapsed: "" };
+
+  const rememberComposerFocus = () => {
+    const focused = api.ui?.getFocusedBlock?.();
+    const sidebarWindow = findSidebarBlockWindow(rootBlockUid, { api });
+    if (
+      validBlockUid(focused?.["block-uid"]) &&
+      focused?.["window-id"] === sidebarWindow?.["window-id"]
+    ) {
+      lastComposerBlockUid = focused["block-uid"];
+    }
+  };
 
   const panel = createPanelElement(doc, "section", CHAT_PANEL_CLASS);
   panel.id = CHAT_PANEL_ID;
@@ -3298,6 +3500,7 @@ export function createChatPanel({
           renderControls();
         },
         pick: pickPickerOption,
+        rememberComposerFocus,
         send: () => void send(),
         stop: stopTurn,
       },
@@ -3321,6 +3524,7 @@ export function createChatPanel({
 
   const closeHistory = ({ restoreFocus = false } = {}) => {
     historyOpen = false;
+    historyMenuThreadId = null;
     historyPopover.hidden = true;
     conversationButton.setAttribute("aria-expanded", "false");
     if (restoreFocus) conversationButton.focus?.();
@@ -3438,6 +3642,83 @@ export function createChatPanel({
     }
   };
 
+  const deleteConversation = async (threadId) => {
+    if (
+      running ||
+      deletingThreadId ||
+      !state.conversations[threadId]
+    ) {
+      return;
+    }
+    const localRecord = state.conversations[threadId];
+    const graphRecord = graphThreadRecords.get(threadId) || localRecord;
+    deletingThreadId = threadId;
+    historyError = "";
+    renderHistory();
+
+    try {
+      await requestDeleteThreadImpl(threadId);
+      if (graphRecord?.threadPageUid) {
+        await deleteGraphThreadImpl(graphRecord);
+      }
+
+      historyLoadVersion += 1;
+      const deletedActiveConversation = state.activeThreadId === threadId;
+      if (deletedActiveConversation) {
+        selectionLoadVersion += 1;
+        state.activeThreadId = null;
+        state.newConversationPreferences = {
+          model: defaultModel,
+          effort: null,
+          speed: null,
+          access: defaultAccess,
+        };
+        messages = [];
+        clearApprovalCards();
+        modelChanged = Boolean(defaultModel);
+        effortChanged = false;
+        speedChanged = false;
+      }
+
+      delete state.conversations[threadId];
+      delete state.threadPreferences[threadId];
+      delete state.lastSeenUpdatedAt[threadId];
+      delete state.pendingThreads[threadId];
+      graphThreadRecords.delete(threadId);
+      threadSummaries.delete(threadId);
+      threadIndexPromises.delete(threadId);
+      for (const mirroredName of [...mirroredThreadNames]) {
+        if (mirroredName.startsWith(`${threadId}\n`)) {
+          mirroredThreadNames.delete(mirroredName);
+        }
+      }
+
+      historyMenuThreadId = null;
+      deletingThreadId = null;
+      persist();
+      if (deletedActiveConversation) {
+        renderMessages();
+        setProgress();
+        if (modelsReady) {
+          initPicker();
+          renderControls();
+        }
+      }
+      renderConversationButton();
+      if (historyOpen) renderHistory();
+    } catch (error) {
+      deletingThreadId = null;
+      const connectionFailure = ["NOT_PAIRED", "BRIDGE_UNREACHABLE"].includes(
+        error.code,
+      );
+      historyError = connectionFailure
+        ? ""
+        : error.message || "Could not delete that conversation.";
+      if (connectionFailure) void refreshConnection();
+      if (historyOpen) renderHistory();
+    }
+  };
+
   const renderHistory = () => {
     if (closed) return;
     const items = historyItems();
@@ -3446,9 +3727,19 @@ export function createChatPanel({
       activeThreadId: state.activeThreadId,
       error: historyError,
       running,
-      dateLabel: conversationDateLabel,
+      menuThreadId: historyMenuThreadId,
+      deletingThreadId,
+      dateLabel: (value) => conversationAgeLabel(value, now()),
       onNew: beginNewConversation,
       onSelect: (threadId) => void selectConversation(threadId),
+      onToggleMenu: (threadId) => {
+        if (running || deletingThreadId) return;
+        historyMenuThreadId = historyMenuThreadId === threadId
+          ? null
+          : threadId;
+        renderHistory();
+      },
+      onDelete: (threadId) => void deleteConversation(threadId),
     }));
   };
 
@@ -3618,6 +3909,7 @@ export function createChatPanel({
         error: "The composer changed before it could be sent. Review it and try again.",
       };
     }
+    lastComposerBlockUid = resetBlockUid;
     resetPromptUids.add(resetBlockUid);
     try {
       const sidebarWindow = findSidebarBlockWindow(rootBlockUid, { api });
@@ -3640,6 +3932,7 @@ export function createChatPanel({
     try {
       const restored = await restorePromptImpl(prompt);
       if (restored) {
+        lastComposerBlockUid = prompt.uid;
         const sidebarWindow = findSidebarBlockWindow(rootBlockUid, { api });
         if (sidebarWindow?.["window-id"]) {
           await api.ui.setBlockFocusAndSelection({
@@ -3659,9 +3952,12 @@ export function createChatPanel({
   const steerActiveTurn = async (steerRunId) => {
     let prompt;
     try {
-      prompt = await readPromptImpl();
+      prompt = await readPromptImpl({
+        preferredBlockUid: lastComposerBlockUid,
+      });
+      lastComposerBlockUid = prompt.uid;
     } catch (error) {
-      setProgress(error.message || "Focus a Roam block before sending.", "error");
+      setProgress(error.message || "Write a message in the chat composer.", "error");
       return null;
     }
     const cleared = await clearComposerForSubmit(prompt);
@@ -3739,9 +4035,12 @@ export function createChatPanel({
     }
     let prompt;
     try {
-      prompt = await readPromptImpl();
+      prompt = await readPromptImpl({
+        preferredBlockUid: lastComposerBlockUid,
+      });
+      lastComposerBlockUid = prompt.uid;
     } catch (error) {
-      setProgress(error.message || "Focus a Roam block before sending.", "error");
+      setProgress(error.message || "Write a message in the chat composer.", "error");
       setRunning(false);
       return null;
     }
@@ -3753,6 +4052,13 @@ export function createChatPanel({
       : null;
     const effortOverride = effortChanged ? pickerEffort || null : null;
     const speedOverride = speedChanged ? pickerSpeed || null : undefined;
+    let graphGuidelines;
+    try {
+      graphGuidelines = await readGraphAgentGuidelines({ api });
+    } catch {
+      // Omit the injected value so the runtime can load guidelines through
+      // the official MCP fallback instead of blocking the user's turn.
+    }
 
     const cleared = await clearComposerForSubmit(prompt);
     if (!cleared.ok) {
@@ -3770,6 +4076,7 @@ export function createChatPanel({
     try {
       const result = await requestChatImpl(prompt.text, {
         promptBlockUid: prompt.uid,
+        graphGuidelines,
         threadId: state.activeThreadId,
         model: modelOverride,
         effort: effortOverride,
@@ -3894,6 +4201,7 @@ export function createChatPanel({
       ) {
         event.preventDefault();
         event.stopPropagation?.();
+        rememberComposerFocus();
         void send();
       }
     }
@@ -3918,6 +4226,8 @@ export function createChatPanel({
     }
     elapsedIntervalId = null;
     doc.removeEventListener?.("keydown", handleSendShortcut, true);
+    doc.removeEventListener?.("focusin", rememberComposerFocus, true);
+    doc.removeEventListener?.("selectionchange", rememberComposerFocus, true);
     doc.removeEventListener?.("click", handleDocumentClick, true);
     doc.removeEventListener?.("visibilitychange", handleVisibilityChange);
     doc.defaultView?.removeEventListener?.("focus", handleWindowFocus);
@@ -3965,9 +4275,12 @@ export function createChatPanel({
     if (doc.visibilityState === "visible") handleWindowFocus();
   };
   doc.addEventListener?.("keydown", handleSendShortcut, true);
+  doc.addEventListener?.("focusin", rememberComposerFocus, true);
+  doc.addEventListener?.("selectionchange", rememberComposerFocus, true);
   doc.addEventListener?.("click", handleDocumentClick, true);
   doc.addEventListener?.("visibilitychange", handleVisibilityChange);
   doc.defaultView?.addEventListener?.("focus", handleWindowFocus);
+  rememberComposerFocus();
   renderMessages();
   setProgress();
   renderConversationButton();
@@ -4159,6 +4472,7 @@ export function createChatPanel({
     focus: () => {
       const sidebarWindow = findSidebarBlockWindow(rootBlockUid, { api });
       if (!sidebarWindow?.["window-id"]) return Promise.resolve();
+      lastComposerBlockUid = rootBlockUid;
       return api.ui.setBlockFocusAndSelection({
         location: {
           "block-uid": rootBlockUid,
@@ -4251,21 +4565,7 @@ async function openChatPanelInternal({
     } else {
       host.appendChild(controller.controlsElement);
     }
-    if (controller.headerElement) {
-      const launcherPlacement = findSidebarChatLauncherPlacement(doc);
-      const launcher = doc.getElementById?.(SIDEBAR_CHAT_LAUNCHER_ID);
-      if (
-        launcherPlacement?.header &&
-        launcher?.parentNode === launcherPlacement.header
-      ) {
-        launcherPlacement.header.insertBefore(
-          controller.headerElement,
-          launcher.nextSibling || null,
-        );
-      } else {
-        host.insertBefore(controller.headerElement, controller.element);
-      }
-    }
+    placeChatHeader(controller, { doc, host });
     return true;
   };
   try {
@@ -4306,6 +4606,7 @@ async function openChatPanelInternal({
     });
     mountControllerInHost(host);
     ACTIVE_CHAT_PANEL = controller;
+    placeChatHeader(controller, { doc, host });
 
     const MutationObserverImpl = doc.defaultView?.MutationObserver ||
       globalThis.MutationObserver;

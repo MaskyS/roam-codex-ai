@@ -25,6 +25,7 @@ import {
 const execFileAsync = promisify(execFile);
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const SERVICE_LABEL = "com.roam-better-ai.bridge";
+export const MIN_CODEX_VERSION = "0.146.0";
 export const SERVICE_INSTALL_ROOT = resolve(RUNTIME_HOME, "app");
 export const SERVICE_RUNTIME_FILES = Object.freeze([
   "bin.mjs",
@@ -52,6 +53,22 @@ async function which(command) {
   } catch {
     return null;
   }
+}
+
+export function codexVersionAtLeast(output, minimum = MIN_CODEX_VERSION) {
+  const parse = (value) => {
+    const match = String(value).match(/(?:^|\s)(\d+)\.(\d+)\.(\d+)(?:\D|$)/);
+    return match ? match.slice(1, 4).map(Number) : null;
+  };
+  const current = parse(output);
+  const required = parse(minimum);
+  if (!current || !required) return false;
+  for (let index = 0; index < required.length; index += 1) {
+    if (current[index] !== required[index]) {
+      return current[index] > required[index];
+    }
+  }
+  return true;
 }
 
 async function launchctl(args) {
@@ -122,6 +139,21 @@ async function setup() {
     say("Codex CLI is not installed. Install and sign in first:");
     say();
     say("  npm install -g @openai/codex && codex login");
+    say();
+    process.exitCode = 1;
+    return;
+  }
+  let codexVersion = "";
+  try {
+    ({ stdout: codexVersion } = await execFileAsync(codexBin, ["--version"]));
+  } catch {
+    // The version check below gives one clear update instruction.
+  }
+  if (!codexVersionAtLeast(codexVersion)) {
+    say(`Codex CLI ${MIN_CODEX_VERSION} or later is required.`);
+    say("Update the CLI, then run this setup command again:");
+    say();
+    say("  npm install -g @openai/codex@latest");
     say();
     process.exitCode = 1;
     return;

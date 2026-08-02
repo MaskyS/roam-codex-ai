@@ -203,34 +203,85 @@ export function ChatHistory({
   activeThreadId,
   error,
   running,
+  menuThreadId,
+  deletingThreadId,
   dateLabel,
   onNew,
   onSelect,
+  onToggleMenu,
+  onDelete,
 }) {
   const entries = items.length
-    ? items.map((entry) => (
-      <button
-        key={entry.threadId}
-        type="button"
-        className={`roam-codex-chat-history-item${
-          entry.active ? " is-active" : ""
-        }`}
-        title={`Resume ${entry.title}`}
-        role="menuitem"
-        disabled={running}
-        data-thread-id={entry.threadId}
-        data-availability={entry.availability}
-        aria-current={entry.active ? "true" : undefined}
-        onClick={() => onSelect(entry.threadId)}
-      >
-        <span className="roam-codex-chat-history-title">{entry.title}</span>
-        <span className="roam-codex-chat-history-date">
-          {["missing", "unavailable"].includes(entry.availability)
-            ? "Unavailable"
-            : dateLabel(entry.updatedAt)}
-        </span>
-      </button>
-    ))
+    ? items.map((entry) => {
+      const menuOpen = menuThreadId === entry.threadId;
+      const deleting = deletingThreadId === entry.threadId;
+      return (
+        <div
+          key={entry.threadId}
+          className={`roam-codex-chat-history-row${
+            menuOpen ? " has-open-menu" : ""
+          }`}
+        >
+          <button
+            type="button"
+            className={`roam-codex-chat-history-item${
+              entry.active ? " is-active" : ""
+            }`}
+            title={`Resume ${entry.title}`}
+            role="menuitem"
+            disabled={running || deleting}
+            data-thread-id={entry.threadId}
+            data-availability={entry.availability}
+            aria-current={entry.active ? "true" : undefined}
+            onClick={() => onSelect(entry.threadId)}
+          >
+            <span className="roam-codex-chat-history-title">{entry.title}</span>
+            <span className="roam-codex-chat-history-date">
+              {["missing", "unavailable"].includes(entry.availability)
+                ? "Unavailable"
+                : dateLabel(entry.updatedAt)}
+            </span>
+          </button>
+          <button
+            type="button"
+            className="roam-codex-chat-history-more"
+            title={`Actions for ${entry.title}`}
+            aria-label={`Actions for ${entry.title}`}
+            aria-haspopup="menu"
+            aria-expanded={String(menuOpen)}
+            disabled={running || deleting}
+            onClick={() => onToggleMenu(entry.threadId)}
+          >
+            ⋯
+          </button>
+          {menuOpen && (
+            <div
+              className="roam-codex-chat-history-row-menu"
+              role="menu"
+              aria-label={`Actions for ${entry.title}`}
+            >
+              <button
+                type="button"
+                className="roam-codex-chat-history-delete"
+                role="menuitem"
+                disabled={deleting}
+                onClick={() => onDelete(entry.threadId)}
+              >
+                <svg
+                  className="roam-codex-chat-history-delete-icon"
+                  viewBox="0 0 16 16"
+                  aria-hidden="true"
+                  focusable="false"
+                >
+                  <path d="M3.5 4.5h9M6 4.5v-2h4v2m-5.5 0 .6 9h5.8l.6-9M7 7v4m2-4v4" />
+                </svg>
+                <span>{deleting ? "Deleting…" : "Delete chat"}</span>
+              </button>
+            </div>
+          )}
+        </div>
+      );
+    })
     : [
       <div key="empty" className="roam-codex-chat-history-empty">
         {error || "No previous chats yet."}
@@ -367,8 +418,8 @@ export function ChatControls({
   actions,
 }) {
   const sendTitle = steering
-    ? "Add the focused block to Codex's current turn without stopping it"
-    : `Send the focused block in this chat's Block Outline (${
+    ? "Add the selected composer message to Codex's current turn"
+    : `Send the selected message from this chat composer (${
       shortcutIsMac ? "Option" : "Alt"
     }+Enter, rebindable in Settings → Hotkeys)`;
   return (
@@ -392,15 +443,19 @@ export function ChatControls({
         >
           <span className="roam-codex-chat-stop-icon" aria-hidden="true" />
         </button>
-        {/* Keep Roam's native block editor focused until send snapshots it.
-            Moving focus here first would lose the active composer window. */}
+        {/* Remember the composer selection before a pointer click can move
+            browser focus. Keyboard and accessibility activation use the
+            panel's independently tracked composer UID. */}
         <button
           type="button"
           className={`roam-codex-chat-send${steering ? " is-steering" : ""}`}
           title={sendTitle}
           hidden={false}
           disabled={sendDisabled}
-          onMouseDown={(event) => event.preventDefault?.()}
+          onMouseDown={(event) => {
+            actions.rememberComposerFocus?.();
+            event.preventDefault?.();
+          }}
           onClick={actions.send}
         >
           {steering ? "Steer" : "Send"}

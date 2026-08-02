@@ -109,6 +109,14 @@ test("only a visible connection card opts into flex layout", () => {
     css,
     /\.roam-codex-chat-resize\[hidden\]\s*\{\s*display:\s*none;\s*\}/,
   );
+  assert.match(
+    css,
+    /\.roam-codex-chat-history-more\s*\{[^}]*opacity:\s*0;/s,
+  );
+  assert.match(
+    css,
+    /\.roam-codex-chat-history-row:hover\s*>\s*\.roam-codex-chat-history-more/,
+  );
 });
 
 const {
@@ -119,8 +127,10 @@ const {
   clearScratchPromptBlock,
   cleanupStaleRunningStatuses,
   configureExtension,
+  conversationAgeLabel,
   copyRoamText,
   createChatPanel,
+  deleteGraphThreadRecord,
   discardLegacyChatState,
   ensureGraphThreadRecord,
   findChatPanelHost,
@@ -130,6 +140,8 @@ const {
   openChatPanel,
   openPromptBlockInSidebar,
   pairBridge,
+  placeChatHeader,
+  readGraphAgentGuidelines,
   readChatState,
   readProbeStream,
   requestPanelLogin,
@@ -141,6 +153,7 @@ const {
   removeScratchPromptBlock,
   resolveChatPromptBlock,
   requestPanelChat,
+  requestPanelThreadDelete,
   requestPanelThreadSummaries,
   requestPanelThreadName,
   requestProbe,
@@ -635,6 +648,57 @@ test("conversation history is graph-record scoped, labeled, and newest first", (
   ]);
 });
 
+test("conversation ages use compact humane labels", () => {
+  const currentTime = Date.parse("2026-08-02T18:00:00.000Z");
+  assert.equal(conversationAgeLabel(currentTime, currentTime), "now");
+  assert.equal(conversationAgeLabel(currentTime - 5 * 60_000, currentTime), "5m ago");
+  assert.equal(conversationAgeLabel(currentTime - 65 * 60_000, currentTime), "1h ago");
+  assert.equal(conversationAgeLabel(currentTime - 3 * 86_400_000, currentTime), "3d ago");
+  assert.equal(conversationAgeLabel(currentTime - 65 * 86_400_000, currentTime), "2mo ago");
+  assert.equal(conversationAgeLabel(currentTime - 400 * 86_400_000, currentTime), "1y ago");
+  assert.equal(conversationAgeLabel(currentTime + 60_000, currentTime), "now");
+  assert.equal(conversationAgeLabel(null, currentTime), "");
+});
+
+test("live graph guidelines are serialized from Roam in outline order", async () => {
+  const result = await readGraphAgentGuidelines({
+    api: {
+      q: (_query, title) => {
+        assert.equal(title, "roam/agent guidelines");
+        return "guidelines-page";
+      },
+      data: {
+        async: {
+          pull: async (_pattern, lookup) => {
+            assert.deepEqual(lookup, [":block/uid", "guidelines-page"]);
+            return {
+              ":block/children": [
+                {
+                  ":block/order": 1,
+                  ":block/string": "Prefer short titles",
+                },
+                {
+                  ":block/order": 0,
+                  ":block/string": "Use project pages",
+                  ":block/children": [{
+                    ":block/order": 0,
+                    ":block/string": "Link the owner",
+                  }],
+                },
+              ],
+            };
+          },
+        },
+      },
+    },
+  });
+
+  assert.equal(
+    result,
+    "- Use project pages\n  - Link the owner\n- Prefer short titles",
+  );
+});
+
 test("graph thread pages are validated, created once, and label history", async () => {
   const pages = new Map();
   let nextUid = 1;
@@ -720,6 +784,36 @@ test("graph thread pages are validated, created once, and label history", async 
     preview: "Prompt preview",
   }]);
   assert.equal(history[0].title, "Plan · next experiment");
+});
+
+test("graph thread deletion is restricted to a validated Codex thread page", async () => {
+  const deletedPageUids = [];
+  const api = {
+    data: {
+      page: {
+        delete: async ({ page }) => deletedPageUids.push(page.uid),
+      },
+    },
+  };
+  const record = {
+    threadId: "thread_delete_123",
+    threadPageUid: "page12345",
+    threadPageTitle: "Codex/thread/Delete me",
+  };
+  assert.deepEqual(await deleteGraphThreadRecord(record, { api }), {
+    threadId: "thread_delete_123",
+    threadPageUid: "page12345",
+  });
+  assert.deepEqual(deletedPageUids, ["page12345"]);
+
+  await assert.rejects(
+    deleteGraphThreadRecord({
+      ...record,
+      threadPageTitle: "Ordinary user page",
+    }, { api }),
+    /Refusing to delete/,
+  );
+  assert.deepEqual(deletedPageUids, ["page12345"]);
 });
 
 test("duplicate graph pages never guess which Codex thread record to use", async () => {
@@ -824,6 +918,33 @@ test("panel mirrors a graph thread title through the exact name endpoint", async
   });
 });
 
+test("panel deletion calls the authenticated exact-thread endpoint", async () => {
+  let captured;
+  const result = await requestPanelThreadDelete("thread_delete_123", {
+    token: "local-token",
+    fetchImpl: async (url, init) => {
+      captured = { url, init };
+      return new Response(JSON.stringify({
+        ok: true,
+        threadId: "thread_delete_123",
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  assert.equal(
+    captured.url,
+    "http://127.0.0.1:47321/threads/thread_delete_123",
+  );
+  assert.equal(captured.init.method, "DELETE");
+  assert.equal(captured.init.headers.authorization, "Bearer local-token");
+  assert.deepEqual(result, {
+    ok: true,
+    threadId: "thread_delete_123",
+  });
+});
+
 test("panel chat streams a thread id, progress, and a panel-only reply", async () => {
   const encoder = new TextEncoder();
   const starts = [];
@@ -848,6 +969,7 @@ test("panel chat streams a thread id, progress, and a panel-only reply", async (
   const result = await requestPanelChat("Hello", {
     token: "local-token",
     promptBlockUid: "prompt123",
+    graphGuidelines: "- Prefer concise answers",
     threadId: "thread_12345678",
     model: "model-from-list",
     effort: "medium",
@@ -871,6 +993,7 @@ test("panel chat streams a thread id, progress, and a panel-only reply", async (
     graph: "maskys",
     message: "Hello",
     promptBlockUid: "prompt123",
+    graphGuidelines: "- Prefer concise answers",
     threadId: "thread_12345678",
     model: "model-from-list",
     effort: "medium",
@@ -1773,6 +1896,64 @@ test("open chat puts its title beside the single sidebar launcher", async () => 
   await controller.close();
 });
 
+test("a delayed sidebar launcher pulls the chat title onto its header row", () => {
+  const nativeToggle = { tagName: "button", id: "native-toggle" };
+  const launcher = {
+    tagName: "button",
+    id: "roam-codex-sidebar-chat-launcher",
+    nextSibling: nativeToggle,
+  };
+  const sidebarHeader = {
+    className: "flex-h-box",
+    children: [nativeToggle],
+    insertBefore(element, before) {
+      this.inserted = { element, before };
+      element.parentNode = this;
+      launcher.nextSibling = element;
+    },
+  };
+  launcher.parentNode = sidebarHeader;
+  const sidebar = {
+    children: [sidebarHeader],
+    getBoundingClientRect: () => ({ width: 500 }),
+  };
+  const host = {
+    insertBefore(element, before) {
+      this.inserted = { element, before };
+      element.parentNode = this;
+    },
+  };
+  const panel = {};
+  const chatHeader = {};
+  const controller = { element: panel, headerElement: chatHeader };
+  let launcherReady = false;
+  const doc = {
+    defaultView: {
+      getComputedStyle: () => ({ display: "block", visibility: "visible" }),
+    },
+    getElementById(id) {
+      if (id === "right-sidebar") return sidebar;
+      if (id === "roam-right-sidebar-content") return {};
+      if (id === "roam-codex-sidebar-chat-launcher" && launcherReady) {
+        return launcher;
+      }
+      return null;
+    },
+  };
+
+  assert.equal(placeChatHeader(controller, { doc, host }), false);
+  assert.deepEqual(host.inserted, { element: chatHeader, before: panel });
+
+  launcherReady = true;
+  sidebarHeader.children = [launcher, nativeToggle];
+  assert.equal(placeChatHeader(controller, { doc, host }), true);
+  assert.deepEqual(sidebarHeader.inserted, {
+    element: chatHeader,
+    before: nativeToggle,
+  });
+  assert.equal(launcher.nextSibling, chatHeader);
+});
+
 test("open chat remounts when Roam recreates the sidebar after hiding it", async () => {
   let observer;
   class FakeMutationObserver {
@@ -2132,8 +2313,147 @@ test("an empty focused outline still asks for a message", async () => {
 
   await assert.rejects(
     readFocusedPromptBlock("root123", { api }),
-    /Write a message in this Roam outline before sending/,
+    /Write a message in the chat composer before sending/,
   );
+});
+
+test("a remembered nested composer message survives button-induced focus loss", async () => {
+  const root = {
+    ":block/uid": "root123",
+    ":block/string": CHAT_COMPOSER_PLACEHOLDER,
+    ":block/children": [{
+      ":block/uid": "sibling1",
+      ":block/string": "Keep this sibling draft",
+    }, {
+      ":block/uid": "message123",
+      ":block/string": "Send this message",
+      ":block/children": [{
+        ":block/uid": "emptyChild",
+        ":block/string": "",
+      }],
+    }],
+  };
+  const api = {
+    ui: {
+      getFocusedBlock: () => ({
+        "block-uid": "outside1",
+        "window-id": "main-window",
+      }),
+      rightSidebar: {
+        getWindows: () => [{
+          type: "block",
+          "block-uid": "root123",
+          "window-id": "sidebar-block-root123",
+        }],
+      },
+    },
+    data: {
+      async: {
+        pull: async () => root,
+      },
+    },
+  };
+
+  assert.deepEqual(await readFocusedPromptBlock("root123", {
+    api,
+    preferredBlockUid: "emptyChild",
+  }), {
+    uid: "message123",
+    text: "Send this message",
+    outline: {
+      uid: "message123",
+      string: "Send this message",
+      children: [{ uid: "emptyChild", string: "", children: [] }],
+    },
+    rootOutline: {
+      uid: "root123",
+      string: CHAT_COMPOSER_PLACEHOLDER,
+      children: [{
+        uid: "sibling1",
+        string: "Keep this sibling draft",
+        children: [],
+      }, {
+        uid: "message123",
+        string: "Send this message",
+        children: [{ uid: "emptyChild", string: "", children: [] }],
+      }],
+    },
+  });
+});
+
+test("Send keeps the remembered composer message when activation clears focus", async () => {
+  let focused = {
+    "block-uid": "message123",
+    "window-id": "sidebar-block-root123",
+  };
+  const root = {
+    ":block/uid": "root123",
+    ":block/string": CHAT_COMPOSER_PLACEHOLDER,
+    ":block/children": [{
+      ":block/uid": "sibling1",
+      ":block/string": "Leave this sibling alone",
+    }, {
+      ":block/uid": "message123",
+      ":block/string": "Send the selected composer message",
+      ":block/children": [{
+        ":block/uid": "context1",
+        ":block/string": "Nested context remains attached",
+      }],
+    }],
+  };
+  const api = {
+    ui: {
+      getFocusedBlock: () => focused,
+      rightSidebar: {
+        getWindows: () => [{
+          type: "block",
+          "block-uid": "root123",
+          "window-id": "sidebar-block-root123",
+        }],
+      },
+    },
+    data: {
+      async: {
+        pull: async () => root,
+      },
+    },
+  };
+  const sent = [];
+  const doc = createFakePanelDocument();
+  const controller = createChatPanel({
+    doc,
+    api,
+    storage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+    rootBlockUid: "root123",
+    protectedPromptUids: new Set(["root123", "sibling1", "message123", "context1"]),
+    requestChatImpl: async (message) => {
+      sent.push(message);
+      return {
+        threadId: "thread_focus_1234",
+        turnId: "turn-focus",
+        reply: "Done",
+      };
+    },
+    requestModelsImpl: async () => [],
+    requestMessagesImpl: async () => [],
+    requestHistoryImpl: async () => ({
+      threads: [],
+      missingThreadIds: [],
+      unavailableThreadIds: [],
+    }),
+    requestGraphIndexImpl: async () => ({ records: [], errors: [] }),
+    ensureGraphThreadImpl: async () => null,
+    probeConnectionImpl: async () => ({ state: "connected" }),
+    authRequest: async () => ({ auth: "authenticated" }),
+  });
+
+  doc.listeners.focusin?.({});
+  focused = null;
+  await controller.send();
+
+  assert.deepEqual(sent, ["Send the selected composer message"]);
+  assert.equal(root[":block/children"][0][":block/string"], "Leave this sibling alone");
+  await controller.close();
 });
 
 test("chat clears a scratch composer before requesting a reply", async () => {
@@ -2410,7 +2730,7 @@ test("chat clears a scratch composer before requesting a reply", async () => {
   );
 
   conversationButton.listeners.click();
-  const historyThreadButton = historyPopover.children.find(
+  const historyThreadButton = panelElements(controller).find(
     (element) => element.dataset?.threadId === "thread_12345678",
   );
   historyThreadButton.listeners.click();
@@ -2617,11 +2937,11 @@ test("rapid history selections cannot render a stale transcript", async () => {
     (element) => element.className === "roam-codex-chat-history",
   );
   conversationButton.listeners.click();
-  historyPopover.children.find(
+  panelElements(controller).find(
     (element) => element.dataset?.threadId === "thread_new_456",
   ).listeners.click();
   conversationButton.listeners.click();
-  historyPopover.children.find(
+  panelElements(controller).find(
     (element) => element.dataset?.threadId === "thread_old_123",
   ).listeners.click();
 
@@ -2642,6 +2962,115 @@ test("rapid history selections cannot render a stale transcript", async () => {
   assert.match(transcript.textContent, /Older question/);
   assert.doesNotMatch(transcript.textContent, /Newer question/);
   assert.equal(readChatState({ storage }).activeThreadId, "thread_old_123");
+  await controller.close();
+});
+
+test("history row actions immediately delete the Codex thread and Roam index", async () => {
+  const currentTime = Date.parse("2026-08-02T18:00:00.000Z");
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key),
+  };
+  const state = readChatState({ storage });
+  state.activeThreadId = "thread_delete_123";
+  state.threadPreferences.thread_delete_123 = {
+    model: "gpt-5.6-sol",
+    effort: "low",
+    speed: null,
+    access: "auto",
+  };
+  state.lastSeenUpdatedAt.thread_delete_123 = currentTime - 60_000;
+  writeChatState(state, { storage });
+
+  const lifecycle = [];
+  const record = graphThreadRecord("thread_delete_123", {
+    createdAt: currentTime - 86_400_000,
+    lastActiveAt: currentTime - 5 * 60_000,
+    title: "Codex/thread/Delete me",
+  });
+  const controller = createChatPanel({
+    doc: createFakePanelDocument(),
+    api: {},
+    storage,
+    rootBlockUid: "root123",
+    now: () => currentTime,
+    probeConnectionImpl: async () => ({ state: "connected", graph: "maskys" }),
+    authRequest: async () => ({ auth: "authenticated", method: "chatgpt" }),
+    requestModelsImpl: async () => [],
+    requestMcpServersImpl: async () => [],
+    requestMessagesImpl: async () => [],
+    requestHistoryImpl: async () => ({
+      threads: [{
+        id: "thread_delete_123",
+        name: "Delete me",
+        preview: "Disposable",
+        createdAt: Math.floor((currentTime - 86_400_000) / 1_000),
+        updatedAt: Math.floor((currentTime - 5 * 60_000) / 1_000),
+      }],
+      missingThreadIds: [],
+      unavailableThreadIds: [],
+    }),
+    requestGraphIndexImpl: async () => ({ records: [record], errors: [] }),
+    requestDeleteThreadImpl: async (threadId) => {
+      lifecycle.push(`codex:${threadId}`);
+    },
+    deleteGraphThreadImpl: async (graphRecord) => {
+      lifecycle.push(`roam:${graphRecord.threadPageUid}`);
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  let elements = panelElements(controller);
+  const conversationButton = elements.find(
+    (element) => element.className === "roam-codex-chat-conversation",
+  );
+  conversationButton.listeners.click();
+  elements = panelElements(controller);
+  const age = elements.find(
+    (element) => element.className === "roam-codex-chat-history-date",
+  );
+  assert.equal(age.textContent, "5m ago");
+  let moreButton = elements.find(
+    (element) =>
+      element.className === "roam-codex-chat-history-more" &&
+      element.title === "Actions for Delete me",
+  );
+  assert.equal(moreButton["aria-expanded"], "false");
+  moreButton.listeners.click();
+
+  elements = panelElements(controller);
+  moreButton = elements.find(
+    (element) => element.className === "roam-codex-chat-history-more",
+  );
+  const deleteButton = elements.find(
+    (element) => element.className === "roam-codex-chat-history-delete",
+  );
+  assert.equal(moreButton["aria-expanded"], "true");
+  assert.equal(deleteButton.textContent, "Delete chat");
+  deleteButton.listeners.click();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.deepEqual(lifecycle, [
+    "codex:thread_delete_123",
+    `roam:${record.threadPageUid}`,
+  ]);
+  assert.equal(readChatState({ storage }).activeThreadId, null);
+  assert.equal(
+    Object.hasOwn(
+      readChatState({ storage }).threadPreferences,
+      "thread_delete_123",
+    ),
+    false,
+  );
+  elements = panelElements(controller);
+  assert.equal(
+    elements.some((element) => element.dataset?.threadId === "thread_delete_123"),
+    false,
+  );
+  assert.equal(conversationButton.textContent, "New chat");
   await controller.close();
 });
 
@@ -3985,8 +4414,7 @@ test("Manual access shows Allow and Reject before a Roam write continues", async
   openAccessSubmenu.children[2].listeners.click();
 
   const sendPromise = controller.send();
-  await Promise.resolve();
-  await Promise.resolve();
+  for (let index = 0; index < 6; index += 1) await Promise.resolve();
   elements = panelElements(controller);
   const approvalCard = elements.find(
     (element) => element.className === "roam-codex-chat-approval",
@@ -4507,6 +4935,7 @@ test("requestProbe sends the fixed graph, UID, and bearer token", async () => {
   let captured;
   const result = await requestProbe("abcdefghi", {
     token: "local-token",
+    graphGuidelines: "- Keep project work nested",
     fetchImpl: async (url, init) => {
       captured = { url, init };
       return new Response(
@@ -4533,6 +4962,7 @@ test("requestProbe sends the fixed graph, UID, and bearer token", async () => {
   assert.deepEqual(JSON.parse(captured.init.body), {
     graph: "maskys",
     blockUid: "abcdefghi",
+    graphGuidelines: "- Keep project work nested",
   });
   assert.equal(result.runId, "run-1");
 });
@@ -4610,6 +5040,44 @@ test("requestProbe surfaces bridge errors", async () => {
     }),
     /No MCP connection/,
   );
+});
+
+test("authenticated 401 responses become an actionable pairing state", async () => {
+  const unauthorized = async () =>
+    new Response(JSON.stringify({ error: "Invalid bridge token." }), {
+      status: 401,
+      headers: { "content-type": "application/json" },
+    });
+
+  for (const [requestName, call] of [
+    ["models", () => requestPanelModels({ token: "stale-token", fetchImpl: unauthorized })],
+    ["delete", () => requestPanelThreadDelete("thread_delete_123", {
+      token: "stale-token",
+      fetchImpl: unauthorized,
+    })],
+    ["chat", () => requestPanelChat("hi", {
+      token: "stale-token",
+      promptBlockUid: "prompt123",
+      fetchImpl: unauthorized,
+    })],
+    ["probe", () => requestProbe("abcdefghi", {
+      token: "stale-token",
+      fetchImpl: unauthorized,
+    })],
+    ["steer", () => requestRunSteer(
+      "12345678-1234-1234-1234-123456789abc",
+      "hi",
+      { token: "stale-token", fetchImpl: unauthorized },
+    )],
+  ]) {
+    await assert.rejects(call, (error) => {
+      assert.equal(error.code, "NOT_PAIRED", requestName);
+      assert.equal(error.status, 401);
+      assert.match(error.message, /Pair this device/);
+      assert.doesNotMatch(error.message, /token/i);
+      return true;
+    });
+  }
 });
 
 test("requestRunCancellation calls the authenticated run endpoint", async () => {
@@ -4718,6 +5186,85 @@ test("a bridge that dies mid-conversation shows the card, not a raw error", asyn
       (child) => child.textContent === "The Codex bridge isn't running",
     ),
     true,
+  );
+  await controller.close();
+});
+
+test("a stale token restores the draft and leaves only the Pair action", async () => {
+  const doc = createFakePanelDocument();
+  const lifecycle = [];
+  let paired = true;
+  const controller = createChatPanel({
+    doc,
+    api: {},
+    storage: { getItem: () => "stale-token", setItem: () => {} },
+    rootBlockUid: "root123",
+    scratchPrompt: true,
+    setIntervalImpl: () => 1,
+    clearIntervalImpl: () => {},
+    setTimeoutImpl: () => 1,
+    clearTimeoutImpl: () => {},
+    probeConnectionImpl: async () => ({
+      state: paired ? "connected" : "unpaired",
+      graph: "maskys",
+    }),
+    authRequest: async () => ({ auth: "authenticated", method: "chatgpt" }),
+    readPromptImpl: async () => ({ uid: "root123", text: "Keep this draft" }),
+    clearScratchPromptImpl: async () => {
+      lifecycle.push("clear");
+      return true;
+    },
+    restorePromptImpl: async () => {
+      lifecycle.push("restore");
+      return true;
+    },
+    requestChatImpl: async (message, options) => {
+      paired = false;
+      return requestPanelChat(message, {
+        ...options,
+        token: "stale-token",
+        fetchImpl: async () =>
+          new Response(JSON.stringify({ error: "Invalid bridge token." }), {
+            status: 401,
+            headers: { "content-type": "application/json" },
+          }),
+      });
+    },
+    requestModelsImpl: async () => [],
+    requestMcpServersImpl: async () => [],
+    requestMessagesImpl: async () => [],
+    requestHistoryImpl: async () => ({
+      threads: [],
+      missingThreadIds: [],
+      unavailableThreadIds: [],
+    }),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  await controller.send();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const elements = panelElements(controller);
+  const progressText = elements.find(
+    (element) => element.className === "roam-codex-chat-progress-text",
+  );
+  const card = elements.find(
+    (element) => element.className === "roam-codex-connection-card",
+  );
+  assert.deepEqual(lifecycle, ["clear", "restore"]);
+  assert.equal(progressText.textContent || "", "");
+  assert.equal(card.hidden, false);
+  assert.equal(
+    card.children
+      .find((child) => child.className === "roam-codex-connection-actions")
+      ?.children.some((child) => child.textContent === "Pair"),
+    true,
+  );
+  assert.equal(
+    elements.some((element) => /Invalid bridge token|Draft restored/i.test(
+      element.textContent || "",
+    )),
+    false,
   );
   await controller.close();
 });

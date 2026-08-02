@@ -67,6 +67,13 @@ Graph-scoped `localStorage` holds only the active pointer, per-thread picker
 preferences, read markers, and retries for a thread whose graph page could not
 yet be created. Clearing that device state does not remove a conversation from
 history, and a missing App Server thread does not remove its Roam record.
+History renders relative activity ages. Its hover/focus `⋯` action deletes the
+App Server thread first with `thread/delete`, then deletes only the validated
+matching `Codex/thread/*` page through `roamAlphaAPI.data.page.delete`. The
+thread deletion is idempotent, so a failed Roam page deletion can be retried
+without leaving an undeletable graph record.
+Codex CLI `0.146.0` is the minimum supported version because `0.144.4` dropped
+the `agent_jobs` tables but still queried them while deleting a thread.
 Messages use Roam's native `renderString`; every native renderer mount is
 unmounted when its transcript changes or closes.
 
@@ -90,7 +97,14 @@ access mode selected in the panel. In Auto and Manual, Codex carries out the
 requested result beneath the selected block through the same explicit Roam MCP
 write-tool allowlist used by chat. Read only removes those write tools, so the
 runtime must explain that graph-editing work needs a different access mode. The
-runtime contract forbids rewriting or deleting the selected block.
+runtime contract forbids rewriting or deleting the selected block. Block runs
+default to App Server's `priority` service tier (shown as Fast in the panel).
+
+The extension serializes the current `[[roam/agent guidelines]]` outline before
+each chat or block turn. The bridge quotes it inside `developerInstructions` and
+removes `get_graph_guidelines` from that thread's tool allowlist, so loading the
+conventions does not appear as agent activity. If the local Roam read fails, the
+field is omitted and the runtime keeps the MCP tool as a fallback.
 
 ## Research and graph presentation
 
@@ -173,6 +187,7 @@ GET  /health
 GET  /models
 GET  /mcp-servers
 GET  /threads/:threadId/messages
+DELETE /threads/:threadId
 POST /threads/summaries
 POST /threads/:threadId/name
 POST /pair

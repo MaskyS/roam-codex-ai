@@ -5,6 +5,8 @@ Chat in the right sidebar, ask Codex to read or change the active graph, or run
 a focused block as a direct graph task. Conversations stay attached to the
 graph while Codex runs locally through its official App Server.
 
+![Roam Codex chat beside a Harbor Notes workshop page](./docs/images/roam-codex-chat-panel.png)
+
 ## What you can do
 
 - Open persistent Codex chat beside any Roam block.
@@ -26,9 +28,10 @@ block`.
 
 - Roam Research Desktop
 - Node.js 20 or later
-- A signed-in [Codex CLI](https://github.com/openai/codex)
+- A signed-in [Codex CLI](https://github.com/openai/codex), version `0.146.0`
+  or later
 
-The current integration is tested with Codex CLI `0.144.4` and
+The current integration is tested with Codex CLI `0.146.0` and
 `@roam-research/roam-mcp` `0.9.1`.
 
 ## Install
@@ -93,20 +96,28 @@ offers the fix in place — including a **Sign in** button for the Codex account
 Run `Codex: Open chat` from the command palette, use the sparkle button beside
 Roam's right-sidebar toggle, or press `Cmd-J` on macOS (`Ctrl-J` elsewhere).
 
-1. Write the message in the native Block Outline inside the chat window.
-2. Choose the model, reasoning effort, graph access, and optional tools.
-3. Select **Send**.
-4. While Codex is working, write another block and select **Steer** to redirect
-   the same turn, or select **Stop** to interrupt it.
+Write in the native composer and select **Send**. Its picker contains the model,
+reasoning effort, graph access, and optional tools. During a turn, another
+composer message can **Steer** it, while **Stop** interrupts it.
 
-The conversation title opens history. **New chat** starts with the model and
+![An active Codex turn with the Steer and Stop controls](./docs/images/roam-codex-steering.png)
+
+The conversation title opens history. History shows compact activity ages such
+as `5m ago` and `3d ago`. Hover or keyboard-focus a conversation to reveal its
+`⋯` menu; **Delete chat** permanently removes both the Codex thread and
+its dedicated `Codex/thread/*` page. **New chat** starts with the model and
 access defaults configured under **Settings → Extensions → Roam Codex**.
 
 ## Run a focused block
 
-Focus an ordinary block and choose `Codex: Do this block` from the slash menu or
-command palette. Codex reads that outline as the task and writes the result
-beneath the focused block through Roam MCP using the selected access mode.
+Focus an ordinary block and choose `Codex: Do this block`.
+
+![Codex: Do this block in Roam's command palette](./docs/images/roam-codex-do-this-block.png)
+
+Codex preserves the source and appends the result beneath it through Roam MCP.
+These one-shot runs use the fast service tier by default.
+
+![A preserved source block with the generated outline beneath it](./docs/images/roam-codex-block-result.png)
 
 A temporary `[[Codex/running]]` child appears while the task runs and is removed
 after success, failure, or Stop. Research sources, questions, and caveats are
@@ -123,6 +134,11 @@ The chat picker controls graph access per conversation:
 The Tools section can opt other configured Codex MCP servers into chat. They
 are disabled by default. Read-only conversations never expose graph write
 tools.
+
+Before each new or resumed turn, the extension reads the live
+`[[roam/agent guidelines]]` outline and the bridge injects those conventions as
+App Server developer instructions. If that local Roam read fails, the runtime
+falls back to the official `get_graph_guidelines` MCP tool.
 
 Roam's extension settings store only non-secret defaults:
 

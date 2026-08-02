@@ -25,10 +25,21 @@ import {
   validateRuntimeInstructionSources,
 } from "../bridge.mjs";
 import {
+  MIN_CODEX_VERSION,
   SERVICE_RUNTIME_FILES,
+  codexVersionAtLeast,
   installServiceRuntime,
   plistXml,
 } from "../bin.mjs";
+
+test("bridge setup requires a Codex version with working thread deletion", () => {
+  assert.equal(MIN_CODEX_VERSION, "0.146.0");
+  assert.equal(codexVersionAtLeast("codex-cli 0.144.4"), false);
+  assert.equal(codexVersionAtLeast("codex-cli 0.145.9"), false);
+  assert.equal(codexVersionAtLeast("codex-cli 0.146.0"), true);
+  assert.equal(codexVersionAtLeast("codex-cli 0.147.0-alpha.4"), true);
+  assert.equal(codexVersionAtLeast("unexpected output"), false);
+});
 
 test("the LaunchAgent runs a private stable copy instead of the npx cache", async (t) => {
   const root = resolve(
@@ -863,6 +874,21 @@ test("app-server mirrors the graph page label into the Codex thread name", async
   }]);
 });
 
+test("app-server permanently deletes the exact persisted thread", async () => {
+  const client = new AppServerClient();
+  client.start = async () => {};
+  const calls = [];
+  client.request = async (method, params) => calls.push({ method, params });
+  assert.deepEqual(
+    await client.deleteThread("thread_delete_123"),
+    { threadId: "thread_delete_123" },
+  );
+  assert.deepEqual(calls, [{
+    method: "thread/delete",
+    params: { threadId: "thread_delete_123" },
+  }]);
+});
+
 test("bridge exposes models, recent messages, and panel-only chat", async (t) => {
   const client = {
     ready: false,
@@ -904,6 +930,10 @@ test("bridge exposes models, recent messages, and panel-only chat", async (t) =>
       assert.equal(threadId, "thread_12345678");
       assert.equal(name, "Readable graph title");
       return { threadId, name };
+    },
+    async deleteThread(threadId) {
+      assert.equal(threadId, "thread_12345678");
+      return { threadId };
     },
     async runChat({ onProgress, onThread, onStarted, onApproval, ...input }) {
       assert.equal(typeof onApproval, "function");
@@ -995,6 +1025,16 @@ test("bridge exposes models, recent messages, and panel-only chat", async (t) =>
   assert.deepEqual(await nameResponse.json(), {
     threadId: "thread_12345678",
     name: "Readable graph title",
+  });
+
+  const deleteResponse = await fetch(
+    `${base}/threads/thread_12345678`,
+    { method: "DELETE", headers },
+  );
+  assert.equal(deleteResponse.status, 200);
+  assert.deepEqual(await deleteResponse.json(), {
+    ok: true,
+    threadId: "thread_12345678",
   });
 
   const serversResponse = await fetch(`${base}/mcp-servers`, { headers });
@@ -1420,6 +1460,11 @@ test("a work run is a chat turn with the block prompt and work instructions", as
   const client = new AppServerClient({ runtimeCwd: "/runtime/agent" });
   const requests = [];
   client.start = async () => {};
+  client.listModels = async () => [{
+    id: "default-model",
+    isDefault: true,
+    serviceTiers: [{ id: "priority" }],
+  }];
   client.request = async (method, params) => {
     requests.push({ method, params });
     if (method === "thread/start") {
@@ -1451,6 +1496,7 @@ test("a work run is a chat turn with the block prompt and work instructions", as
   const result = await client.runWork({
     graph: "maskys",
     blockUid: "abcdefghi",
+    graphGuidelines: "- Keep generated lists concise",
   });
   assert.equal(result.reply, "Added a comparison beneath the block.");
 
@@ -1458,6 +1504,7 @@ test("a work run is a chat turn with the block prompt and work instructions", as
   const turnStart = requests.find((entry) => entry.method === "turn/start");
   assert.equal(threadStart.params.ephemeral, true);
   assert.equal(threadStart.params.serviceName, "roam_codex_work");
+  assert.equal(turnStart.params.serviceTier, "priority");
   assert.match(
     threadStart.params.developerInstructions,
     /block-task runtime/,
@@ -1467,6 +1514,20 @@ test("a work run is a chat turn with the block prompt and work instructions", as
       "create_block",
     ),
     true,
+  );
+  assert.equal(
+    threadStart.params.config.mcp_servers.roam.enabled_tools.includes(
+      "get_graph_guidelines",
+    ),
+    false,
+  );
+  assert.match(
+    threadStart.params.developerInstructions,
+    /Keep generated lists concise/,
+  );
+  assert.match(
+    threadStart.params.developerInstructions,
+    /Do not call `get_graph_guidelines`/,
   );
   assert.equal(turnStart.params.outputSchema, undefined);
   assert.match(turnStart.params.input[0].text, /Work on Roam block UID/);
@@ -1482,6 +1543,11 @@ test("read-only access keeps write tools away from a work run", async () => {
   const client = new AppServerClient({ runtimeCwd: "/runtime/agent" });
   const requests = [];
   client.start = async () => {};
+  client.listModels = async () => [{
+    id: "default-model",
+    isDefault: true,
+    serviceTiers: [{ id: "priority" }],
+  }];
   client.request = async (method, params) => {
     requests.push({ method, params });
     if (method === "thread/start") {
@@ -1844,6 +1910,10 @@ test("bridge enforces bearer auth and graph restriction", async (t) => {
     ),
     "true",
   );
+  assert.match(
+    privateNetworkPreflight.headers.get("access-control-allow-methods"),
+    /DELETE/,
+  );
 
   const unauthorized = await fetch(`${base}/probe`, {
     method: "POST",
@@ -1851,7 +1921,11 @@ test("bridge enforces bearer auth and graph restriction", async (t) => {
       origin: "https://roamresearch.com",
       "content-type": "application/json",
     },
-    body: JSON.stringify({ graph: "maskys", blockUid: "abcdefghi" }),
+    body: JSON.stringify({
+      graph: "maskys",
+      blockUid: "abcdefghi",
+      graphGuidelines: "- Prefer short project notes",
+    }),
   });
   assert.equal(unauthorized.status, 401);
 
@@ -1953,6 +2027,15 @@ test("bridge enforces bearer auth and graph restriction", async (t) => {
   });
   assert.equal(unauthorizedHistory.status, 401);
 
+  const unauthorizedDelete = await fetch(
+    `${base}/threads/thread_delete_123`,
+    {
+      method: "DELETE",
+      headers: { origin: "https://roamresearch.com" },
+    },
+  );
+  assert.equal(unauthorizedDelete.status, 401);
+
   const wrongHistoryGraph = await fetch(`${base}/threads/summaries`, {
     method: "POST",
     headers: {
@@ -1985,7 +2068,11 @@ test("bridge enforces bearer auth and graph restriction", async (t) => {
       authorization: "Bearer secret-token",
       "content-type": "application/json",
     },
-    body: JSON.stringify({ graph: "maskys", blockUid: "abcdefghi" }),
+    body: JSON.stringify({
+      graph: "maskys",
+      blockUid: "abcdefghi",
+      graphGuidelines: "- Prefer short project notes",
+    }),
   });
   assert.equal(success.status, 200);
   assert.match(success.headers.get("content-type"), /application\/x-ndjson/);
@@ -2002,6 +2089,7 @@ test("bridge enforces bearer auth and graph restriction", async (t) => {
   assert.equal(events[2].result.reply, "Added three blocks beneath it.");
   assert.deepEqual(calls, [{
     graph: "maskys",
+    graphGuidelines: "- Prefer short project notes",
     blockUid: "abcdefghi",
     accessMode: "auto",
   }]);
