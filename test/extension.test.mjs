@@ -50,6 +50,7 @@ const {
   requestProbe,
   requestRunApproval,
   requestRunCancellation,
+  requestRunSteer,
   renderRoamMarkdown,
   restoreClearedChatPromptBlock,
   runningPresentationText,
@@ -2516,7 +2517,7 @@ test("history closes accessibly and cannot switch during an active turn", async 
   await controller.close();
 });
 
-test("Send yields its slot to Stop while a turn runs and names its shortcut", async () => {
+test("Send stays alongside Stop while a turn runs and names its shortcut", async () => {
   let finishTurn;
   const turn = new Promise((resolve) => {
     finishTurn = resolve;
@@ -2588,7 +2589,8 @@ test("Send yields its slot to Stop while a turn runs and names its shortcut", as
   assert.equal(preventedMouseFocus, 1);
 
   const sending = controller.send();
-  assert.equal(sendButton.hidden, true);
+  assert.equal(sendButton.hidden, false);
+  assert.equal(sendButton.disabled, true);
   assert.equal(stopButton.hidden, false);
   assert.equal(progressMeta.hidden, false);
   assert.equal(progressTimer.textContent, "0:00");
@@ -2600,6 +2602,125 @@ test("Send yields its slot to Stop while a turn runs and names its shortcut", as
   assert.equal(sendButton.hidden, false);
   assert.equal(stopButton.hidden, true);
   assert.equal(progressMeta.hidden, true);
+  await controller.close();
+});
+
+test("Send during an active turn steers it instead of starting a new one", async () => {
+  let finishTurn;
+  const turn = new Promise((resolve) => {
+    finishTurn = resolve;
+  });
+  const prompts = [
+    { uid: "root123", text: "Start here" },
+    { uid: "root123", text: "Steer this way" },
+  ];
+  const steerCalls = [];
+  let chatCalls = 0;
+  const doc = createFakePanelDocument();
+  const controller = createChatPanel({
+    doc,
+    api: {},
+    storage: {
+      getItem: () => null,
+      setItem: () => {},
+    },
+    rootBlockUid: "root123",
+    setIntervalImpl: () => 1,
+    clearIntervalImpl: () => {},
+    readPromptImpl: async () => prompts.shift(),
+    requestChatImpl: async (message, { onStarted }) => {
+      chatCalls += 1;
+      onStarted({ runId: "12345678-1234-1234-1234-123456789abc" });
+      await turn;
+      return { threadId: "thread_steer_12", turnId: "turn-1", reply: "Done" };
+    },
+    steerRequest: async (runId, message) => {
+      steerCalls.push({ runId, message });
+      return { ok: true, turnId: "turn-1" };
+    },
+    requestModelsImpl: async () => [],
+    requestMessagesImpl: async () => [],
+    requestHistoryImpl: async () => ({
+      threads: [],
+      missingThreadIds: [],
+      unavailableThreadIds: [],
+    }),
+  });
+
+  const sending = controller.send();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  await controller.send();
+  assert.deepEqual(steerCalls, [{
+    runId: "12345678-1234-1234-1234-123456789abc",
+    message: "Steer this way",
+  }]);
+  assert.equal(chatCalls, 1);
+
+  finishTurn();
+  await sending;
+  await controller.close();
+});
+
+test("a rejected steer resends the intact draft once the turn settles", async () => {
+  let finishTurn;
+  const turn = new Promise((resolve) => {
+    finishTurn = resolve;
+  });
+  const prompts = [
+    { uid: "root123", text: "Start here" },
+    { uid: "root123", text: "Steer this way" },
+    { uid: "root123", text: "Steer this way" },
+  ];
+  const chatMessages = [];
+  const doc = createFakePanelDocument();
+  const controller = createChatPanel({
+    doc,
+    api: {},
+    storage: {
+      getItem: () => null,
+      setItem: () => {},
+    },
+    rootBlockUid: "root123",
+    setIntervalImpl: () => 1,
+    clearIntervalImpl: () => {},
+    readPromptImpl: async () => prompts.shift(),
+    requestChatImpl: async (message, { onStarted }) => {
+      chatMessages.push(message);
+      if (chatMessages.length === 1) {
+        onStarted({ runId: "12345678-1234-1234-1234-123456789abc" });
+        await turn;
+        return { threadId: "thread_fall_1234", turnId: "turn-1", reply: "First" };
+      }
+      return { threadId: "thread_fall_1234", turnId: "turn-2", reply: "Second" };
+    },
+    steerRequest: async () => {
+      const error = new Error("The active turn could not be steered.");
+      error.status = 409;
+      error.code = "TURN_NOT_STEERABLE";
+      throw error;
+    },
+    requestModelsImpl: async () => [],
+    requestMessagesImpl: async () => [],
+    requestHistoryImpl: async () => ({
+      threads: [],
+      missingThreadIds: [],
+      unavailableThreadIds: [],
+    }),
+  });
+
+  const sending = controller.send();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const steering = controller.send();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  finishTurn();
+  await sending;
+  await steering;
+
+  assert.deepEqual(chatMessages, ["Start here", "Steer this way"]);
   await controller.close();
 });
 
@@ -3563,6 +3684,54 @@ test("requestRunCancellation calls the authenticated run endpoint", async () => 
   assert.equal(captured.init.method, "POST");
   assert.equal(captured.init.headers.authorization, "Bearer local-token");
   assert.equal(result.status, "interrupting");
+});
+
+test("requestRunSteer posts the message to the authenticated steer endpoint", async () => {
+  let captured;
+  const result = await requestRunSteer(
+    "12345678-1234-1234-1234-123456789abc",
+    "Actually focus on tests",
+    {
+      token: "local-token",
+      fetchImpl: async (url, init) => {
+        captured = { url, init };
+        return new Response(
+          JSON.stringify({ ok: true, turnId: "turn-1" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    },
+  );
+
+  assert.equal(
+    captured.url,
+    "http://127.0.0.1:47321/runs/12345678-1234-1234-1234-123456789abc/steer",
+  );
+  assert.equal(captured.init.method, "POST");
+  assert.equal(captured.init.headers.authorization, "Bearer local-token");
+  assert.deepEqual(JSON.parse(captured.init.body), {
+    graph: "maskys",
+    message: "Actually focus on tests",
+  });
+  assert.equal(result.turnId, "turn-1");
+
+  await assert.rejects(
+    () => requestRunSteer(
+      "12345678-1234-1234-1234-123456789abc",
+      "Too late",
+      {
+        token: "local-token",
+        fetchImpl: async () => new Response(
+          JSON.stringify({
+            error: "The active turn could not be steered.",
+            code: "TURN_NOT_STEERABLE",
+          }),
+          { status: 409, headers: { "content-type": "application/json" } },
+        ),
+      },
+    ),
+    (error) => error.status === 409 && error.code === "TURN_NOT_STEERABLE",
+  );
 });
 
 test("requestRunApproval answers the authenticated pending approval endpoint", async () => {

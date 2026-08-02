@@ -1280,6 +1280,167 @@ test("manual chat streams an approval and resumes after the authenticated answer
   assert.equal(events.at(-1).result.reply, "Renamed");
 });
 
+test("steer requests append text input to the exact active turn", async () => {
+  const client = new AppServerClient({ runtimeCwd: "/runtime/agent" });
+  const calls = [];
+  client.request = async (method, params) => {
+    calls.push({ method, params });
+    return { turnId: "turn-9" };
+  };
+  const result = await client.steerTurn({
+    threadId: "thread-9",
+    turnId: "turn-9",
+    message: "Focus on failing tests first.",
+  });
+  assert.deepEqual(calls, [{
+    method: "turn/steer",
+    params: {
+      threadId: "thread-9",
+      input: [{ type: "text", text: "Focus on failing tests first." }],
+      expectedTurnId: "turn-9",
+    },
+  }]);
+  assert.deepEqual(result, { turnId: "turn-9" });
+});
+
+test("thread messages keep every steered user message in order", async () => {
+  const client = new AppServerClient({ runtimeCwd: "/runtime/agent" });
+  client.start = async () => {};
+  client.request = async (method) => {
+    assert.equal(method, "thread/turns/list");
+    return {
+      data: [{
+        items: [
+          {
+            type: "userMessage",
+            content: [{ type: "text", text: "First ask" }],
+          },
+          { type: "agentMessage", text: "Working on it", phase: "partial" },
+          {
+            type: "userMessage",
+            content: [{ type: "text", text: "Actually focus on tests" }],
+          },
+          { type: "agentMessage", text: "Final answer", phase: "final_answer" },
+        ],
+      }],
+    };
+  };
+  assert.deepEqual(await client.listThreadMessages("thread_12345678"), [
+    { role: "user", text: "First ask" },
+    { role: "user", text: "Actually focus on tests" },
+    { role: "assistant", text: "Final answer" },
+  ]);
+});
+
+test("an active chat turn accepts a steer through the bridge", async (t) => {
+  let finishTurn;
+  const turnDone = new Promise((resolve) => {
+    finishTurn = resolve;
+  });
+  const steerCalls = [];
+  const client = {
+    ready: false,
+    async runChat({ onThread, onStarted }) {
+      onThread({ threadId: "thread_steer_123" });
+      await onStarted({ threadId: "thread_steer_123", turnId: "turn-steer" });
+      await turnDone;
+      return {
+        threadId: "thread_steer_123",
+        turnId: "turn-steer",
+        reply: "Adjusted",
+      };
+    },
+    async steerTurn(input) {
+      steerCalls.push(input);
+      return { turnId: input.turnId };
+    },
+  };
+  const server = createBridgeServer({
+    token: "secret-token",
+    graph: "maskys",
+    client,
+    trace: async () => {},
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const headers = {
+    origin: "https://roamresearch.com",
+    authorization: "Bearer secret-token",
+    "content-type": "application/json",
+  };
+
+  const chatResponse = await fetch(`${base}/chat`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      graph: "maskys",
+      message: "Start the work",
+      promptBlockUid: "prompt123",
+    }),
+  });
+  const reader = chatResponse.body.getReader();
+  const decoder = new TextDecoder();
+  let pending = "";
+  const events = [];
+  while (!events.some((event) => event.type === "started")) {
+    const { value, done } = await reader.read();
+    assert.equal(done, false);
+    pending += decoder.decode(value, { stream: true });
+    const lines = pending.split("\n");
+    pending = lines.pop() || "";
+    events.push(...lines.filter(Boolean).map((line) => JSON.parse(line)));
+  }
+  const runId = events.find((event) => event.type === "started").runId;
+
+  const unknownResponse = await fetch(
+    `${base}/runs/00000000-0000-4000-8000-000000000000/steer`,
+    { method: "POST", headers, body: JSON.stringify({ message: "hi" }) },
+  );
+  assert.equal(unknownResponse.status, 404);
+
+  const emptyResponse = await fetch(`${base}/runs/${runId}/steer`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ message: "   " }),
+  });
+  assert.equal(emptyResponse.status, 400);
+
+  const steerResponse = await fetch(`${base}/runs/${runId}/steer`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      graph: "maskys",
+      message: "Actually focus on tests",
+    }),
+  });
+  assert.equal(steerResponse.status, 200);
+  assert.deepEqual(await steerResponse.json(), {
+    ok: true,
+    turnId: "turn-steer",
+  });
+
+  finishTurn();
+  while (true) {
+    const { value, done } = await reader.read();
+    pending += decoder.decode(value || new Uint8Array(), { stream: !done });
+    const lines = pending.split("\n");
+    pending = lines.pop() || "";
+    events.push(...lines.filter(Boolean).map((line) => JSON.parse(line)));
+    if (done) break;
+  }
+  assert.deepEqual(steerCalls, [{
+    threadId: "thread_steer_123",
+    turnId: "turn-steer",
+    message: "Actually focus on tests",
+  }]);
+  assert.equal(
+    events.find((event) => event.type === "completed")?.result.reply,
+    "Adjusted",
+  );
+});
+
 test("bridge enforces bearer auth and graph restriction", async (t) => {
   const calls = [];
   const client = {

@@ -737,6 +737,14 @@ export class AppServerClient extends EventEmitter {
     return this.request("turn/interrupt", { threadId, turnId });
   }
 
+  steerTurn({ threadId, turnId, message }) {
+    return this.request("turn/steer", {
+      threadId,
+      input: [{ type: "text", text: message }],
+      expectedTurnId: turnId,
+    });
+  }
+
   async listModels({ refresh = false } = {}) {
     if (this.modelsCache && !refresh) return this.modelsCache;
     await this.start();
@@ -822,15 +830,17 @@ export class AppServerClient extends EventEmitter {
 
     for (const turn of turns) {
       const items = Array.isArray(turn?.items) ? turn.items : [];
-      const userItem = items.find((item) => item?.type === "userMessage");
-      const userText = Array.isArray(userItem?.content)
-        ? userItem.content
-            .filter((part) => part?.type === "text" && typeof part.text === "string")
-            .map((part) => part.text)
-            .join("\n")
-            .trim()
-        : "";
-      if (userText) messages.push({ role: "user", text: userText });
+      for (const item of items) {
+        if (item?.type !== "userMessage") continue;
+        const userText = Array.isArray(item.content)
+          ? item.content
+              .filter((part) => part?.type === "text" && typeof part.text === "string")
+              .map((part) => part.text)
+              .join("\n")
+              .trim()
+          : "";
+        if (userText) messages.push({ role: "user", text: userText });
+      }
 
       const agentItems = items.filter(
         (item) => item?.type === "agentMessage" && typeof item.text === "string",
@@ -2172,6 +2182,112 @@ export function createBridgeServer({
         itemId: pendingApproval.itemId,
       });
       sendJson(response, 200, { ok: true }, origin);
+      return;
+    }
+
+    const steerMatch = request.url?.match(
+      /^\/runs\/([0-9a-f-]{36})\/steer$/i,
+    );
+    if (request.method === "POST" && steerMatch) {
+      if (!bearerMatches(request.headers.authorization, token)) {
+        sendJson(response, 401, { error: "Invalid bridge token." }, origin);
+        return;
+      }
+      const run = activeRunsById.get(steerMatch[1]);
+      if (!run || run.kind !== "chat") {
+        sendJson(
+          response,
+          404,
+          { error: "That Codex chat run is not active." },
+          origin,
+        );
+        return;
+      }
+      let body;
+      try {
+        body = await readJsonBody(request);
+      } catch (error) {
+        const status = error.code === "BODY_TOO_LARGE" ? 413 : 400;
+        sendJson(response, status, { error: error.message }, origin);
+        return;
+      }
+      if (body.graph && body.graph !== graph) {
+        sendJson(
+          response,
+          400,
+          { error: `This bridge is restricted to graph "${graph}".` },
+          origin,
+        );
+        return;
+      }
+      const message = typeof body.message === "string" ? body.message.trim() : "";
+      if (!message || message.length > MAX_CHAT_MESSAGE_LENGTH) {
+        sendJson(
+          response,
+          400,
+          { error: `A steer message must be 1-${MAX_CHAT_MESSAGE_LENGTH} characters.` },
+          origin,
+        );
+        return;
+      }
+      if (run.cancelRequested) {
+        sendJson(
+          response,
+          409,
+          {
+            error: "That Codex run is being stopped.",
+            code: "TURN_NOT_STEERABLE",
+          },
+          origin,
+        );
+        return;
+      }
+      if (!run.threadId || !run.turnId) {
+        sendJson(
+          response,
+          409,
+          {
+            error: "That Codex turn is still starting. Try again in a moment.",
+            code: "TURN_NOT_STARTED",
+          },
+          origin,
+        );
+        return;
+      }
+      try {
+        await client.steerTurn({
+          threadId: run.threadId,
+          turnId: run.turnId,
+          message,
+        });
+        await trace({
+          runId: run.runId,
+          event: "chat.steered",
+          graph,
+          threadId: run.threadId,
+          turnId: run.turnId,
+          messageLength: message.length,
+        });
+        sendJson(response, 200, { ok: true, turnId: run.turnId }, origin);
+      } catch (error) {
+        await trace({
+          runId: run.runId,
+          event: "chat.steer.failed",
+          graph,
+          threadId: run.threadId,
+          turnId: run.turnId,
+          error: error.message,
+        });
+        sendJson(
+          response,
+          409,
+          {
+            error: error.message || "The active turn could not be steered.",
+            code: "TURN_NOT_STEERABLE",
+          },
+          origin,
+        );
+      }
       return;
     }
 
