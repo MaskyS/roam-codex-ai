@@ -1,16 +1,27 @@
 {
-  "name": "roam-codex-lab",
-  "version": "0.8.0",
-  "private": true,
+  "name": "roam-codex-bridge",
+  "version": "0.9.0",
+  "private": false,
   "type": "module",
-  "description": "A minimal Roam-to-Codex app-server development loop.",
+  "description": "Local bridge that connects the Roam Codex extension to the Codex App Server.",
   "scripts": {
     "dev": "node --watch bridge.mjs",
     "start": "node bridge.mjs",
     "test": "node --test",
-    "check": "node --check bridge.mjs && node --check extension.js && node --test"
+    "check": "node --check bridge.mjs && node --check extension.js && node --check bin.mjs && node --test"
   },
   "engines": {
     "node": ">=20"
-  }
+  },
+  "bin": {
+    "roam-codex-bridge": "./bin.mjs"
+  },
+  "files": [
+    "bridge.mjs",
+    "bin.mjs",
+    "runtime-agent.md",
+    "runtime-work-agent.md",
+    "README.md"
+  ],
+  "license": "MIT"
 }
