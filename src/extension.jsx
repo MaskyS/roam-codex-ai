@@ -1,3 +1,9 @@
+import {
+  ChatApprovalCards,
+  ChatControls,
+  ChatHistory,
+} from "./chat-components.jsx";
+
 const DEFAULT_BRIDGE_URL = "http://127.0.0.1:47321";
 const TOKEN_KEY_PREFIX = "roam-codex-lab.bridge-token";
 const RUNNING_STATUS_KEY_PREFIX = "roam-codex-lab.running-status-uids";
@@ -1708,204 +1714,6 @@ function createPanelElement(doc, tag, className, text = "") {
   if (text) element.textContent = text;
   return element;
 }
-function ChatApprovalCards({ approvals, decide }) {
-  const h = window.React.createElement;
-  const button = (approvalId, state, decision, label) => h("button", {
-    type: "button",
-    className: `roam-codex-chat-approval-${decision}`,
-    title: `${label} this Roam change`,
-    disabled: state === "submitting",
-    onClick: () => decide(approvalId, decision),
-  }, label);
-  return approvals.map(({ approvalId, questions, state }) => h(
-    "section", {
-      key: approvalId,
-      className: "roam-codex-chat-approval",
-      "aria-label": "Roam change approval",
-      "data-state": state || undefined,
-    },
-    h("div", { className: "roam-codex-chat-approval-title" },
-      questions.find((question) => question?.header)?.header ||
-        "Allow Roam change?"),
-    ...questions.filter((question) => question?.question).map((question, index) =>
-      h("div", {
-        key: `${approvalId}-${index}`,
-        className: "roam-codex-chat-approval-question",
-      }, question.question)),
-    h("div", { className: "roam-codex-chat-approval-actions" },
-      button(approvalId, state, "reject", "Reject"),
-      button(approvalId, state, "accept", "Allow")),
-  ));
-}
-function ChatHistory({ items, activeThreadId, error, running, onNew, onSelect }) {
-  const h = window.React.createElement;
-  const item = (className, label, title, props = {}, ...children) => h(
-    "button", {
-      type: "button",
-      className,
-      title,
-      role: "menuitem",
-      disabled: running,
-      ...props,
-    }, ...(children.length ? children : [label]),
-  );
-  const entries = items.length
-    ? items.map((entry) => item(
-      `roam-codex-chat-history-item${entry.active ? " is-active" : ""}`,
-      "",
-      `Resume ${entry.title}`,
-      {
-        key: entry.threadId,
-        "data-thread-id": entry.threadId,
-        "data-availability": entry.availability,
-        "aria-current": entry.active ? "true" : undefined,
-        onClick: () => onSelect(entry.threadId),
-      },
-      h("span", { className: "roam-codex-chat-history-title" }, entry.title),
-      h("span", { className: "roam-codex-chat-history-date" },
-        ["missing", "unavailable"].includes(entry.availability)
-          ? "Unavailable"
-          : conversationDateLabel(entry.updatedAt)),
-    ))
-    : [h("div", {
-      key: "empty",
-      className: "roam-codex-chat-history-empty",
-    }, error || "No previous chats yet.")];
-  return [
-    item(
-      `roam-codex-chat-history-item roam-codex-chat-history-new${
-        activeThreadId ? "" : " is-active"
-      }`,
-      "+ New chat",
-      "Start a new conversation",
-      { key: "new", "aria-current": activeThreadId ? undefined : "true", onClick: onNew },
-    ),
-    ...entries,
-    ...(error && items.length ? [h("div", {
-      key: "error",
-      className: "roam-codex-chat-history-error",
-    }, error)] : []),
-  ];
-}
-function ChatPickerOption({ option, onPick }) {
-  const h = window.React.createElement;
-  return h("button", {
-    type: "button",
-    className: `roam-codex-chat-picker-option${option.active ? " is-active" : ""}`,
-    title: option.description || "",
-    role: option.toggle ? "menuitemcheckbox" : "menuitemradio",
-    "aria-checked": String(option.active),
-    disabled: option.disabled,
-    onClick: option.disabled ? undefined : () => onPick(option.id),
-  },
-  h("span", { className: "roam-codex-chat-picker-option-label" }, option.label),
-  option.description && h(
-    "span",
-    { className: "roam-codex-chat-picker-option-description" },
-    option.description,
-  ));
-}
-function ChatPicker({ picker, onToggle, onOpenLevel, onPick }) {
-  const h = window.React.createElement;
-  const openLevel = (level) => onOpenLevel(level);
-  return h("div", { className: "roam-codex-chat-picker" },
-    h("button", {
-      type: "button",
-      className: "roam-codex-chat-picker-button",
-      title: "Choose the model, reasoning effort, speed, and access",
-      "aria-label": "Model, effort, speed, and access",
-      "aria-haspopup": "menu",
-      "aria-expanded": String(picker.open),
-      "data-speed": picker.speed,
-      disabled: picker.disabled,
-      onClick: onToggle,
-    }, picker.label),
-    h("div", {
-      className: "roam-codex-chat-picker-menu",
-      role: "menu",
-      "aria-label": "Model, effort, speed, and access options",
-      hidden: !picker.open,
-    }, ...picker.rows.map((row) => h("button", {
-      key: row.level,
-      type: "button",
-      className: `roam-codex-chat-picker-item${
-        row.level === picker.level ? " is-open" : ""
-      }`,
-      title: `Choose ${row.label.toLowerCase()}`,
-      role: "menuitem",
-      "aria-haspopup": "menu",
-      "aria-expanded": String(row.level === picker.level),
-      "data-level": row.level,
-      onMouseEnter: () => openLevel(row.level),
-      onFocus: () => openLevel(row.level),
-      onClick: () => openLevel(row.level),
-      onKeyDown: (event) => {
-        if (!["ArrowRight", "Enter", " "].includes(event.key)) return;
-        event.preventDefault?.();
-        openLevel(row.level);
-      },
-    },
-    h("span", { className: "roam-codex-chat-picker-item-label" }, row.label),
-    h("span", { className: "roam-codex-chat-picker-item-value" }, row.value),
-    h("span", {
-      className: "roam-codex-chat-picker-item-chevron",
-      "aria-hidden": "true",
-    }, "›")))),
-    h("div", {
-      className: "roam-codex-chat-picker-submenu",
-      role: "menu",
-      "aria-label": picker.level ? `${effortLabel(picker.level)} options` : undefined,
-      hidden: !picker.level,
-    }, ...picker.options.map((option) => h(ChatPickerOption, {
-      key: option.id,
-      option,
-      onPick,
-    }))));
-}
-function ChatControls({
-  picker,
-  running,
-  steering,
-  sendDisabled,
-  stopDisabled,
-  shortcutIsMac,
-  actions,
-}) {
-  const h = window.React.createElement;
-  const sendTitle = steering
-    ? "Add the focused block to Codex's current turn without stopping it"
-    : `Send the focused block in this chat's Block Outline (${
-      shortcutIsMac ? "Option" : "Alt"
-    }+Enter, rebindable in Settings → Hotkeys)`;
-  return h("div", { className: "roam-codex-chat-model-row" },
-    h(ChatPicker, {
-      picker,
-      onToggle: actions.togglePicker,
-      onOpenLevel: actions.openPickerLevel,
-      onPick: actions.pick,
-    }),
-    h("div", { className: "roam-codex-chat-actions" },
-      h("button", {
-        type: "button",
-        className: "roam-codex-chat-stop",
-        title: "Stop the current Codex turn",
-        hidden: !running,
-        disabled: stopDisabled,
-        onClick: actions.stop,
-      }, "Stop"),
-      h("button", {
-        type: "button",
-        className: `roam-codex-chat-send${steering ? " is-steering" : ""}`,
-        title: sendTitle,
-        hidden: false,
-        disabled: sendDisabled,
-        onMouseDown: (event) => event.preventDefault?.(),
-        onClick: actions.send,
-      }, steering ? "Steer" : "Send", h("kbd", {
-        className: "roam-codex-chat-send-kbd",
-        "aria-hidden": "true",
-      }, shortcutIsMac ? "⌥↵" : "Alt ↵"))));
-}
 export function renderRoamMarkdown(
   element,
   string,
@@ -3531,6 +3339,7 @@ export function createChatPanel({
       sendDisabled: !modelsReady || (running && (!runId || steerPending)),
       stopDisabled,
       shortcutIsMac: sendShortcutIsMac,
+      levelLabel: effortLabel,
       actions: {
         togglePicker: () => {
           if (running || !modelsReady) return;
@@ -3685,6 +3494,7 @@ export function createChatPanel({
       activeThreadId: state.activeThreadId,
       error: historyError,
       running,
+      dateLabel: conversationDateLabel,
       onNew: beginNewConversation,
       onSelect: (threadId) => void selectConversation(threadId),
     }));

@@ -43,9 +43,13 @@ The current integration is tested with Codex CLI `0.144.4` and
 ```bash
 git clone https://github.com/MaskyS/roam-codex-ai.git
 cd roam-codex-ai
+npm ci
+npm run build
 ```
 
-No package installation or build step is required.
+The build uses esbuild only to turn the extension's JSX source into the
+`extension.js` file loaded by Roam. React itself comes from Roam and is not
+included in the build.
 
 ### 2. Connect a dedicated Roam runtime
 

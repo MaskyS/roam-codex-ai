@@ -13,7 +13,7 @@ Codex is the runtime agent, and the official Roam MCP is its graph adapter.
 
 ```text
 Roam Desktop
-  ├─ extension.js ── native sidebar/composer, transcript, settings, graph writes
+  ├─ extension.js ── generated browser entry point
   └─ 127.0.0.1 bridge
        └─ codex app-server
             └─ graph-scoped Roam MCP connection
@@ -24,8 +24,9 @@ and the runtime never executes inside this builder repository.
 
 ## Source map
 
-- `extension.js` — extension lifecycle, commands, chat panel, graph-scoped
-  browser state, bridge requests, and application of structured block work.
+- `src/extension.jsx` — extension lifecycle, commands, React-owned chat UI,
+  graph-scoped browser state, bridge requests, and structured block work.
+- `extension.js` — ignored build output loaded by Roam and produced by esbuild.
 - `extension.css` — panel and local running-state presentation.
 - `bridge.mjs` — loopback HTTP authentication, App Server JSON-RPC client,
   runtime isolation, stream normalization, and request validation.
@@ -207,6 +208,7 @@ Run `Codex: Pair local bridge`, enter the terminal code, and then run
 The required local check is:
 
 ```bash
+npm ci
 npm run check
 ```
 

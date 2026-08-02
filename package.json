@@ -5,13 +5,18 @@
   "type": "module",
   "description": "A minimal Roam-to-Codex app-server development loop.",
   "scripts": {
+    "build": "esbuild src/extension.jsx --bundle --format=esm --platform=browser --target=es2022 --jsx-factory=window.React.createElement --outfile=extension.js",
     "dev": "node --watch bridge.mjs",
+    "dev:extension": "npm run build -- --watch",
     "start": "node bridge.mjs",
     "show-token": "node bridge.mjs --show-token",
-    "test": "node --test",
-    "check": "node --check bridge.mjs && node --check extension.js && node --test"
+    "test": "npm run build && node --test",
+    "check": "npm run build && node --check bridge.mjs && node --check extension.js && node --test"
   },
   "engines": {
     "node": ">=20"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.8"
   }
 }
