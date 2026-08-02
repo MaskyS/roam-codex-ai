@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 globalThis.window = {
@@ -17,6 +18,17 @@ globalThis.window = {
     },
   },
 };
+
+test("only a visible connection card opts into flex layout", () => {
+  const css = readFileSync(new URL("../extension.css", import.meta.url), "utf8");
+  const baseRule = css.match(/\.roam-codex-connection-card\s*\{([^}]*)\}/)?.[1];
+  assert.ok(baseRule);
+  assert.doesNotMatch(baseRule, /display\s*:/);
+  assert.match(
+    css,
+    /\.roam-codex-connection-card:not\(\[hidden\]\)\s*\{\s*display:\s*flex;\s*\}/,
+  );
+});
 
 const {
   CHAT_COMPOSER_PLACEHOLDER,
@@ -38,6 +50,8 @@ const {
   pairBridge,
   readChatState,
   readProbeStream,
+  requestPanelLogin,
+  requestPanelModels,
   readGraphThreadIndex,
   readFocusedPromptBlock,
   readPromptOutlineUids,
@@ -3949,6 +3963,88 @@ test("requestRunCancellation calls the authenticated run endpoint", async () => 
   assert.equal(captured.init.method, "POST");
   assert.equal(captured.init.headers.authorization, "Bearer local-token");
   assert.equal(result.status, "interrupting");
+});
+
+test("a dead bridge becomes a coded error instead of the browser wording", async () => {
+  const refused = () => {
+    throw new TypeError("Failed to fetch");
+  };
+
+  for (const call of [
+    () => requestPanelModels({ token: "t", fetchImpl: refused }),
+    () => requestPanelChat("hi", {
+      token: "t",
+      promptBlockUid: "prompt123",
+      fetchImpl: refused,
+    }),
+    () => requestRunSteer("12345678-1234-1234-1234-123456789abc", "hi", {
+      token: "t",
+      fetchImpl: refused,
+    }),
+    () => requestPanelLogin({ token: "t", fetchImpl: refused }),
+    () => pairBridge({ fetchImpl: refused, storage: { setItem: () => {} } }),
+  ]) {
+    await assert.rejects(call, (error) => {
+      assert.equal(error.code, "BRIDGE_UNREACHABLE");
+      assert.doesNotMatch(error.message, /Failed to fetch/);
+      return true;
+    });
+  }
+});
+
+test("a bridge that dies mid-conversation shows the card, not a raw error", async () => {
+  const doc = createFakePanelDocument();
+  let bridgeUp = true;
+  const controller = createChatPanel({
+    doc,
+    api: {},
+    storage: { getItem: () => null, setItem: () => {} },
+    rootBlockUid: "root123",
+    setIntervalImpl: () => 1,
+    clearIntervalImpl: () => {},
+    setTimeoutImpl: () => 1,
+    clearTimeoutImpl: () => {},
+    probeConnectionImpl: async () =>
+      bridgeUp
+        ? { state: "connected", graph: "maskys" }
+        : { state: "no-bridge", graph: "maskys" },
+    authRequest: async () => ({ auth: "authenticated", method: "chatgpt" }),
+    readPromptImpl: async () => ({ uid: "root123", text: "Hello" }),
+    requestChatImpl: async () => {
+      bridgeUp = false;
+      const error = new Error("The local Codex bridge isn't responding.");
+      error.code = "BRIDGE_UNREACHABLE";
+      throw error;
+    },
+    requestModelsImpl: async () => [],
+    requestMessagesImpl: async () => [],
+    requestHistoryImpl: async () => ({
+      threads: [],
+      missingThreadIds: [],
+      unavailableThreadIds: [],
+    }),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  await controller.send();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const elements = panelElements(controller);
+  const progressText = elements.find(
+    (element) => element.className === "roam-codex-chat-progress-text",
+  );
+  assert.equal(progressText.textContent || "", "");
+  const card = elements.find(
+    (element) => element.className === "roam-codex-connection-card",
+  );
+  assert.equal(card.hidden, false);
+  assert.equal(
+    card.children.some(
+      (child) => child.textContent === "The Codex bridge isn't running",
+    ),
+    true,
+  );
+  await controller.close();
 });
 
 test("a streamed error keeps its Codex classification for the panel", async () => {

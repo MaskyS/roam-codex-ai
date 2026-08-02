@@ -1940,6 +1940,9 @@ export function createBridgeServer({
           error: error.message,
           code: error.code,
           codexErrorInfo: error.codexErrorInfo || null,
+          httpStatusCode: Number.isFinite(error.httpStatusCode)
+            ? error.httpStatusCode
+            : null,
           additionalDetails: error.additionalDetails || null,
         });
         writeNdjson(response, {
@@ -2296,6 +2299,9 @@ export function createBridgeServer({
         error: error.message,
         code: error.code,
         codexErrorInfo: error.codexErrorInfo || null,
+        httpStatusCode: Number.isFinite(error.httpStatusCode)
+          ? error.httpStatusCode
+          : null,
         additionalDetails: error.additionalDetails || null,
       });
       writeNdjson(response, {

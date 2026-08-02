@@ -18,13 +18,13 @@ The prototype is successful when a focused block in the `maskys` graph can run
 receive useful appended outline blocks beneath the focused block. When the run
 finishes, the temporary running child must be deleted.
 
-The structured `Do this block` runtime reads Roam through its read-only MCP
-allowlist and returns a bounded edit plan; `extension.js`, running under the
-signed-in human's Roam session, applies that plan. Persistent chat uses its
-separate allowlist and may make explicitly requested graph changes according to
-the selected access mode. Runtime agents may use built-in live web search when
-a task depends on current or external facts, but must not edit this repository
-or invoke shell commands.
+`Do this block` starts an ephemeral App Server turn. Codex reads and writes the
+graph directly through the official Roam MCP according to the selected access
+mode; the extension owns the temporary running indicator and presentation, not
+the durable result. Persistent chat uses the same access modes in a resumable
+thread. Runtime agents may use built-in live web search when a task depends on
+current or external facts, but must not edit this repository or invoke shell
+commands.
 
 ## Development loop
 
@@ -92,21 +92,20 @@ or invoke shell commands.
 ## Safety
 
 - Keep the bridge bound to `127.0.0.1`.
-- Keep bearer tokens and traces under ignored `.dev/`.
-- Use a separate graph-scoped runtime Roam token. Persistent chat requires the
-  graph access needed for explicitly requested writes; capability is narrowed
-  by the per-workflow and per-access-mode allowlists in `bridge.mjs`, not by
-  copying the builder connection into the runtime.
-- Builder tasks may use every Roam MCP tool through the user's normal
-  connection. The structured `Do this block` workflow must keep its runtime
-  Roam tools read-only. Persistent chat may expose only its explicit tool list:
-  Read only hides write tools, while Auto and Manual expose writes under their
-  documented consent behavior. Other MCP servers remain disabled unless the
-  user explicitly enables them in Tools.
+- Keep the device bearer token in the private runtime config and development
+  traces under ignored `.dev/`; never print either secret into graph content.
+- Use the intended graph entry from the user's `~/.roam-tools.json`; pairing
+  starts the official Roam MCP connect flow when that graph is absent.
+  Capability is narrowed by the explicit per-access-mode allowlists in
+  `bridge.mjs`, not by copying credentials into a second runtime profile.
+- Builder tasks, persistent chat, and `Do this block` use the official Roam MCP
+  connection. Read only hides write tools, while Auto and Manual expose the
+  explicit write-tool allowlist under their documented consent behavior. Other
+  MCP servers remain disabled unless the user explicitly enables them in Tools.
 - Never rewrite or delete the user's selected block.
-- The explicit command authorizes the extension to append descendants beneath
-  the selected block. It does not authorize rewriting, moving, or deleting
-  existing user blocks.
+- The explicit command authorizes Codex to append descendants beneath the
+  selected block through Roam MCP. It does not authorize rewriting, moving, or
+  deleting existing user blocks.
 - Keep errors, run IDs, thread IDs, and timing out of graph content. The one
   permitted operational block is the temporary extension-owned
   `[[Codex/running]]` child, which must be deleted after success or failure.
@@ -115,7 +114,8 @@ or invoke shell commands.
   semantic tool activity; never expose raw reasoning text. Do not repeatedly
   update the temporary Roam block.
 - Stop active work through app-server `turn/interrupt`. Treat interruption as a
-  neutral stopped outcome, remove the temporary indicator, and apply no plan.
+  neutral stopped outcome, remove the temporary indicator, and make no
+  extension-side durable graph changes.
 - Put durable results in the ordinary outline. Put sources, questions, caveats,
   and explanations in native comments on the most relevant source or generated
   block, opening the comments sidebar when any comment is added.
@@ -127,8 +127,8 @@ or invoke shell commands.
 - For current or external facts, require live research and direct source URLs.
   Prefer official and primary sources. If required research is unavailable,
   make no factual edits and leave a warning comment instead of guessing.
-- Render validated research citations as a grouped native comment on the
-  specific outline block they support.
+- Put research citations in a grouped native comment on the specific outline
+  block they support.
 - Preserve unrelated work in this repository and graph.
 
 ## Verification

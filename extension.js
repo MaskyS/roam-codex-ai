@@ -255,6 +255,17 @@ function getToken({
   return storage.getItem(tokenKey(graph))?.trim() || "";
 }
 
+async function bridgeFetch(fetchImpl, url, init) {
+  try {
+    return await fetchImpl(url, init);
+  } catch (cause) {
+    const error = new Error("The local Codex bridge isn't responding.");
+    error.code = "BRIDGE_UNREACHABLE";
+    error.cause = cause;
+    throw error;
+  }
+}
+
 function missingTokenError() {
   const error = new Error(
     "This device isn't paired with the local Codex bridge yet.",
@@ -289,7 +300,7 @@ export async function requestProbe(blockUid, {
     throw missingTokenError();
   }
 
-  const response = await fetchImpl(`${bridgeUrl}/probe`, {
+  const response = await bridgeFetch(fetchImpl, `${bridgeUrl}/probe`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${token}`,
@@ -423,7 +434,7 @@ async function bridgeJson(path, {
     throw missingTokenError();
   }
 
-  const response = await fetchImpl(`${bridgeUrl}${path}`, {
+  const response = await bridgeFetch(fetchImpl, `${bridgeUrl}${path}`, {
     headers: {
       authorization: `Bearer ${token}`,
       "x-roam-graph": graphHeaderValue(graph),
@@ -472,7 +483,7 @@ export async function requestPanelLogin({
   if (!token) {
     throw missingTokenError();
   }
-  const response = await fetchImpl(`${bridgeUrl}/auth/login`, {
+  const response = await bridgeFetch(fetchImpl, `${bridgeUrl}/auth/login`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${token}`,
@@ -563,7 +574,7 @@ export async function requestPanelThreadSummaries(threadIds, {
     throw new Error("Conversation history requires at most 100 unique thread IDs.");
   }
 
-  const response = await fetchImpl(`${bridgeUrl}/threads/summaries`, {
+  const response = await bridgeFetch(fetchImpl, `${bridgeUrl}/threads/summaries`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${token}`,
@@ -618,7 +629,8 @@ export async function requestPanelThreadName(threadId, name, {
   if (!validThreadId(threadId) || !cleanName || cleanName.length > 100) {
     throw new Error("A valid conversation and name are required.");
   }
-  const response = await fetchImpl(
+  const response = await bridgeFetch(
+    fetchImpl,
     `${bridgeUrl}/threads/${encodeURIComponent(threadId)}/name`,
     {
       method: "POST",
@@ -679,7 +691,7 @@ export async function requestPanelChat(message, {
   const sanitizedServers = sanitizeEnabledMcpServers(enabledServers);
   if (sanitizedServers.length) body.enabledServers = sanitizedServers;
 
-  const response = await fetchImpl(`${bridgeUrl}/chat`, {
+  const response = await bridgeFetch(fetchImpl, `${bridgeUrl}/chat`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${token}`,
@@ -724,7 +736,8 @@ export async function requestRunApproval(runId, approvalId, decision, {
   if (!["accept", "reject"].includes(decision)) {
     throw new Error("A valid approval decision is required.");
   }
-  const response = await fetchImpl(
+  const response = await bridgeFetch(
+    fetchImpl,
     `${bridgeUrl}/runs/${runId}/approvals/${approvalId}`,
     {
       method: "POST",
@@ -761,7 +774,8 @@ export async function requestRunCancellation(runId, {
     throw new Error("Cannot stop a run without a valid run ID.");
   }
 
-  const response = await fetchImpl(
+  const response = await bridgeFetch(
+    fetchImpl,
     `${bridgeUrl}/runs/${encodeURIComponent(runId)}/cancel`,
     {
       method: "POST",
@@ -796,7 +810,8 @@ export async function requestRunSteer(runId, message, {
     throw new Error("Cannot steer a run without a valid run ID.");
   }
 
-  const response = await fetchImpl(
+  const response = await bridgeFetch(
+    fetchImpl,
     `${bridgeUrl}/runs/${encodeURIComponent(runId)}/steer`,
     {
       method: "POST",
@@ -1535,6 +1550,13 @@ export async function workOnBlock(
         "warning",
       );
       void openChatImpl().catch(() => {});
+      throw failure;
+    }
+    if (failure.code === "BRIDGE_UNREACHABLE") {
+      notifyImpl(
+        "The local Codex bridge isn't running. Start it with npx roam-codex-bridge.",
+        "warning",
+      );
       throw failure;
     }
     notifyImpl(`Codex could not finish: ${failure.message}`, "danger");
@@ -3561,7 +3583,7 @@ export function createChatPanel({
         renderConversationButton();
         return;
       }
-      if (error.code === "NOT_PAIRED") {
+      if (["NOT_PAIRED", "BRIDGE_UNREACHABLE"].includes(error.code)) {
         setProgress("", "");
         void refreshConnection();
         return;
@@ -3656,7 +3678,7 @@ export function createChatPanel({
       }
       persist();
     } catch (error) {
-      historyError = error.code === "NOT_PAIRED"
+      historyError = ["NOT_PAIRED", "BRIDGE_UNREACHABLE"].includes(error.code)
         ? ""
         : error.message || "The graph thread index is unavailable.";
     }
@@ -3893,7 +3915,7 @@ export function createChatPanel({
       if (cleared.composerCleared) {
         ({ restored, restoreFailed } = await restoreSubmittedPrompt(prompt));
       }
-      if (error.code === "NOT_PAIRED") {
+      if (["NOT_PAIRED", "BRIDGE_UNREACHABLE"].includes(error.code)) {
         setProgress("", "");
         void refreshConnection();
         return null;
@@ -4032,7 +4054,7 @@ export function createChatPanel({
       if (composerCleared) {
         ({ restored, restoreFailed } = await restoreSubmittedPrompt(prompt));
       }
-      if (error.code === "NOT_PAIRED") {
+      if (["NOT_PAIRED", "BRIDGE_UNREACHABLE"].includes(error.code)) {
         setProgress("", "");
         void refreshConnection();
         return null;
@@ -4221,7 +4243,7 @@ export function createChatPanel({
       })
       .catch((error) => {
         if (closed) return;
-        if (error.code !== "NOT_PAIRED") {
+        if (!["NOT_PAIRED", "BRIDGE_UNREACHABLE"].includes(error.code)) {
           pickerButton.textContent = "Models unavailable";
           setProgress(error.message, "error");
         }
@@ -4415,7 +4437,13 @@ export function createChatPanel({
         renderConnectionCard({ focusInput: true });
         return;
       }
-      connectionNote = error.message || "Pairing failed.";
+      connectionNote = error.code === "BRIDGE_UNREACHABLE"
+        ? ""
+        : error.message || "Pairing failed.";
+      if (error.code === "BRIDGE_UNREACHABLE") {
+        void refreshConnection();
+        return;
+      }
       renderConnectionCard({ focusInput: pairingCodeRequired });
     }
   };
@@ -4429,7 +4457,13 @@ export function createChatPanel({
       renderConnectionCard();
       openUrlImpl?.(login.authUrl);
     } catch (error) {
-      connectionNote = error.message || "Sign-in could not start.";
+      connectionNote = error.code === "BRIDGE_UNREACHABLE"
+        ? ""
+        : error.message || "Sign-in could not start.";
+      if (error.code === "BRIDGE_UNREACHABLE") {
+        void refreshConnection();
+        return;
+      }
       renderConnectionCard();
     }
   };
@@ -4759,7 +4793,7 @@ export async function pairBridge({
     }
     body.code = pairingCode;
   }
-  const response = await fetchImpl(`${bridgeUrl}/pair`, {
+  const response = await bridgeFetch(fetchImpl, `${bridgeUrl}/pair`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),

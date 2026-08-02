@@ -1237,7 +1237,61 @@ test("a failed chat run streams the error classification to the client", async (
 
   const traced = traceEntries.find((entry) => entry.event === "chat.failed");
   assert.equal(traced.codexErrorInfo, "usageLimitExceeded");
+  assert.equal(traced.httpStatusCode, 429);
   assert.equal(traced.additionalDetails, "Your limit resets at 9pm.");
+});
+
+test("a failed work run keeps the complete error classification in its trace", async (t) => {
+  const traceEntries = [];
+  const client = {
+    ready: true,
+    async runWork() {
+      const error = new Error("Roam MCP request failed.");
+      error.codexErrorInfo = "httpConnectionFailed";
+      error.httpStatusCode = 503;
+      error.additionalDetails = "The upstream graph service is unavailable.";
+      throw error;
+    },
+  };
+  const server = createBridgeServer({
+    token: "secret-token",
+    graph: "maskys",
+    client,
+    trace: async (entry) => traceEntries.push(entry),
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const response = await fetch(`${base}/probe`, {
+    method: "POST",
+    headers: {
+      origin: "https://roamresearch.com",
+      authorization: "Bearer secret-token",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ graph: "maskys", blockUid: "abcdefghi" }),
+  });
+  const events = (await response.text())
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  const failure = events.find((event) => event.type === "error");
+  assert.equal(failure.codexErrorInfo, "httpConnectionFailed");
+  assert.equal(failure.httpStatusCode, 503);
+  assert.equal(
+    failure.additionalDetails,
+    "The upstream graph service is unavailable.",
+  );
+
+  const traced = traceEntries.find((entry) => entry.event === "work.failed");
+  assert.equal(traced.codexErrorInfo, "httpConnectionFailed");
+  assert.equal(traced.httpStatusCode, 503);
+  assert.equal(
+    traced.additionalDetails,
+    "The upstream graph service is unavailable.",
+  );
 });
 
 test("a work run is a chat turn with the block prompt and work instructions", async () => {

@@ -577,11 +577,14 @@
   background: #f6f9fb;
   border: 1px solid #d8e1e8;
   border-radius: 6px;
-  display: flex;
   flex-direction: column;
   gap: 8px;
   margin: 8px 10px 0;
   padding: 12px 14px;
+}
+
+.roam-codex-connection-card:not([hidden]) {
+  display: flex;
 }
 
 .roam-codex-connection-title {

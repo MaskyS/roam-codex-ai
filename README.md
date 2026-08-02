@@ -2,8 +2,8 @@
 
 Use Codex from ordinary Roam blocks without giving up Roam's native editor.
 Chat in the right sidebar, ask Codex to read or change the active graph, or run
-a focused block as a structured task. Conversations stay attached to the graph
-while Codex runs locally through its official App Server.
+a focused block as a direct graph task. Conversations stay attached to the
+graph while Codex runs locally through its official App Server.
 
 > **Pre-release:** Roam Depot distribution is not ready yet. The extension is
 > loaded through Developer Mode for now; the bridge installs from npm.
@@ -18,8 +18,8 @@ while Codex runs locally through its official App Server.
 - Steer an active turn with another block instead of stopping and restarting.
 - Stop a turn without losing the submitted outline.
 - Reopen graph-scoped conversation history.
-- Run `Codex: Do this block` to append a structured result beneath a focused
-  block, with sources and caveats placed in native comments.
+- Run `Codex: Do this block` to carry out a task beneath a focused block through
+  Roam MCP, with sources and caveats placed in native comments.
 
 Codex replies remain in the chat panel unless the task explicitly writes to the
 graph. The selected source block is never rewritten or deleted by `Do this
@@ -114,8 +114,8 @@ access defaults configured under **Settings → Extensions → Roam Codex**.
 ## Run a focused block
 
 Focus an ordinary block and choose `Codex: Do this block` from the slash menu or
-command palette. Codex reads that outline as the task and appends the result
-beneath the focused block.
+command palette. Codex reads that outline as the task and writes the result
+beneath the focused block through Roam MCP using the selected access mode.
 
 A temporary `[[Codex/running]]` child appears while the task runs and is removed
 after success, failure, or Stop. Research sources, questions, and caveats are
@@ -145,11 +145,14 @@ The active graph always comes from Roam and is not a setting.
 ## Security and data
 
 - The bridge accepts connections only on `127.0.0.1`.
-- Pairing requires the allowed Roam origin, exact graph, and one-time code.
-- The bearer token stays in graph-scoped browser `localStorage`; it is not
-  written to graph content or graph-synced settings.
+- Pairing requires the allowed Roam origin, exact graph, and local consent
+  through the native dialog or short-lived fallback code.
+- The bearer token stays in the private bridge config and graph-scoped browser
+  `localStorage`; it is not written to graph content or graph-synced settings.
 - Runtime files and Codex threads use a graph-specific directory under
   `~/.roam-better-ai/graphs/`.
+- Roam MCP uses the active graph connection in the user's
+  `~/.roam-tools.json`.
 - The runtime receives only the explicit Roam tool allowlist and optional MCP
   servers enabled for the graph.
 - Progress summaries are shown, but raw model reasoning is never exposed.
