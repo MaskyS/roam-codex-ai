@@ -391,6 +391,8 @@ export function ChatControls({
         >
           Stop
         </button>
+        {/* Keep Roam's native block editor focused until send snapshots it.
+            Moving focus here first would lose the active composer window. */}
         <button
           type="button"
           className={`roam-codex-chat-send${steering ? " is-steering" : ""}`}
