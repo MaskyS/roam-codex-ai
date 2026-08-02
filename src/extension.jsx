@@ -2,6 +2,7 @@ import {
   ChatControls,
   ChatHistory,
   ChatTranscript,
+  ConnectionCard,
 } from "./chat-components.jsx";
 
 const DEFAULT_BRIDGE_URL = "http://127.0.0.1:47321";
@@ -261,6 +262,17 @@ function getToken({
   return storage.getItem(tokenKey(graph))?.trim() || "";
 }
 
+async function bridgeFetch(fetchImpl, url, init) {
+  try {
+    return await fetchImpl(url, init);
+  } catch (cause) {
+    const error = new Error("The local Codex bridge isn't responding.");
+    error.code = "BRIDGE_UNREACHABLE";
+    error.cause = cause;
+    throw error;
+  }
+}
+
 function missingTokenError() {
   const error = new Error(
     "This device isn't paired with the local Codex bridge yet.",
@@ -295,7 +307,7 @@ export async function requestProbe(blockUid, {
     throw missingTokenError();
   }
 
-  const response = await fetchImpl(`${bridgeUrl}/probe`, {
+  const response = await bridgeFetch(fetchImpl, `${bridgeUrl}/probe`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${token}`,
@@ -390,6 +402,15 @@ export async function readProbeStream(
     } else if (event.type === "error") {
       const error = new Error(event.error || "Codex could not finish the run.");
       error.code = event.code;
+      if (typeof event.codexErrorInfo === "string") {
+        error.codexErrorInfo = event.codexErrorInfo;
+      }
+      if (Number.isFinite(event.httpStatusCode)) {
+        error.httpStatusCode = event.httpStatusCode;
+      }
+      if (typeof event.additionalDetails === "string") {
+        error.additionalDetails = event.additionalDetails;
+      }
       throw error;
     }
   };
@@ -420,7 +441,7 @@ async function bridgeJson(path, {
     throw missingTokenError();
   }
 
-  const response = await fetchImpl(`${bridgeUrl}${path}`, {
+  const response = await bridgeFetch(fetchImpl, `${bridgeUrl}${path}`, {
     headers: {
       authorization: `Bearer ${token}`,
       "x-roam-graph": graphHeaderValue(graph),
@@ -469,7 +490,7 @@ export async function requestPanelLogin({
   if (!token) {
     throw missingTokenError();
   }
-  const response = await fetchImpl(`${bridgeUrl}/auth/login`, {
+  const response = await bridgeFetch(fetchImpl, `${bridgeUrl}/auth/login`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${token}`,
@@ -512,6 +533,9 @@ export async function probeBridgeConnection({
     result = await response.json();
   } catch {
     // A non-JSON reply is treated through the status checks below.
+  }
+  if (response.ok && result.ok === true && result.graph === null) {
+    return { state: "unpaired", graph, bridgeUrl };
   }
   if (
     response.status === 409 ||
@@ -557,7 +581,7 @@ export async function requestPanelThreadSummaries(threadIds, {
     throw new Error("Conversation history requires at most 100 unique thread IDs.");
   }
 
-  const response = await fetchImpl(`${bridgeUrl}/threads/summaries`, {
+  const response = await bridgeFetch(fetchImpl, `${bridgeUrl}/threads/summaries`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${token}`,
@@ -612,7 +636,8 @@ export async function requestPanelThreadName(threadId, name, {
   if (!validThreadId(threadId) || !cleanName || cleanName.length > 100) {
     throw new Error("A valid conversation and name are required.");
   }
-  const response = await fetchImpl(
+  const response = await bridgeFetch(
+    fetchImpl,
     `${bridgeUrl}/threads/${encodeURIComponent(threadId)}/name`,
     {
       method: "POST",
@@ -673,7 +698,7 @@ export async function requestPanelChat(message, {
   const sanitizedServers = sanitizeEnabledMcpServers(enabledServers);
   if (sanitizedServers.length) body.enabledServers = sanitizedServers;
 
-  const response = await fetchImpl(`${bridgeUrl}/chat`, {
+  const response = await bridgeFetch(fetchImpl, `${bridgeUrl}/chat`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${token}`,
@@ -718,7 +743,8 @@ export async function requestRunApproval(runId, approvalId, decision, {
   if (!["accept", "reject"].includes(decision)) {
     throw new Error("A valid approval decision is required.");
   }
-  const response = await fetchImpl(
+  const response = await bridgeFetch(
+    fetchImpl,
     `${bridgeUrl}/runs/${runId}/approvals/${approvalId}`,
     {
       method: "POST",
@@ -755,7 +781,8 @@ export async function requestRunCancellation(runId, {
     throw new Error("Cannot stop a run without a valid run ID.");
   }
 
-  const response = await fetchImpl(
+  const response = await bridgeFetch(
+    fetchImpl,
     `${bridgeUrl}/runs/${encodeURIComponent(runId)}/cancel`,
     {
       method: "POST",
@@ -790,7 +817,8 @@ export async function requestRunSteer(runId, message, {
     throw new Error("Cannot steer a run without a valid run ID.");
   }
 
-  const response = await fetchImpl(
+  const response = await bridgeFetch(
+    fetchImpl,
     `${bridgeUrl}/runs/${encodeURIComponent(runId)}/steer`,
     {
       method: "POST",
@@ -1466,128 +1494,6 @@ export function stopAllRunningPresentations() {
   for (const stop of [...ACTIVE_PRESENTATIONS.values()]) stop();
 }
 
-function formatComment(comment) {
-  return `**Codex** — ${singleLine(comment.text)}`;
-}
-
-function escapeMarkdownLinkText(value) {
-  return singleLine(value)
-    .replaceAll("\\", "\\\\")
-    .replaceAll("]", "\\]");
-}
-
-function formatSource(source) {
-  const title = escapeMarkdownLinkText(source.title);
-  const url = String(source.url).replaceAll("(", "%28").replaceAll(")", "%29");
-  return `[${title}](${url}) — ${singleLine(source.supports)}`;
-}
-
-function formatSourcesComment(sources) {
-  return [
-    "- **Codex** — Sources",
-    ...sources.map((source) => `  - ${formatSource(source)}`),
-  ].join("\n");
-}
-
-function commentToOpenIndex(comments) {
-  for (let index = comments.length - 1; index >= 0; index -= 1) {
-    if (
-      comments[index].kind === "question" ||
-      comments[index].kind === "warning"
-    ) {
-      return index;
-    }
-  }
-  return comments.length - 1;
-}
-
-export async function applyRunPlan(
-  sourceBlockUid,
-  plan,
-  {
-    api = getRoamApi(),
-  } = {},
-) {
-  if (
-    !plan ||
-    !Array.isArray(plan.edits) ||
-    !Array.isArray(plan.comments) ||
-    !Array.isArray(plan.sources)
-  ) {
-    throw new Error("Bridge returned an invalid edit plan.");
-  }
-
-  const targetUids = new Map([["source", sourceBlockUid]]);
-  const createdUids = [];
-
-  for (const edit of plan.edits) {
-    const parentUid = targetUids.get(edit.parent);
-    if (!parentUid) {
-      throw new Error(`Edit "${edit.id}" has an unknown parent.`);
-    }
-
-    const uid = api.util.generateUID();
-    await api.data.block.create({
-      location: { "parent-uid": parentUid, order: "last" },
-      block: {
-        uid,
-        string: singleLine(edit.text),
-      },
-    });
-    targetUids.set(edit.id, uid);
-    createdUids.push(uid);
-  }
-
-  const sourcesByTarget = new Map();
-  for (const source of plan.sources) {
-    if (!targetUids.has(source.target)) {
-      throw new Error("A Codex source has an unknown target.");
-    }
-    const group = sourcesByTarget.get(source.target) || [];
-    group.push(source);
-    sourcesByTarget.set(source.target, group);
-  }
-
-  const commentUids = [];
-  const sourceCommentUids = [];
-  const openFirstSourceComment = plan.comments.length === 0;
-  let sourceCommentIndex = 0;
-  for (const [target, sources] of sourcesByTarget) {
-    const result = await api.data.block.addComment({
-      "block-uid": targetUids.get(target),
-      "reply-markdown": formatSourcesComment(sources),
-      "open-comment": openFirstSourceComment && sourceCommentIndex === 0,
-    });
-    const uids = result?.uids || [];
-    sourceCommentUids.push(...uids);
-    commentUids.push(...uids);
-    sourceCommentIndex += 1;
-  }
-
-  const openedCommentIndex = commentToOpenIndex(plan.comments);
-  for (const [index, comment] of plan.comments.entries()) {
-    const targetUid = targetUids.get(comment.target);
-    if (!targetUid) {
-      throw new Error("A Codex comment has an unknown target.");
-    }
-
-    const result = await api.data.block.addComment({
-      "block-uid": targetUid,
-      "reply-string": formatComment(comment),
-      "open-comment": index === openedCommentIndex,
-    });
-    commentUids.push(...(result?.uids || []));
-  }
-
-  return {
-    outcome: plan.outcome,
-    research: plan.research,
-    createdUids,
-    sourceCommentUids,
-    commentUids,
-  };
-}
-
 export async function workOnBlock(
   blockUid,
   {
@@ -1612,19 +1518,18 @@ export async function workOnBlock(
   ACTIVE_BLOCK_UIDS.add(blockUid);
   let statusUid;
   let stopPresentation;
-  let applied;
+  let result;
   let failure;
 
   try {
     statusUid = await createRunningStatus(blockUid, { api, storage });
     stopPresentation = startPresentation(statusUid);
-    const run = await request(blockUid, {
+    result = await request(blockUid, {
       onProgress: (progress) => stopPresentation?.update?.(progress),
       onStarted: ({ runId }) => {
         stopPresentation?.setCancelHandler?.(() => cancelRequest(runId));
       },
     });
-    applied = await applyRunPlan(blockUid, run.plan, { api });
   } catch (error) {
     failure = error;
   } finally {
@@ -1644,13 +1549,7 @@ export async function workOnBlock(
   if (failure) {
     if (failure.code === "TURN_INTERRUPTED") {
       notifyImpl("Codex stopped.", "primary");
-      return {
-        outcome: "stopped",
-        research: "not_needed",
-        createdUids: [],
-        sourceCommentUids: [],
-        commentUids: [],
-      };
+      return { outcome: "stopped", reply: "" };
     }
     if (failure.code === "NOT_PAIRED") {
       notifyImpl(
@@ -1660,25 +1559,20 @@ export async function workOnBlock(
       void openChatImpl().catch(() => {});
       throw failure;
     }
+    if (failure.code === "BRIDGE_UNREACHABLE") {
+      notifyImpl(
+        "The local Codex bridge isn't running. Start it with npx roam-codex-bridge.",
+        "warning",
+      );
+      throw failure;
+    }
     notifyImpl(`Codex could not finish: ${failure.message}`, "danger");
     throw failure;
   }
 
-  if (applied.outcome === "applied") {
-    const commentSuffix = applied.commentUids.length
-      ? " Comments are open in the sidebar."
-      : "";
-    const action = applied.sourceCommentUids.length
-      ? "researched and updated"
-      : "updated";
-    notifyImpl(`Codex ${action} the outline.${commentSuffix}`, "success");
-  } else if (applied.outcome === "needs_input") {
-    notifyImpl("Codex needs input in the comments sidebar.", "warning");
-  } else {
-    notifyImpl("Codex left a comment without changing the outline.", "primary");
-  }
-
-  return applied;
+  const reply = typeof result?.reply === "string" ? result.reply.trim() : "";
+  notifyImpl(reply || "Codex finished this block.", "success");
+  return { outcome: "completed", reply };
 }
 
 export function findChatPanelHost(
@@ -2542,6 +2436,8 @@ export function createChatPanel({
   let connectionRetryTimer = null;
   let connectionProbeVersion = 0;
   let connectionNote = "";
+  let connectionCardVisible = false;
+  let pairingCodeRequired = false;
   let enabledMcpServers = sanitizeEnabledMcpServers(
     readEnabledMcpServersImpl(),
   );
@@ -2620,13 +2516,8 @@ export function createChatPanel({
 
   const body = createPanelElement(doc, "div", "roam-codex-chat-body");
 
-  const connectionCard = createPanelElement(
-    doc,
-    "section",
-    "roam-codex-connection-card",
-  );
-  connectionCard.hidden = true;
-  body.appendChild(connectionCard);
+  const connectionMount = createPanelElement(doc, "div");
+  body.appendChild(connectionMount);
 
   const transcriptWrap = createPanelElement(
     doc,
@@ -2700,6 +2591,7 @@ export function createChatPanel({
   const createRoot = window.ReactDOMClient?.createRoot;
   if (!window.React?.createElement || !createRoot)
     throw new Error("Codex chat requires Roam's React 18 globals.");
+  const connectionRoot = createRoot(connectionMount);
   const transcriptRoot = createRoot(transcriptMount);
   const historyRoot = createRoot(historyPopover);
 
@@ -3380,6 +3272,11 @@ export function createChatPanel({
         renderConversationButton();
         return;
       }
+      if (["NOT_PAIRED", "BRIDGE_UNREACHABLE"].includes(error.code)) {
+        setProgress("", "");
+        void refreshConnection();
+        return;
+      }
       setProgress(error.message || "Could not load that conversation.", "error");
     }
   };
@@ -3414,7 +3311,9 @@ export function createChatPanel({
       }
       persist();
     } catch (error) {
-      historyError = error.message || "The graph thread index is unavailable.";
+      historyError = ["NOT_PAIRED", "BRIDGE_UNREACHABLE"].includes(error.code)
+        ? ""
+        : error.message || "The graph thread index is unavailable.";
     }
     const threadIds = historyItems().map((item) => item.threadId);
     if (!threadIds.length) {
@@ -3633,7 +3532,7 @@ export function createChatPanel({
       if (cleared.composerCleared) {
         ({ restored, restoreFailed } = await restoreSubmittedPrompt(prompt));
       }
-      if (error.code === "NOT_PAIRED") {
+      if (["NOT_PAIRED", "BRIDGE_UNREACHABLE"].includes(error.code)) {
         setProgress("", "");
         void refreshConnection();
         return null;
@@ -3772,7 +3671,7 @@ export function createChatPanel({
       if (composerCleared) {
         ({ restored, restoreFailed } = await restoreSubmittedPrompt(prompt));
       }
-      if (error.code === "NOT_PAIRED") {
+      if (["NOT_PAIRED", "BRIDGE_UNREACHABLE"].includes(error.code)) {
         setProgress("", "");
         void refreshConnection();
         return null;
@@ -3790,7 +3689,10 @@ export function createChatPanel({
         );
         return null;
       }
-      const failureText = error.message || "Codex could not finish.";
+      const failureText = [
+        error.message || "Codex could not finish.",
+        error.additionalDetails,
+      ].filter(Boolean).join(" · ");
       setProgress(
         restoreFailed
           ? `${failureText} The submitted outline could not be restored.`
@@ -3866,6 +3768,7 @@ export function createChatPanel({
     doc.defaultView?.removeEventListener?.("focus", handleWindowFocus);
     for (const timer of copyFeedbackTimers.values()) clearTimeoutImpl(timer);
     copyFeedbackTimers.clear();
+    connectionRoot.unmount();
     transcriptRoot.unmount();
     historyRoot.unmount();
     controlsRoot.unmount();
@@ -3931,7 +3834,7 @@ export function createChatPanel({
       })
       .catch((error) => {
         if (closed) return;
-        if (error.code !== "NOT_PAIRED") {
+        if (!["NOT_PAIRED", "BRIDGE_UNREACHABLE"].includes(error.code)) {
           modelsError = "Models unavailable";
           renderControls();
           setProgress(error.message, "error");
@@ -3955,87 +3858,24 @@ export function createChatPanel({
 
   const renderConnectionCard = ({ focusInput = false } = {}) => {
     if (closed) return;
-    connectionCard.replaceChildren();
-    if (connection.state === "connected") {
-      connectionCard.hidden = true;
-      return;
-    }
-    connectionCard.hidden = false;
-    const addTitle = (text) => connectionCard.appendChild(
-      createPanelElement(doc, "h3", "roam-codex-connection-title", text),
-    );
-    const addText = (text) => connectionCard.appendChild(
-      createPanelElement(doc, "p", "roam-codex-connection-text", text),
-    );
-    const actions = createPanelElement(
-      doc,
-      "div",
-      "roam-codex-connection-actions",
-    );
-    const addAction = (label, onActivate) => {
-      const button = panelButton(
-        doc,
-        "roam-codex-connection-button",
-        label,
-        "",
-      );
-      button.addEventListener("click", () => void onActivate());
-      actions.appendChild(button);
-    };
-
-    if (connection.state === "checking") {
-      addTitle("Connecting to the local Codex bridge…");
-    } else if (connection.state === "wrong-graph") {
-      addTitle("The bridge serves a different graph");
-      addText(
-        connection.detail ||
-          `Restart the bridge with ROAM_GRAPH=${JSON.stringify(connection.graph)}.`,
-      );
-      addAction("Try again", refreshConnection);
-    } else if (connection.state === "unpaired") {
-      addTitle("Pair this device with the bridge");
-      addText("Enter the one-time pairing code shown in the bridge terminal.");
-      const input = createPanelElement(
-        doc,
-        "input",
-        "roam-codex-connection-input",
-      );
-      input.setAttribute("type", "text");
-      input.setAttribute("aria-label", "Bridge pairing code");
-      input.addEventListener("keydown", (event) => {
-        if (event.key === "Enter") void startPairing(input.value);
-      });
-      connectionCard.appendChild(input);
-      if (focusInput) input.focus?.();
-      addAction("Pair", () => startPairing(input.value));
-    } else if (connection.state === "signed-out") {
-      addTitle("Sign in to Codex");
-      addText(
-        "The bridge is running, but Codex has no signed-in ChatGPT account.",
-      );
-      addAction("Sign in", startLogin);
-    } else {
-      addTitle("The Codex bridge isn't running");
-      addText(
-        "Start it on this computer; this panel reconnects by itself.",
-      );
-      connectionCard.appendChild(createPanelElement(
-        doc,
-        "code",
-        "roam-codex-connection-command",
-        `ROAM_GRAPH=${JSON.stringify(connection.graph || "")} npm start`,
-      ));
-      addAction("Try again", refreshConnection);
-    }
-    if (connectionNote) {
-      connectionCard.appendChild(createPanelElement(
-        doc,
-        "p",
-        "roam-codex-connection-note",
-        connectionNote,
-      ));
-    }
-    if (actions.children.length) connectionCard.appendChild(actions);
+    const visible = connection.state !== "connected";
+    const reveal = visible && !connectionCardVisible;
+    connectionCardVisible = visible;
+    connectionRoot.render(window.React.createElement(ConnectionCard, {
+      connection,
+      note: connectionNote,
+      pairingCodeRequired,
+      focusInput,
+      reveal,
+      reduceMotion: Boolean(
+        matchMediaImpl?.("(prefers-reduced-motion: reduce)")?.matches,
+      ),
+      actions: {
+        pair: startPairing,
+        login: startLogin,
+        retry: refreshConnection,
+      },
+    }));
   };
 
   const scheduleConnectionRetry = () => {
@@ -4071,6 +3911,9 @@ export function createChatPanel({
           : { state: "no-bridge", graph: next.graph, detail: error.message };
       }
     }
+    const reconnected = next.state === "connected" &&
+      connection.state !== "connected" &&
+      connection.state !== "checking";
     const stateChanged = next.state !== connection.state;
     if (stateChanged) connectionNote = "";
     connection = next;
@@ -4081,6 +3924,7 @@ export function createChatPanel({
         connectionRetryTimer = null;
       }
       loadCatalogs();
+      if (reconnected) void loadHistory({ reconcileActive: false });
     } else {
       scheduleConnectionRetry();
     }
@@ -4088,12 +3932,26 @@ export function createChatPanel({
 
   const startPairing = async (code) => {
     try {
-      await pairRequest({ code });
+      await pairRequest(code === undefined ? {} : { code });
+      pairingCodeRequired = false;
       connectionNote = "";
       await refreshConnection();
     } catch (error) {
-      connectionNote = error.message || "Pairing failed.";
-      renderConnectionCard({ focusInput: true });
+      if (error.code === "CODE_REQUIRED") {
+        pairingCodeRequired = true;
+        connectionNote =
+          "Run npx roam-codex-bridge code in a terminal, then enter the code here.";
+        renderConnectionCard({ focusInput: true });
+        return;
+      }
+      connectionNote = error.code === "BRIDGE_UNREACHABLE"
+        ? ""
+        : error.message || "Pairing failed.";
+      if (error.code === "BRIDGE_UNREACHABLE") {
+        void refreshConnection();
+        return;
+      }
+      renderConnectionCard({ focusInput: pairingCodeRequired });
     }
   };
 
@@ -4106,7 +3964,13 @@ export function createChatPanel({
       renderConnectionCard();
       openUrlImpl?.(login.authUrl);
     } catch (error) {
-      connectionNote = error.message || "Sign-in could not start.";
+      connectionNote = error.code === "BRIDGE_UNREACHABLE"
+        ? ""
+        : error.message || "Sign-in could not start.";
+      if (error.code === "BRIDGE_UNREACHABLE") {
+        void refreshConnection();
+        return;
+      }
       renderConnectionCard();
     }
   };
@@ -4426,16 +4290,20 @@ export async function pairBridge({
   storage = window.localStorage,
   graph = currentGraphName(),
   bridgeUrl = currentBridgeUrl(),
-  code,
+  code = null,
 } = {}) {
-  const pairingCode = typeof code === "string" ? code.trim() : "";
-  if (!pairingCode || pairingCode.length > 64 || /[\u0000-\u001f]/.test(pairingCode)) {
-    throw new Error("Enter the one-time pairing code shown by the local bridge.");
+  const body = { graph };
+  if (code !== null && code !== undefined) {
+    const pairingCode = String(code).trim();
+    if (!pairingCode || pairingCode.length > 64 || /[\u0000-\u001f]/.test(pairingCode)) {
+      throw new Error("Enter the one-time pairing code from the bridge.");
+    }
+    body.code = pairingCode;
   }
-  const response = await fetchImpl(`${bridgeUrl}/pair`, {
+  const response = await bridgeFetch(fetchImpl, `${bridgeUrl}/pair`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ graph, code: pairingCode }),
+    body: JSON.stringify(body),
   });
 
   let result = {};
@@ -4445,51 +4313,25 @@ export async function pairBridge({
     // A useful status error is emitted below.
   }
 
+  if (response.ok && result.codeRequired === true) {
+    const error = new Error(
+      "This computer asks for a pairing code instead of a dialog.",
+    );
+    error.code = "CODE_REQUIRED";
+    throw error;
+  }
   if (!response.ok || typeof result.token !== "string") {
     throw new Error(
       result.error || `Bridge pairing returned HTTP ${response.status}.`,
     );
   }
   if (result.graph !== graph) {
-    throw new Error(
-      `Bridge is configured for graph "${result.graph}"; ` +
-      `restart it with ROAM_GRAPH=${JSON.stringify(graph)}.`,
-    );
+    throw new Error(`The bridge paired to graph "${result.graph}" instead.`);
   }
 
   storage.setItem(tokenKey(graph), result.token);
   notify("Local bridge paired on this device.", "success");
   return result;
-}
-
-export async function checkBridge({
-  fetchImpl = window.fetch.bind(window),
-  graph = currentGraphName(),
-  bridgeUrl = currentBridgeUrl(),
-} = {}) {
-  try {
-    const response = await fetchImpl(`${bridgeUrl}/health`, {
-      headers: { "x-roam-graph": graphHeaderValue(graph) },
-    });
-    const result = await response.json();
-    if (!response.ok || !result.ok) {
-      throw new Error(result.error || `HTTP ${response.status}`);
-    }
-    if (result.graph !== graph) {
-      throw new Error(
-        `bridge serves graph "${result.graph}", but Roam has "${graph}" open; ` +
-        `restart the bridge with ROAM_GRAPH=${JSON.stringify(graph)}`,
-      );
-    }
-    notify(
-      `Bridge is ${result.appServer}; graph is ${result.graph}.`,
-      "success",
-    );
-    return result;
-  } catch (error) {
-    notify(`Bridge unavailable: ${error.message}`, "danger");
-    throw error;
-  }
 }
 
 function configuredDefaultAccess(value) {
@@ -4661,25 +4503,6 @@ export default {
       callback: workFromCommandPalette,
     });
 
-    extensionAPI.ui.commandPalette.addCommand({
-      label: "Codex: Pair local bridge",
-      "disable-hotkey": true,
-      callback: () => {
-        const code = globalThis.window?.prompt?.(
-          "Enter the one-time pairing code shown in the bridge terminal:",
-        );
-        if (code === null || code === undefined) return;
-        void pairBridge({ code }).catch((error) => {
-          notify(`Bridge pairing failed: ${error.message}`, "danger");
-        });
-      },
-    });
-
-    extensionAPI.ui.commandPalette.addCommand({
-      label: "Codex: Check local bridge",
-      "disable-hotkey": true,
-      callback: () => void checkBridge(),
-    });
   },
   onunload: () => {
     EXTENSION_SETTINGS = null;

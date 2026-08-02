@@ -39,6 +39,95 @@ export function ChatApprovalCards({ approvals, decide }) {
   ));
 }
 
+export function ConnectionCard({
+  connection,
+  note,
+  pairingCodeRequired,
+  focusInput,
+  reveal,
+  reduceMotion,
+  actions,
+}) {
+  let title = "";
+  let text = "";
+  let command = "";
+  let actionLabel = "";
+  let activate = null;
+  let pairingInput = null;
+
+  if (connection.state === "checking") {
+    title = "Connecting to the local Codex bridge…";
+  } else if (connection.state === "wrong-graph") {
+    title = "The bridge is paired to a different graph";
+    text = connection.detail || "Pairing switches the bridge over to this graph.";
+    actionLabel = "Use this graph instead";
+    activate = () => actions.pair(pairingCodeRequired ? pairingInput?.value : undefined);
+  } else if (connection.state === "unpaired") {
+    title = "Pair this device with the bridge";
+    text = pairingCodeRequired
+      ? "Enter the one-time pairing code."
+      : "Click Pair, then choose Allow in the dialog that opens on this computer.";
+    actionLabel = "Pair";
+    activate = () => actions.pair(pairingCodeRequired ? pairingInput?.value : undefined);
+  } else if (connection.state === "signed-out") {
+    title = "Sign in to Codex";
+    text = "The bridge is running, but Codex has no signed-in ChatGPT account.";
+    actionLabel = "Sign in";
+    activate = actions.login;
+  } else if (connection.state !== "connected") {
+    title = "The Codex bridge isn't running";
+    text = "Start it on this computer; this panel reconnects by itself.";
+    command = "npx roam-codex-bridge";
+    actionLabel = "Try again";
+    activate = actions.retry;
+  }
+
+  return (
+    <section
+      className="roam-codex-connection-card"
+      hidden={connection.state === "connected"}
+      ref={(node) => {
+        if (node && reveal) {
+          node.scrollIntoView?.({
+            block: "nearest",
+            behavior: reduceMotion ? "auto" : "smooth",
+          });
+        }
+      }}
+    >
+      {title && <h3 className="roam-codex-connection-title">{title}</h3>}
+      {text && <p className="roam-codex-connection-text">{text}</p>}
+      {pairingCodeRequired && ["unpaired", "wrong-graph"].includes(connection.state) && (
+        <input
+          type="text"
+          className="roam-codex-connection-input"
+          aria-label="Bridge pairing code"
+          ref={(node) => {
+            pairingInput = node;
+            if (node && focusInput) node.focus?.();
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") void activate?.();
+          }}
+        />
+      )}
+      {command && <code className="roam-codex-connection-command">{command}</code>}
+      {note && <p className="roam-codex-connection-note">{note}</p>}
+      {actionLabel && (
+        <div className="roam-codex-connection-actions">
+          <button
+            type="button"
+            className="roam-codex-connection-button"
+            onClick={() => void activate?.()}
+          >
+            {actionLabel}
+          </button>
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function ChatTranscript({
   messages,
   approvals,

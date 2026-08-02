@@ -2,12 +2,11 @@
 
 Use Codex from ordinary Roam blocks without giving up Roam's native editor.
 Chat in the right sidebar, ask Codex to read or change the active graph, or run
-a focused block as a structured task. Conversations stay attached to the graph
-while Codex runs locally through its official App Server.
+a focused block as a direct graph task. Conversations stay attached to the
+graph while Codex runs locally through its official App Server.
 
-> **Pre-release:** Roam Depot distribution is not ready yet. The current beta
-> requires this repository and a locally running bridge. A packaged bridge and
-> in-panel setup/recovery flow are tracked before the Depot release.
+> **Pre-release:** Roam Depot distribution is not ready yet. The extension is
+> loaded through Developer Mode for now; the bridge installs from npm.
 
 ## What you can do
 
@@ -19,8 +18,8 @@ while Codex runs locally through its official App Server.
 - Steer an active turn with another block instead of stopping and restarting.
 - Stop a turn without losing the submitted outline.
 - Reopen graph-scoped conversation history.
-- Run `Codex: Do this block` to append a structured result beneath a focused
-  block, with sources and caveats placed in native comments.
+- Run `Codex: Do this block` to carry out a task beneath a focused block through
+  Roam MCP, with sources and caveats placed in native comments.
 
 Codex replies remain in the chat panel unless the task explicitly writes to the
 graph. The selected source block is never rewritten or deleted by `Do this
@@ -38,7 +37,29 @@ The current integration is tested with Codex CLI `0.144.4` and
 
 ## Install the current beta
 
-### 1. Get the extension and bridge
+### 1. Install the bridge
+
+The bridge is a small local program that connects Roam to the Codex App Server.
+Run this once in a terminal:
+
+```bash
+npx roam-codex-bridge
+```
+
+It checks that the Codex CLI is installed, then installs itself as a background
+service that starts at login and restarts itself if it ever stops. You do not
+need to keep the terminal open, and you never need to run it again.
+
+If the Codex CLI is missing, the command tells you how to install it:
+
+```bash
+npm install -g @openai/codex && codex login
+```
+
+### 2. Load the developer extension
+
+Clone this repository, then in Roam open **Settings → Roam Depot**, enable
+Developer Mode, choose **Load extension**, and select the cloned folder.
 
 ```bash
 git clone https://github.com/MaskyS/roam-codex-ai.git
@@ -51,43 +72,35 @@ The build uses esbuild only to turn the extension's JSX source into the
 `extension.js` file loaded by Roam. React itself comes from Roam and is not
 included in the build.
 
-### 2. Connect a dedicated Roam runtime
+### 3. Pair Roam with the bridge
 
-Replace `your-graph-name` with the exact graph name shown in Roam:
+Open the Codex panel in Roam — click the sparkle button beside the right-sidebar
+toggle, or run `Codex: Open chat`. The panel shows a card asking you to pair.
+Select **Pair**, then choose **Allow** in the dialog that appears on this
+computer. That is the whole pairing step: the bridge learns which graph it
+serves from the pairing itself, so there is no graph name to type anywhere.
 
-```bash
-mkdir -p .dev/roam-home
-HOME="$PWD/.dev/roam-home" \
-  npx -y @roam-research/roam-mcp@0.9.1 connect \
-  --graph "your-graph-name" \
-  --nickname "your-graph-name" \
-  --access-level full
-```
+If your graph has never been connected to Roam's local tools, Roam Desktop shows
+its own approval dialog right afterwards. Approve that too.
 
-Approve the connection in Roam Desktop. This profile is separate from your
-normal Roam tooling and should contain only the graph you intend Codex to use.
-
-### 3. Load the developer extension
-
-In Roam, open **Settings → Roam Depot**, enable Developer Mode, choose
-**Load extension**, and select the cloned `roam-codex-ai` folder.
-
-### 4. Start and pair the bridge
-
-From the repository folder, start the bridge with the same graph name:
+On platforms without the native dialog, the panel asks for a one-time code
+instead. Print it with:
 
 ```bash
-ROAM_GRAPH="your-graph-name" npm start
+npx roam-codex-bridge code
 ```
 
-The terminal displays a short-lived pairing code. In Roam's command palette:
+### Managing the bridge later
 
-1. Run `Codex: Pair local bridge`.
-2. Enter the terminal code.
-3. Run `Codex: Check local bridge`.
+```bash
+npx roam-codex-bridge status      # pairing, service, and health state
+npx roam-codex-bridge stop        # stop the background service
+npx roam-codex-bridge uninstall   # remove the background service
+npx roam-codex-bridge run         # run in this terminal instead
+```
 
-The code expires after five minutes and works once. Restart the bridge to
-generate a new code.
+If Codex is not signed in, or the bridge is stopped, the panel says so and
+offers the fix in place — including a **Sign in** button for the Codex account.
 
 ## Use chat
 
@@ -106,8 +119,8 @@ access defaults configured under **Settings → Extensions → Roam Codex**.
 ## Run a focused block
 
 Focus an ordinary block and choose `Codex: Do this block` from the slash menu or
-command palette. Codex reads that outline as the task and appends the result
-beneath the focused block.
+command palette. Codex reads that outline as the task and writes the result
+beneath the focused block through Roam MCP using the selected access mode.
 
 A temporary `[[Codex/running]]` child appears while the task runs and is removed
 after success, failure, or Stop. Research sources, questions, and caveats are
@@ -137,11 +150,14 @@ The active graph always comes from Roam and is not a setting.
 ## Security and data
 
 - The bridge accepts connections only on `127.0.0.1`.
-- Pairing requires the allowed Roam origin, exact graph, and one-time code.
-- The bearer token stays in graph-scoped browser `localStorage`; it is not
-  written to graph content or graph-synced settings.
+- Pairing requires the allowed Roam origin, exact graph, and local consent
+  through the native dialog or short-lived fallback code.
+- The bearer token stays in the private bridge config and graph-scoped browser
+  `localStorage`; it is not written to graph content or graph-synced settings.
 - Runtime files and Codex threads use a graph-specific directory under
   `~/.roam-better-ai/graphs/`.
+- Roam MCP uses the active graph connection in the user's
+  `~/.roam-tools.json`.
 - The runtime receives only the explicit Roam tool allowlist and optional MCP
   servers enabled for the graph.
 - Progress summaries are shown, but raw model reasoning is never exposed.
@@ -152,26 +168,25 @@ The active graph always comes from Roam and is not a setting.
 
 **The bridge is unavailable**
 
-Confirm the terminal process is still running and that the configured bridge
-URL is `http://127.0.0.1:47321` unless you deliberately changed the port.
+Run `npx roam-codex-bridge status`. It reports whether the background service is
+installed, whether the bridge answers on `http://127.0.0.1:47321`, and where the
+logs are. The chat panel also detects this by itself and reconnects as soon as
+the bridge is back.
 
-**The bridge reports the wrong graph**
+**The bridge is paired to a different graph**
 
-Stop it and restart with the exact active graph name:
-
-```bash
-ROAM_GRAPH="your-graph-name" npm start
-```
+Select **Use this graph instead** on the card in the chat panel and approve the
+pairing again. Pairing moves the bridge to the graph you paired from.
 
 **Pairing fails or the code expired**
 
-Restart the bridge and enter the newly printed code. A successful code cannot
-be replayed.
+Select **Pair** again for a fresh dialog or code. A code that has been used
+successfully cannot be replayed.
 
 **Codex is unavailable**
 
-Verify `codex --version` works and the CLI is signed in, then restart the
-bridge.
+Verify `codex --version` works. If the CLI is not signed in, the chat panel
+offers a **Sign in** button that opens the browser flow.
 
 **A development run failed**
 

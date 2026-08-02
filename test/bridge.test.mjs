@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter, once } from "node:events";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { PassThrough } from "node:stream";
@@ -7,17 +8,18 @@ import test from "node:test";
 import {
   AppServerClient,
   DEFAULT_RUNTIME_CWD,
-  buildProbePrompt,
   createBridgeServer,
   createPairingSession,
+  ensureRuntimeGraphAccess,
   createProgressNormalizer,
   isAllowedOrigin,
-  parseAndValidatePlan,
   runtimeAppServerArgs,
   runtimeCwdForGraph,
+  requestPairingConsent,
   runtimeThreadConfig,
   scanConfigMcpServerNames,
   toolApprovalResponse,
+  turnFailureError,
   validateRuntimeInstructionSources,
 } from "../bridge.mjs";
 
@@ -141,7 +143,6 @@ test("runtime instruction audit allows user-global guidance and rejects project 
 
 test("runtime app-server exposes direct graph tools to persistent chat", () => {
   const args = runtimeAppServerArgs({
-    roamHome: "/runtime/roam-home",
     disableServers: ["node_repl", "roam", "felt server", "node_repl"],
   });
   const joined = args.join(" ");
@@ -149,7 +150,7 @@ test("runtime app-server exposes direct graph tools to persistent chat", () => {
   assert.match(joined, /mcp_servers\.roam\.command="npx"/);
   assert.match(joined, /@roam-research\/roam-mcp/);
   assert.match(joined, /mcp_servers\.roam\.enabled=true/);
-  assert.match(joined, /mcp_servers\.roam\.env=\{HOME="\/runtime\/roam-home"\}/);
+  assert.doesNotMatch(joined, /mcp_servers\.roam\.env=/);
   assert.match(joined, /mcp_servers\.roam\.enabled_tools=/);
   assert.match(joined, /get_graph_guidelines/);
   assert.match(joined, /get_comments/);
@@ -219,182 +220,6 @@ test("tool approvals answer every question with the exact offered label", () => 
   );
 });
 
-test("runtime prompt keeps useful links in the outline and source lists in comments", () => {
-  const prompt = buildProbePrompt({
-    graph: "maskys",
-    blockUid: "abcdefghi",
-  });
-
-  assert.match(prompt, /Include contextual links/);
-  assert.match(prompt, /outline should remain useful with comments closed/);
-  assert.match(prompt, /do not create Sources, Citations, or References blocks/);
-  assert.match(prompt, /renders each targeted source group as a native Roam comment/);
-  assert.doesNotMatch(prompt, /never inline in edit text/);
-});
-
-test("plan parser accepts topologically ordered edits and targeted comments", () => {
-  assert.deepEqual(
-    parseAndValidatePlan(
-      JSON.stringify({
-        outcome: "applied",
-        research: "completed",
-        edits: [
-          { id: "b1", parent: "source", text: "Find the form" },
-          { id: "b2", parent: "b1", text: "Check the deadline" },
-        ],
-        comments: [
-          {
-            target: "b2",
-            kind: "question",
-            text: "Which vehicle is this for?",
-          },
-        ],
-        sources: [
-          {
-            target: "b1",
-            title: "Official form",
-            url: "https://authority.example/form",
-            supports: "The current application form.",
-          },
-        ],
-      }),
-    ),
-    {
-      outcome: "applied",
-      research: "completed",
-      edits: [
-        { id: "b1", parent: "source", text: "Find the form" },
-        { id: "b2", parent: "b1", text: "Check the deadline" },
-      ],
-      comments: [
-        {
-          target: "b2",
-          kind: "question",
-          text: "Which vehicle is this for?",
-        },
-      ],
-      sources: [
-        {
-          target: "b1",
-          title: "Official form",
-          url: "https://authority.example/form",
-          supports: "The current application form.",
-        },
-      ],
-    },
-  );
-});
-
-test("plan parser rejects forward parent references", () => {
-  assert.throws(
-    () =>
-      parseAndValidatePlan(
-        JSON.stringify({
-          outcome: "applied",
-          research: "not_needed",
-          edits: [
-            { id: "b1", parent: "b2", text: "First" },
-            { id: "b2", parent: "source", text: "Second" },
-          ],
-          comments: [],
-          sources: [],
-        }),
-      ),
-    /earlier edit/,
-  );
-});
-
-test("needs-input plans require a question and cannot edit", () => {
-  assert.throws(
-    () =>
-      parseAndValidatePlan(
-        JSON.stringify({
-          outcome: "needs_input",
-          research: "not_needed",
-          edits: [{ id: "b1", parent: "source", text: "Guess" }],
-          comments: [
-            { target: "source", kind: "question", text: "Which one?" },
-          ],
-          sources: [],
-        }),
-      ),
-    /cannot contain edits/,
-  );
-  assert.throws(
-    () =>
-      parseAndValidatePlan(
-        JSON.stringify({
-          outcome: "needs_input",
-          research: "not_needed",
-          edits: [],
-          comments: [
-            { target: "source", kind: "note", text: "More detail needed." },
-          ],
-          sources: [],
-        }),
-      ),
-    /question comment/,
-  );
-});
-
-test("completed research requires valid sources", () => {
-  assert.throws(
-    () =>
-      parseAndValidatePlan(
-        JSON.stringify({
-          outcome: "applied",
-          research: "completed",
-          edits: [{ id: "b1", parent: "source", text: "Current fact" }],
-          comments: [],
-          sources: [],
-        }),
-      ),
-    /must contain a source/,
-  );
-  assert.throws(
-    () =>
-      parseAndValidatePlan(
-        JSON.stringify({
-          outcome: "applied",
-          research: "completed",
-          edits: [{ id: "b1", parent: "source", text: "Current fact" }],
-          comments: [],
-          sources: [
-            {
-              target: "b1",
-              title: "Unsafe",
-              url: "javascript:alert(1)",
-              supports: "Nothing",
-            },
-          ],
-        }),
-      ),
-    /public http\(s\) URL/,
-  );
-});
-
-test("unavailable required research cannot make edits", () => {
-  assert.throws(
-    () =>
-      parseAndValidatePlan(
-        JSON.stringify({
-          outcome: "applied",
-          research: "unavailable",
-          edits: [{ id: "b1", parent: "source", text: "Unverified fact" }],
-          comments: [
-            {
-              target: "source",
-              kind: "warning",
-              text: "Research failed.",
-            },
-          ],
-          sources: [],
-        }),
-      ),
-    /Unavailable research requires no changes/,
-  );
-});
-
 test("origin policy allows Roam and rejects unrelated sites", () => {
   assert.equal(isAllowedOrigin("https://roamresearch.com"), true);
   assert.equal(isAllowedOrigin("roam://maskys"), true);
@@ -434,95 +259,6 @@ test("progress normalizer combines readable summaries and labels tool activity",
     { kind: "summary", text: "Checking context" },
     { kind: "activity", text: "Reading a web source" },
   ]);
-});
-
-test("app-server probe requests concise summaries and forwards only its turn", async () => {
-  const client = new AppServerClient({ runtimeCwd: "/runtime/agent" });
-  const requests = [];
-  const progress = [];
-  client.start = async () => {};
-  client.request = async (method, params) => {
-    requests.push({ method, params });
-    if (method === "thread/start") {
-      return { thread: { id: "thread-test" }, instructionSources: [] };
-    }
-    if (method === "turn/start") {
-      queueMicrotask(() => {
-        client.emit("notification", {
-          method: "item/reasoning/summaryTextDelta",
-          params: {
-            threadId: "other-thread",
-            turnId: "other-turn",
-            itemId: "reason-other",
-            summaryIndex: 0,
-            delta: "Ignore me",
-          },
-        });
-        client.emit("notification", {
-          method: "item/reasoning/summaryTextDelta",
-          params: {
-            threadId: "thread-test",
-            turnId: "turn-test",
-            itemId: "reason-test",
-            summaryIndex: 0,
-            delta: "Reading context",
-          },
-        });
-        client.emit("notification", {
-          method: "item/completed",
-          params: {
-            threadId: "thread-test",
-            turnId: "turn-test",
-            item: {
-              type: "agentMessage",
-              phase: "final_answer",
-              text: JSON.stringify({
-                outcome: "applied",
-                research: "not_needed",
-                edits: [{ id: "b1", parent: "source", text: "Result" }],
-                comments: [],
-                sources: [],
-              }),
-            },
-          },
-        });
-        client.emit("notification", {
-          method: "turn/completed",
-          params: {
-            threadId: "thread-test",
-            turn: { id: "turn-test", status: "completed", items: [] },
-          },
-        });
-      });
-      return { turn: { id: "turn-test" } };
-    }
-    return {};
-  };
-
-  const result = await client.runProbe({
-    graph: "maskys",
-    blockUid: "abcdefghi",
-    onProgress: (event) => progress.push(event),
-  });
-
-  const turnStart = requests.find((request) => request.method === "turn/start");
-  const threadStart = requests.find((request) => request.method === "thread/start");
-  assert.equal(threadStart.params.cwd, "/runtime/agent");
-  assert.equal(threadStart.params.approvalPolicy, "never");
-  assert.equal(turnStart.params.summary, "concise");
-  assert.ok(
-    threadStart.params.config.mcp_servers.roam.enabled_tools.includes(
-      "get_block",
-    ),
-  );
-  assert.equal(
-    threadStart.params.config.mcp_servers.roam.enabled_tools.includes(
-      "update_block",
-    ),
-    false,
-  );
-  assert.deepEqual(progress, [{ kind: "summary", text: "Reading context" }]);
-  assert.equal(result.plan.edits[0].text, "Result");
 });
 
 test("app-server chat starts and resumes a persistent panel conversation", async () => {
@@ -1280,6 +1016,416 @@ test("manual chat streams an approval and resumes after the authenticated answer
   assert.equal(events.at(-1).result.reply, "Renamed");
 });
 
+test("pairing binds the graph, creates its client, and persists the choice", async (t) => {
+  const created = [];
+  const bound = [];
+  const server = createBridgeServer({
+    token: "secret-token",
+    graph: null,
+    createClient: (graph) => {
+      created.push(graph);
+      return { ready: false, async listMcpServers() { return []; } };
+    },
+    onBind: async (graph) => bound.push(graph),
+    requestConsent: async ({ graph }) => {
+      assert.equal(graph, "My Graph");
+      return { supported: true, allowed: true };
+    },
+    ensureGraphAccess: async () => ({ connected: true, alreadyConnected: true }),
+    trace: async () => {},
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const origin = "https://roamresearch.com";
+
+  const unbound = await (await fetch(`${base}/health`, { headers: { origin } })).json();
+  assert.equal(unbound.ok, true);
+  assert.equal(unbound.graph, null);
+
+  const tooEarly = await fetch(`${base}/mcp-servers`, {
+    headers: { origin, authorization: "Bearer secret-token" },
+  });
+  assert.equal(tooEarly.status, 409);
+  assert.equal((await tooEarly.json()).code, "NOT_BOUND");
+
+  const paired = await fetch(`${base}/pair`, {
+    method: "POST",
+    headers: { origin, "content-type": "application/json" },
+    body: JSON.stringify({ graph: "My Graph" }),
+  });
+  assert.equal(paired.status, 200);
+  assert.deepEqual(await paired.json(), {
+    graph: "My Graph",
+    token: "secret-token",
+  });
+  assert.deepEqual(created, ["My Graph"]);
+  assert.deepEqual(bound, ["My Graph"]);
+
+  const health = await (await fetch(`${base}/health`, { headers: { origin } })).json();
+  assert.equal(health.graph, "My Graph");
+
+  const nowServed = await fetch(`${base}/mcp-servers`, {
+    headers: { origin, authorization: "Bearer secret-token" },
+  });
+  assert.equal(nowServed.status, 200);
+});
+
+test("runtime graph access is reused when already connected", async () => {
+  const home = resolve(tmpdir(), `roam-tools-home-${process.pid}`);
+  await mkdir(home, { recursive: true });
+  await writeFile(
+    resolve(home, ".roam-tools.json"),
+    JSON.stringify({
+      version: 1,
+      graphs: [{ name: "maskys", nickname: "maskys", accessLevel: "full" }],
+    }),
+  );
+  let connectCalls = 0;
+  assert.deepEqual(
+    await ensureRuntimeGraphAccess({
+      graph: "maskys",
+      home,
+      execFileImpl: async () => {
+        connectCalls += 1;
+        return { stdout: "" };
+      },
+    }),
+    { connected: true, alreadyConnected: true },
+  );
+  assert.equal(connectCalls, 0);
+
+  const connectArgs = [];
+  assert.deepEqual(
+    await ensureRuntimeGraphAccess({
+      graph: "other-graph",
+      home,
+      execFileImpl: async (command, args) => {
+        connectArgs.push([command, ...args]);
+        return { stdout: "" };
+      },
+    }),
+    { connected: true, alreadyConnected: false },
+  );
+  assert.deepEqual(connectArgs, [[
+    "npx",
+    "-y",
+    "@roam-research/roam-mcp",
+    "connect",
+    "--graph",
+    "other-graph",
+    "--nickname",
+    "other-graph",
+    "--access-level",
+    "full",
+  ]]);
+
+  const failed = await ensureRuntimeGraphAccess({
+    graph: "unreachable",
+    home,
+    execFileImpl: async () => {
+      throw new Error("Roam Desktop is not running");
+    },
+  });
+  assert.equal(failed.connected, false);
+  await rm(home, { recursive: true, force: true });
+});
+
+test("a declined pairing dialog refuses to bind", async (t) => {
+  const server = createBridgeServer({
+    token: "secret-token",
+    graph: null,
+    createClient: () => ({ ready: false }),
+    requestConsent: async () => ({ supported: true, allowed: false }),
+    trace: async () => {},
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const origin = "https://roamresearch.com";
+
+  const declined = await fetch(`${base}/pair`, {
+    method: "POST",
+    headers: { origin, "content-type": "application/json" },
+    body: JSON.stringify({ graph: "maskys" }),
+  });
+  assert.equal(declined.status, 403);
+  const health = await (await fetch(`${base}/health`, { headers: { origin } })).json();
+  assert.equal(health.graph, null);
+});
+
+test("the consent dialog reads Allow, Deny, and timeouts from osascript", async () => {
+  const allow = await requestPairingConsent({
+    graph: "maskys",
+    platform: "darwin",
+    execFileImpl: async (command, args) => {
+      assert.equal(command, "osascript");
+      assert.match(args[1], /wants to use your local Codex bridge/);
+      return { stdout: "button returned:Allow\n" };
+    },
+  });
+  assert.deepEqual(allow, { supported: true, allowed: true });
+
+  const timedOut = await requestPairingConsent({
+    graph: "maskys",
+    platform: "darwin",
+    execFileImpl: async () => ({ stdout: "button returned:Deny, gave up:true\n" }),
+  });
+  assert.equal(timedOut.allowed, false);
+
+  const denied = await requestPairingConsent({
+    graph: "maskys",
+    platform: "darwin",
+    execFileImpl: async () => {
+      throw Object.assign(new Error("User canceled"), { code: 1 });
+    },
+  });
+  assert.deepEqual(denied, { supported: true, allowed: false });
+
+  assert.deepEqual(
+    await requestPairingConsent({ graph: "maskys", platform: "linux" }),
+    { supported: false },
+  );
+});
+
+test("a failed chat run streams the error classification to the client", async (t) => {
+  const traceEntries = [];
+  const client = {
+    ready: true,
+    async runChat() {
+      const error = new Error("Codex turn did not complete: usage limit hit.");
+      error.codexErrorInfo = "usageLimitExceeded";
+      error.additionalDetails = "Your limit resets at 9pm.";
+      error.httpStatusCode = 429;
+      throw error;
+    },
+  };
+  const server = createBridgeServer({
+    token: "secret-token",
+    graph: "maskys",
+    client,
+    trace: async (entry) => traceEntries.push(entry),
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const response = await fetch(`${base}/chat`, {
+    method: "POST",
+    headers: {
+      origin: "https://roamresearch.com",
+      authorization: "Bearer secret-token",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      graph: "maskys",
+      message: "Do the thing",
+      promptBlockUid: "prompt123",
+    }),
+  });
+  const events = (await response.text())
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  const failure = events.find((event) => event.type === "error");
+  assert.equal(failure.codexErrorInfo, "usageLimitExceeded");
+  assert.equal(failure.additionalDetails, "Your limit resets at 9pm.");
+  assert.equal(failure.httpStatusCode, 429);
+
+  const traced = traceEntries.find((entry) => entry.event === "chat.failed");
+  assert.equal(traced.codexErrorInfo, "usageLimitExceeded");
+  assert.equal(traced.httpStatusCode, 429);
+  assert.equal(traced.additionalDetails, "Your limit resets at 9pm.");
+});
+
+test("a failed work run keeps the complete error classification in its trace", async (t) => {
+  const traceEntries = [];
+  const client = {
+    ready: true,
+    async runWork() {
+      const error = new Error("Roam MCP request failed.");
+      error.codexErrorInfo = "httpConnectionFailed";
+      error.httpStatusCode = 503;
+      error.additionalDetails = "The upstream graph service is unavailable.";
+      throw error;
+    },
+  };
+  const server = createBridgeServer({
+    token: "secret-token",
+    graph: "maskys",
+    client,
+    trace: async (entry) => traceEntries.push(entry),
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const response = await fetch(`${base}/probe`, {
+    method: "POST",
+    headers: {
+      origin: "https://roamresearch.com",
+      authorization: "Bearer secret-token",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ graph: "maskys", blockUid: "abcdefghi" }),
+  });
+  const events = (await response.text())
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  const failure = events.find((event) => event.type === "error");
+  assert.equal(failure.codexErrorInfo, "httpConnectionFailed");
+  assert.equal(failure.httpStatusCode, 503);
+  assert.equal(
+    failure.additionalDetails,
+    "The upstream graph service is unavailable.",
+  );
+
+  const traced = traceEntries.find((entry) => entry.event === "work.failed");
+  assert.equal(traced.codexErrorInfo, "httpConnectionFailed");
+  assert.equal(traced.httpStatusCode, 503);
+  assert.equal(
+    traced.additionalDetails,
+    "The upstream graph service is unavailable.",
+  );
+});
+
+test("a work run is a chat turn with the block prompt and work instructions", async () => {
+  const client = new AppServerClient({ runtimeCwd: "/runtime/agent" });
+  const requests = [];
+  client.start = async () => {};
+  client.request = async (method, params) => {
+    requests.push({ method, params });
+    if (method === "thread/start") {
+      return { thread: { id: "thread-work" }, instructionSources: [] };
+    }
+    if (method === "turn/start") {
+      queueMicrotask(() => {
+        client.emit("notification", {
+          method: "turn/completed",
+          params: {
+            threadId: "thread-work",
+            turn: {
+              id: "turn-work",
+              status: "completed",
+              items: [{
+                type: "agentMessage",
+                phase: "final_answer",
+                text: "Added a comparison beneath the block.",
+              }],
+            },
+          },
+        });
+      });
+      return { turn: { id: "turn-work" } };
+    }
+    return {};
+  };
+
+  const result = await client.runWork({
+    graph: "maskys",
+    blockUid: "abcdefghi",
+  });
+  assert.equal(result.reply, "Added a comparison beneath the block.");
+
+  const threadStart = requests.find((entry) => entry.method === "thread/start");
+  const turnStart = requests.find((entry) => entry.method === "turn/start");
+  assert.equal(threadStart.params.ephemeral, true);
+  assert.equal(threadStart.params.serviceName, "roam_codex_work");
+  assert.match(
+    threadStart.params.developerInstructions,
+    /block-task runtime/,
+  );
+  assert.equal(
+    threadStart.params.config.mcp_servers.roam.enabled_tools.includes(
+      "create_block",
+    ),
+    true,
+  );
+  assert.equal(turnStart.params.outputSchema, undefined);
+  assert.match(turnStart.params.input[0].text, /Work on Roam block UID/);
+  assert.match(turnStart.params.input[0].text, /Codex\/running/);
+
+  await assert.rejects(
+    () => client.runWork({ graph: "maskys", blockUid: "no" }),
+    (error) => error.code === "BLOCK_UID_INVALID",
+  );
+});
+
+test("read-only access keeps write tools away from a work run", async () => {
+  const client = new AppServerClient({ runtimeCwd: "/runtime/agent" });
+  const requests = [];
+  client.start = async () => {};
+  client.request = async (method, params) => {
+    requests.push({ method, params });
+    if (method === "thread/start") {
+      return { thread: { id: "thread-ro" }, instructionSources: [] };
+    }
+    if (method === "turn/start") {
+      queueMicrotask(() => {
+        client.emit("notification", {
+          method: "turn/completed",
+          params: {
+            threadId: "thread-ro",
+            turn: {
+              id: "turn-ro",
+              status: "completed",
+              items: [{ type: "agentMessage", phase: "final_answer", text: "Read only." }],
+            },
+          },
+        });
+      });
+      return { turn: { id: "turn-ro" } };
+    }
+    return {};
+  };
+
+  await client.runWork({
+    graph: "maskys",
+    blockUid: "abcdefghi",
+    accessMode: "read-only",
+  });
+  const threadStart = requests.find((entry) => entry.method === "thread/start");
+  const tools = threadStart.params.config.mcp_servers.roam.enabled_tools;
+  assert.equal(tools.includes("get_block"), true);
+  assert.equal(tools.includes("create_block"), false);
+  assert.equal(tools.includes("delete_block"), false);
+  assert.equal(threadStart.params.approvalPolicy, "never");
+});
+
+test("a failed turn keeps the Codex error classification", async () => {
+  const usageLimited = turnFailureError({
+    status: "failed",
+    error: {
+      message: "You have hit your usage limit.",
+      codexErrorInfo: "usageLimitExceeded",
+      additionalDetails: "resets at 9pm",
+    },
+  });
+  assert.equal(usageLimited.codexErrorInfo, "usageLimitExceeded");
+  assert.equal(usageLimited.additionalDetails, "resets at 9pm");
+  assert.match(usageLimited.message, /usage limit/);
+
+  const upstream = turnFailureError({
+    status: "failed",
+    error: {
+      message: "Upstream failure.",
+      codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+      additionalDetails: null,
+    },
+  });
+  assert.equal(upstream.codexErrorInfo, "httpConnectionFailed");
+  assert.equal(upstream.httpStatusCode, 503);
+
+  const bare = turnFailureError({ status: "failed", error: null });
+  assert.equal(bare.codexErrorInfo, undefined);
+  assert.match(bare.message, /status failed/);
+});
+
 test("auth status and browser sign-in flow through the app-server client", async () => {
   const client = new AppServerClient({ runtimeCwd: "/runtime/agent" });
   client.start = async () => {};
@@ -1534,20 +1680,14 @@ test("bridge enforces bearer auth and graph restriction", async (t) => {
   const calls = [];
   const client = {
     ready: false,
-    async runProbe({ onProgress, onStarted, ...input }) {
+    async runWork({ onProgress, onStarted, onApproval, ...input }) {
       calls.push(input);
       onProgress({ kind: "activity", text: "Reading the selected block" });
       await onStarted({ threadId: "thr_test", turnId: "turn_test" });
       return {
         threadId: "thr_test",
         turnId: "turn_test",
-        plan: {
-          outcome: "applied",
-          research: "not_needed",
-          edits: [{ id: "b1", parent: "source", text: "Test" }],
-          comments: [],
-          sources: [],
-        },
+        reply: "Added three blocks beneath it.",
       };
     },
   };
@@ -1555,8 +1695,10 @@ test("bridge enforces bearer auth and graph restriction", async (t) => {
   const server = createBridgeServer({
     token: "secret-token",
     graph: "maskys",
-    pairing: createPairingSession({ code: "ABCDEF-123456" }),
     client,
+    requestConsent: async () => ({ supported: false }),
+    ensureGraphAccess: async () => ({ connected: true, alreadyConnected: true }),
+    pairingCodePath: resolve(tmpdir(), `roam-pairing-code-${process.pid}`),
     trace: async (entry) => traceEntries.push(entry),
   });
   server.listen(0, "127.0.0.1");
@@ -1597,7 +1739,7 @@ test("bridge enforces bearer auth and graph restriction", async (t) => {
   });
   assert.equal(untrustedPair.status, 403);
 
-  const missingCode = await fetch(`${base}/pair`, {
+  const codeless = await fetch(`${base}/pair`, {
     method: "POST",
     headers: {
       origin: "https://roamresearch.com",
@@ -1605,17 +1747,18 @@ test("bridge enforces bearer auth and graph restriction", async (t) => {
     },
     body: JSON.stringify({ graph: "maskys" }),
   });
-  assert.equal(missingCode.status, 403);
+  assert.equal(codeless.status, 200);
+  assert.deepEqual(await codeless.json(), { codeRequired: true });
 
-  const wrongPairGraph = await fetch(`${base}/pair`, {
+  const namelessGraph = await fetch(`${base}/pair`, {
     method: "POST",
     headers: {
       origin: "https://roamresearch.com",
       "content-type": "application/json",
     },
-    body: JSON.stringify({ graph: "other", code: "ABCDEF-123456" }),
+    body: JSON.stringify({ graph: "   " }),
   });
-  assert.equal(wrongPairGraph.status, 409);
+  assert.equal(namelessGraph.status, 400);
 
   const incorrectCode = await fetch(`${base}/pair`, {
     method: "POST",
@@ -1627,13 +1770,17 @@ test("bridge enforces bearer auth and graph restriction", async (t) => {
   });
   assert.equal(incorrectCode.status, 403);
 
+  const issuedCode = (await readFile(
+    resolve(tmpdir(), `roam-pairing-code-${process.pid}`),
+    "utf8",
+  )).trim();
   const pair = await fetch(`${base}/pair`, {
     method: "POST",
     headers: {
       origin: "https://roamresearch.com",
       "content-type": "application/json",
     },
-    body: JSON.stringify({ graph: "maskys", code: "abcdef-123456" }),
+    body: JSON.stringify({ graph: "maskys", code: issuedCode }),
   });
   assert.equal(pair.status, 200);
   assert.deepEqual(await pair.json(), {
@@ -1730,11 +1877,15 @@ test("bridge enforces bearer auth and graph restriction", async (t) => {
     "completed",
   ]);
   assert.equal(events[1].text, "Reading the selected block");
-  assert.equal(events[2].result.plan.edits[0].text, "Test");
-  assert.deepEqual(calls, [{ graph: "maskys", blockUid: "abcdefghi" }]);
+  assert.equal(events[2].result.reply, "Added three blocks beneath it.");
+  assert.deepEqual(calls, [{
+    graph: "maskys",
+    blockUid: "abcdefghi",
+    accessMode: "auto",
+  }]);
   assert.deepEqual(
     traceEntries.map((entry) => entry.event),
-    ["probe.started", "probe.completed"],
+    ["pair.bound", "work.started", "work.completed"],
   );
 });
 
@@ -1743,7 +1894,7 @@ test("bridge cancellation interrupts the active app-server turn", async (t) => {
   const interruptCalls = [];
   const client = {
     ready: true,
-    async runProbe({ onStarted }) {
+    async runWork({ onStarted }) {
       await onStarted({ threadId: "thread-cancel", turnId: "turn-cancel" });
       return new Promise((_resolve, reject) => {
         rejectProbe = reject;
@@ -1806,6 +1957,6 @@ test("bridge cancellation interrupts the active app-server turn", async (t) => {
   ]);
   assert.deepEqual(
     traceEntries.map((entry) => entry.event),
-    ["probe.started", "probe.cancel.requested", "probe.interrupted"],
+    ["work.started", "work.cancel.requested", "work.interrupted"],
   );
 });

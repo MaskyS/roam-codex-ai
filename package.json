@@ -1,21 +1,31 @@
 {
-  "name": "roam-codex-lab",
-  "version": "0.8.0",
-  "private": true,
+  "name": "roam-codex-bridge",
+  "version": "0.9.0",
+  "private": false,
   "type": "module",
-  "description": "A minimal Roam-to-Codex app-server development loop.",
+  "description": "Local bridge that connects the Roam Codex extension to the Codex App Server.",
   "scripts": {
     "build": "esbuild src/extension.jsx --bundle --format=esm --platform=browser --target=es2022 --jsx-factory=window.React.createElement --outfile=extension.js",
     "dev": "node --watch bridge.mjs",
     "dev:extension": "npm run build -- --watch",
     "start": "node bridge.mjs",
-    "show-token": "node bridge.mjs --show-token",
     "test": "npm run build && node --test",
-    "check": "npm run build && node --check bridge.mjs && node --check extension.js && node --test"
+    "check": "npm run build && node --check bridge.mjs && node --check extension.js && node --check bin.mjs && node --test"
   },
   "engines": {
     "node": ">=20"
   },
+  "bin": {
+    "roam-codex-bridge": "bin.mjs"
+  },
+  "files": [
+    "bridge.mjs",
+    "bin.mjs",
+    "runtime-agent.md",
+    "runtime-work-agent.md",
+    "README.md"
+  ],
+  "license": "MIT",
   "devDependencies": {
     "esbuild": "0.25.8"
   }

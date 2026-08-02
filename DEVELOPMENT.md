@@ -7,16 +7,17 @@ Depot.
 ## Product boundary
 
 Roam owns editing and durable graph content. The browser extension owns the
-visible integration and all writes made through the signed-in user's Roam
-session. `bridge.mjs` is a narrow authenticated adapter to `codex app-server`;
-Codex is the runtime agent, and the official Roam MCP is its graph adapter.
+visible integration, composer lifecycle, and temporary run marker. Codex makes
+explicitly requested durable graph changes through the official Roam MCP.
+`bridge.mjs` is a narrow authenticated adapter to `codex app-server`, and Codex
+is the runtime agent.
 
 ```text
 Roam Desktop
-  ├─ extension.js ── generated browser entry point
+  ├─ extension.js ── generated native UI, settings, and run-marker entry point
   └─ 127.0.0.1 bridge
        └─ codex app-server
-            └─ graph-scoped Roam MCP connection
+            └─ user's graph connection in ~/.roam-tools.json
 ```
 
 There is no second agent framework. The bridge remains bound to `127.0.0.1`,
@@ -25,13 +26,13 @@ and the runtime never executes inside this builder repository.
 ## Source map
 
 - `src/extension.jsx` — extension lifecycle, commands, React-owned chat UI,
-  graph-scoped browser state, bridge requests, and structured block work.
+  graph-scoped browser state, bridge requests, and temporary run-marker lifecycle.
 - `extension.js` — ignored build output loaded by Roam and produced by esbuild.
 - `extension.css` — panel and local running-state presentation.
 - `bridge.mjs` — loopback HTTP authentication, App Server JSON-RPC client,
   runtime isolation, stream normalization, and request validation.
 - `runtime-agent.md` — persistent-chat runtime contract.
-- `runtime-work-agent.md` — stricter structured `Do this block` contract.
+- `runtime-work-agent.md` — direct graph-editing `Do this block` contract.
 - `test/bridge.test.mjs` and `test/extension.test.mjs` — protocol, safety,
   lifecycle, and UI contract tests.
 - `.dev/last-run.jsonl` — ignored local trace for the latest bridge activity.
@@ -78,9 +79,12 @@ other configured Codex MCP servers; graph-synced settings record explicit
 opt-ins. The bridge disables every server except `roam` and those opt-ins on
 each runtime thread.
 
-Structured `Codex: Do this block` is a separate read-only runtime workflow. It
-returns a bounded edit plan, which the extension applies beneath the selected
-block through the browser API. It never rewrites or deletes the selected block.
+`Codex: Do this block` starts a separate ephemeral App Server turn and uses the
+access mode selected in the panel. In Auto and Manual, Codex carries out the
+requested result beneath the selected block through the same explicit Roam MCP
+write-tool allowlist used by chat. Read only removes those write tools, so the
+runtime must explain that graph-editing work needs a different access mode. The
+runtime contract forbids rewriting or deleting the selected block.
 
 ## Research and graph presentation
 
@@ -91,9 +95,9 @@ instead of guessing.
 
 The ordinary outline remains useful with comments closed. Durable results are
 ordinary blocks. Sources, caveats, questions, and explanations belong in native
-comments on the relevant source or generated block. The extension groups
-validated primary-source links in comments rather than adding source-list
-clutter to the outline.
+comments on the relevant source or generated block. The runtime groups direct
+primary-source links in comments rather than adding source-list clutter to the
+outline.
 
 `Codex: Do this block` creates one temporary `[[Codex/running]]` child and
 deletes that exact extension-owned block after success, failure, or Stop. An
@@ -118,26 +122,29 @@ guidance under the active `CODEX_HOME` may apply; project instruction sources
 are rejected. This prevents this repository's `AGENTS.md`, project config, and
 development skills from becoming runtime instructions.
 
-The runtime Roam connection is separate from the builder's normal connection.
-Keep only the intended graph in `.dev/roam-home`; workflow and access-mode tool
-allowlists enforce the runtime capability boundary.
+Roam credentials come from the user's existing `~/.roam-tools.json`. Pairing
+checks for the active graph and starts the official Roam MCP connect flow when
+it is absent. Stable graph-specific runtime directories keep App Server threads
+separate; explicit access-mode tool allowlists enforce the capability boundary.
 
 ## Bridge pairing and graph identity
 
-Normal startup requires an explicit `ROAM_GRAPH`. The bridge creates a random
-bearer token under ignored `.dev/` and prints only a short-lived pairing code.
-The code expires after five minutes, permits five attempts, and is consumed by
-its first successful exchange.
+On a new installation, startup is unbound. The first approved pairing adopts
+the active graph and persists that graph plus a random bearer token in
+`~/.roam-better-ai/config.json`. On macOS, Pair opens a native consent dialog.
+When native consent is unavailable, the bridge writes a short-lived fallback
+code to `~/.roam-better-ai/pairing-code`; the code expires after five minutes,
+permits five attempts, and is consumed by its first successful exchange.
 
-`POST /pair` requires an allowed Roam origin, the exact active graph, and the
-one-time code. The bearer token is stored only in graph-scoped browser
-`localStorage`. It is never saved in graph-synced extension settings or printed
-during normal startup. `npm run show-token` is the explicit diagnostic escape
-hatch.
+`POST /pair` requires an allowed Roam origin, the active graph, and either the
+approved native consent or fallback code. The bearer token is also stored in
+graph-scoped browser `localStorage`. It is never saved in graph-synced extension
+settings or printed by the CLI.
 
 Every browser request carries graph identity in its JSON body where applicable
-and as an encoded `X-Roam-Graph` header. The bridge rejects mismatches with an
-actionable restart message. Settings accept only an explicit
+and as an encoded `X-Roam-Graph` header. The bridge rejects mismatches and the
+panel offers to pair the bridge to the active graph instead. Settings accept
+only an explicit
 `http://127.0.0.1:<port>` endpoint with no credentials, path, query, or hash.
 
 ## Local bridge API
@@ -175,12 +182,12 @@ codex app-server generate-ts --out /tmp/codex-app-server-schema
 
 ## Development setup
 
-Create a dedicated runtime Roam profile:
+The bridge uses the user's normal Roam MCP connection store. Pairing starts the
+connect flow automatically if the graph is missing; it can also be prepared
+explicitly:
 
 ```bash
-mkdir -p .dev/roam-home
-HOME="$PWD/.dev/roam-home" \
-  npx -y @roam-research/roam-mcp@0.9.1 connect \
+npx -y @roam-research/roam-mcp connect \
   --graph "your-graph-name" \
   --nickname "your-graph-name" \
   --access-level full
@@ -194,14 +201,15 @@ npx -y @roam-research/roam-cli@0.9.1 \
   reload-dev-extensions --graph "your-graph-name"
 ```
 
-Start the bridge with the same exact graph name:
+Start the bridge in the foreground for development:
 
 ```bash
-ROAM_GRAPH="your-graph-name" npm start
+npm start
 ```
 
-Run `Codex: Pair local bridge`, enter the terminal code, and then run
-`Codex: Check local bridge`.
+Open the Codex panel, select Pair, and approve the native dialog. If the dialog
+is unavailable, run `node bin.mjs code` and paste that fallback code into the
+panel.
 
 ## Verification
 
@@ -215,14 +223,17 @@ npm run check
 For a live smoke test, use a disposable block and verify:
 
 1. Extension reload succeeds explicitly.
-2. Pairing works once and rejects replay.
+2. Pairing adopts the active graph, persists it locally, and rejects fallback
+   code replay.
 3. The source block survives.
 4. Chat sends, steers, stops, and restores drafts correctly.
-5. `Do this block` shows and removes its temporary running child.
+5. `Do this block` writes through Roam MCP according to the selected access
+   mode, preserves the source block, and removes its temporary running child.
 6. Research adds linked primary sources in native comments.
 7. Unload removes extension-owned DOM, listeners, observers, intervals, and
    native renderer mounts.
-8. `.dev/last-run.jsonl` contains no bearer token or pairing code.
+8. `.dev/last-run.jsonl` records complete failure classification, including an
+   available HTTP status and detail, without a bearer token or pairing code.
 
 Before a Depot release, repeat the complete setup on a clean client and a
 non-development graph, test the URL/PR-shorthand install path, and review the
