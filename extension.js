@@ -3305,12 +3305,13 @@ export function createChatPanel({
         setProgress(error.message || "Could not answer the approval.", "error");
       });
   };
-  const renderApprovalCards = () => approvalRoot.render(
-    window.React.createElement(ChatApprovalCards, {
+  const renderApprovalCards = () => {
+    if (closed) return;
+    approvalRoot.render(window.React.createElement(ChatApprovalCards, {
       approvals: [...approvalCards.values()],
       decide: decideApproval,
-    }),
-  );
+    }));
+  };
   const renderApproval = ({ approvalId, questions }) => {
     if (approvalCards.has(approvalId)) return;
     approvalCards.set(approvalId, { approvalId, questions, state: "" });
@@ -3511,6 +3512,7 @@ export function createChatPanel({
   };
 
   const renderControls = () => {
+    if (closed) return;
     const tier = modelTierChoices(currentModelEntry()).find(
       (entry) => entry.id === pickerSpeed,
     );
@@ -3676,6 +3678,7 @@ export function createChatPanel({
   };
 
   const renderHistory = () => {
+    if (closed) return;
     const items = historyItems();
     historyRoot.render(window.React.createElement(ChatHistory, {
       items,

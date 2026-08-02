@@ -57,6 +57,7 @@ window.ReactDOMClient = {
     const root = {
       unmounted: false,
       render(node) {
+        if (this.unmounted) throw new Error("Cannot update an unmounted root.");
         const rendered = renderNode(node);
         container.replaceChildren(...(Array.isArray(rendered) ? rendered : [rendered]).filter(Boolean));
       },
@@ -2742,6 +2743,14 @@ test("Send during an active turn steers it instead of starting a new one", async
   await new Promise((resolve) => setTimeout(resolve, 0));
   await new Promise((resolve) => setTimeout(resolve, 0));
 
+  const steerButton = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-send is-steering",
+  );
+  assert.equal(steerButton.hidden, false);
+  assert.equal(steerButton.disabled, false);
+  assert.match(steerButton.textContent, /^Steer/);
+  assert.match(steerButton.title, /current turn/);
+
   const steering = controller.send();
   await controller.send();
   await new Promise((resolve) => setImmediate(resolve));
@@ -2756,6 +2765,49 @@ test("Send during an active turn steers it instead of starting a new one", async
   finishTurn();
   await sending;
   await controller.close();
+});
+
+test("closing during a turn lets React roots unmount while cleanup waits for idle", async () => {
+  let finishTurn;
+  const turn = new Promise((resolve) => {
+    finishTurn = resolve;
+  });
+  const controller = createChatPanel({
+    doc: createFakePanelDocument(),
+    api: {},
+    storage: {
+      getItem: () => null,
+      setItem: () => {},
+    },
+    rootBlockUid: "root123",
+    readPromptImpl: async () => ({ uid: "root123", text: "Keep working" }),
+    requestChatImpl: async (_message, { onStarted }) => {
+      onStarted({ runId: "12345678-1234-1234-1234-123456789abc" });
+      await turn;
+      return { threadId: "thread_close_1234", turnId: "turn-1", reply: "Done" };
+    },
+    requestModelsImpl: async () => [],
+    requestMessagesImpl: async () => [],
+    requestHistoryImpl: async () => ({
+      threads: [],
+      missingThreadIds: [],
+      unavailableThreadIds: [],
+    }),
+    onClose: ({ whenIdle }) => whenIdle(),
+  });
+
+  await Promise.resolve();
+  const sending = controller.send();
+  await new Promise((resolve) => setImmediate(resolve));
+  const closing = controller.close();
+  let closed = false;
+  void closing.then(() => { closed = true; });
+  await Promise.resolve();
+  assert.equal(closed, false);
+
+  finishTurn();
+  await Promise.all([sending, closing]);
+  assert.equal(closed, true);
 });
 
 test("a rejected steer resends the intact draft once the turn settles", async () => {
