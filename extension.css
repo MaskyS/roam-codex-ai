@@ -18,7 +18,8 @@
   line-height: 1.2;
 }
 
-.roam-codex-running-block .roam-codex-running-meta::before {
+.roam-codex-running-block .roam-codex-running-meta::before,
+.roam-codex-chat-progress-meta::before {
   animation: roam-codex-running-spin 900ms linear infinite;
   border: 2px solid rgba(92, 112, 128, 0.25);
   border-radius: 50%;
@@ -67,7 +68,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .roam-codex-running-block .roam-codex-running-meta::before {
+  .roam-codex-running-block .roam-codex-running-meta::before,
+  .roam-codex-chat-progress-meta::before {
     animation: none;
   }
 }
@@ -479,8 +481,7 @@
 }
 
 .roam-codex-chat-picker-item,
-.roam-codex-chat-picker-option,
-.roam-codex-chat-picker-back {
+.roam-codex-chat-picker-option {
   align-items: center;
   background: transparent;
   border: 0;
@@ -501,9 +502,7 @@
 .roam-codex-chat-picker-item:focus-visible,
 .roam-codex-chat-picker-item.is-open,
 .roam-codex-chat-picker-option:hover,
-.roam-codex-chat-picker-option:focus-visible,
-.roam-codex-chat-picker-back:hover,
-.roam-codex-chat-picker-back:focus-visible {
+.roam-codex-chat-picker-option:focus-visible {
   background: rgba(19, 124, 189, 0.1);
   outline: none;
 }
@@ -529,14 +528,6 @@
   display: inline-flex;
   flex: 0 0 auto;
   line-height: 1;
-}
-
-.roam-codex-chat-picker-back {
-  border-bottom: 1px solid rgba(92, 112, 128, 0.14);
-  border-radius: 4px 4px 0 0;
-  color: #738694;
-  font-weight: 600;
-  margin-bottom: 3px;
 }
 
 .roam-codex-chat-picker-option {
@@ -788,10 +779,6 @@
   touch-action: none;
 }
 
-.roam-codex-chat-resize[hidden] {
-  display: none;
-}
-
 .roam-codex-chat-resize::before {
   background: rgba(92, 112, 128, 0.3);
   border-radius: 2px;
@@ -1017,24 +1004,6 @@
   display: none;
 }
 
-.roam-codex-chat-progress-meta::before {
-  animation: roam-codex-running-spin 900ms linear infinite;
-  border: 2px solid rgba(92, 112, 128, 0.25);
-  border-radius: 50%;
-  border-top-color: #137cbd;
-  box-sizing: border-box;
-  content: "";
-  flex: 0 0 auto;
-  height: 11px;
-  width: 11px;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .roam-codex-chat-progress-meta::before {
-    animation: none;
-  }
-}
-
 .roam-codex-chat-progress-text {
   display: -webkit-box;
   overflow: hidden;
@@ -1060,7 +1029,6 @@
   padding: 6px 12px;
 }
 
-.roam-codex-chat-send[hidden],
 .roam-codex-chat-stop[hidden] {
   display: none;
 }
