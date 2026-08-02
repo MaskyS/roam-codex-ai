@@ -384,6 +384,12 @@ export async function readProbeStream(
     } else if (event.type === "error") {
       const error = new Error(event.error || "Codex could not finish the run.");
       error.code = event.code;
+      if (typeof event.codexErrorInfo === "string") {
+        error.codexErrorInfo = event.codexErrorInfo;
+      }
+      if (Number.isFinite(event.httpStatusCode)) {
+        error.httpStatusCode = event.httpStatusCode;
+      }
       throw error;
     }
   };
@@ -3693,6 +3699,11 @@ export function createChatPanel({
         renderConversationButton();
         return;
       }
+      if (error.code === "NOT_PAIRED") {
+        setProgress("", "");
+        void refreshConnection();
+        return;
+      }
       setProgress(error.message || "Could not load that conversation.", "error");
     }
   };
@@ -3783,7 +3794,9 @@ export function createChatPanel({
       }
       persist();
     } catch (error) {
-      historyError = error.message || "The graph thread index is unavailable.";
+      historyError = error.code === "NOT_PAIRED"
+        ? ""
+        : error.message || "The graph thread index is unavailable.";
     }
     const threadIds = historyItems().map((item) => item.threadId);
     if (!threadIds.length) {
@@ -4504,6 +4517,9 @@ export function createChatPanel({
           : { state: "no-bridge", graph: next.graph, detail: error.message };
       }
     }
+    const reconnected = next.state === "connected" &&
+      connection.state !== "connected" &&
+      connection.state !== "checking";
     const stateChanged = next.state !== connection.state;
     if (stateChanged) connectionNote = "";
     connection = next;
@@ -4514,6 +4530,7 @@ export function createChatPanel({
         connectionRetryTimer = null;
       }
       loadCatalogs();
+      if (reconnected) void loadHistory({ reconcileActive: false });
     } else {
       scheduleConnectionRetry();
     }

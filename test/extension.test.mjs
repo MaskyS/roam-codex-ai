@@ -2844,6 +2844,84 @@ test("Do this block without pairing opens the chat panel instead of a dead end",
   assert.match(toasts.at(-1).message, /Pair this device/);
 });
 
+test("a saved conversation on an unpaired device shows only the card", async () => {
+  const doc = createFakePanelDocument();
+  const notPaired = () => {
+    const error = new Error("This device isn't paired with the local Codex bridge yet.");
+    error.code = "NOT_PAIRED";
+    throw error;
+  };
+  const values = new Map([[
+    chatStateKey("maskys"),
+    JSON.stringify({
+      version: 2,
+      activeThreadId: "thread_saved_123",
+      newConversationPreferences: {
+        model: null,
+        effort: null,
+        speed: null,
+        access: "auto",
+      },
+      enabledMcpServers: [],
+      conversations: {
+        thread_saved_123: {
+          threadId: "thread_saved_123",
+          createdAt: 10,
+          updatedAt: 20,
+          model: null,
+          effort: null,
+          speed: null,
+          access: "auto",
+          threadPageUid: null,
+          threadPageTitle: null,
+          originInstallationId: null,
+          lastSeenUpdatedAt: 0,
+          availability: "available",
+          pendingGraphIndex: false,
+        },
+      },
+    }),
+  ]]);
+  const controller = createChatPanel({
+    doc,
+    api: {},
+    storage: {
+      getItem: (key) => values.get(key) ?? null,
+      setItem: (key, value) => values.set(key, value),
+    },
+    rootBlockUid: "root123",
+    setIntervalImpl: () => 1,
+    clearIntervalImpl: () => {},
+    setTimeoutImpl: () => 1,
+    clearTimeoutImpl: () => {},
+    probeConnectionImpl: async () => ({ state: "unpaired", graph: "maskys" }),
+    requestModelsImpl: async () => notPaired(),
+    requestMessagesImpl: async () => notPaired(),
+    requestHistoryImpl: async () => notPaired(),
+    requestGraphIndexImpl: async () => notPaired(),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const elements = panelElements(controller);
+  const card = elements.find(
+    (element) => element.className === "roam-codex-connection-card",
+  );
+  assert.equal(card.hidden, false);
+  const progressText = elements.find(
+    (element) => element.className === "roam-codex-chat-progress-text",
+  );
+  assert.equal(progressText.textContent || "", "");
+  const historyErrors = elements.filter(
+    (element) => element.className === "roam-codex-chat-history-error",
+  );
+  assert.equal(
+    historyErrors.some((element) => (element.textContent || "").includes("paired")),
+    false,
+  );
+  await controller.close();
+});
+
 test("the connection card explains failures and clears once connected", async () => {
   const timers = [];
   const doc = createFakePanelDocument();

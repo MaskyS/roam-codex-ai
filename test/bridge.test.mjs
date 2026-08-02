@@ -20,6 +20,7 @@ import {
   runtimeThreadConfig,
   scanConfigMcpServerNames,
   toolApprovalResponse,
+  turnFailureError,
   validateRuntimeInstructionSources,
 } from "../bridge.mjs";
 
@@ -1393,6 +1394,35 @@ test("the consent dialog reads Allow, Deny, and timeouts from osascript", async 
     await requestPairingConsent({ graph: "maskys", platform: "linux" }),
     { supported: false },
   );
+});
+
+test("a failed turn keeps the Codex error classification", async () => {
+  const usageLimited = turnFailureError({
+    status: "failed",
+    error: {
+      message: "You have hit your usage limit.",
+      codexErrorInfo: "usageLimitExceeded",
+      additionalDetails: "resets at 9pm",
+    },
+  });
+  assert.equal(usageLimited.codexErrorInfo, "usageLimitExceeded");
+  assert.equal(usageLimited.additionalDetails, "resets at 9pm");
+  assert.match(usageLimited.message, /usage limit/);
+
+  const upstream = turnFailureError({
+    status: "failed",
+    error: {
+      message: "Upstream failure.",
+      codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+      additionalDetails: null,
+    },
+  });
+  assert.equal(upstream.codexErrorInfo, "httpConnectionFailed");
+  assert.equal(upstream.httpStatusCode, 503);
+
+  const bare = turnFailureError({ status: "failed", error: null });
+  assert.equal(bare.codexErrorInfo, undefined);
+  assert.match(bare.message, /status failed/);
 });
 
 test("auth status and browser sign-in flow through the app-server client", async () => {

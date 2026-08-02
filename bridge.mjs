@@ -168,6 +168,29 @@ export function scanConfigMcpServerNames(configToml) {
   return [...names].sort();
 }
 
+export function turnFailureError(turn) {
+  const info = turn?.error?.codexErrorInfo ?? null;
+  const kind = typeof info === "string"
+    ? info
+    : info && typeof info === "object"
+      ? Object.keys(info)[0] || null
+      : null;
+  const detail = info && typeof info === "object"
+    ? Object.values(info)[0] || null
+    : null;
+  const message = turn?.error?.message ||
+    `status ${turn?.status || "unknown"}`;
+  const error = new Error(`Codex turn did not complete: ${message}`);
+  if (kind) error.codexErrorInfo = kind;
+  if (detail && Number.isFinite(detail.httpStatusCode)) {
+    error.httpStatusCode = detail.httpStatusCode;
+  }
+  if (typeof turn?.error?.additionalDetails === "string") {
+    error.additionalDetails = turn.error.additionalDetails;
+  }
+  return error;
+}
+
 function missingThreadError(error) {
   return /not found|does not exist|no rollout/i.test(error?.message || "");
 }
@@ -1156,9 +1179,7 @@ export class AppServerClient extends EventEmitter {
         throw rpcError("Codex turn was stopped.", "TURN_INTERRUPTED");
       }
       if (turn?.status !== "completed") {
-        const detail = turn?.error?.message ||
-          `status ${turn?.status || "unknown"}`;
-        throw new Error(`Codex turn did not complete: ${detail}`);
+        throw turnFailureError(turn);
       }
 
       const items = Array.isArray(turn.items) ? turn.items : [];
@@ -1307,8 +1328,7 @@ export class AppServerClient extends EventEmitter {
         throw rpcError("Codex turn was stopped.", "TURN_INTERRUPTED");
       }
       if (turn?.status !== "completed") {
-        const detail = turn?.error?.message || `status ${turn?.status || "unknown"}`;
-        throw new Error(`Codex turn did not complete: ${detail}`);
+        throw turnFailureError(turn);
       }
 
       const items = Array.isArray(turn.items) ? turn.items : [];
@@ -2350,6 +2370,12 @@ export function createBridgeServer({
           runId,
           error: error.message || "Chat failed.",
           code: error.code,
+          ...(error.codexErrorInfo
+            ? { codexErrorInfo: error.codexErrorInfo }
+            : {}),
+          ...(Number.isFinite(error.httpStatusCode)
+            ? { httpStatusCode: error.httpStatusCode }
+            : {}),
         });
       } finally {
         for (const pendingApproval of activeRun.pendingApprovals.values()) {
@@ -2664,6 +2690,12 @@ export function createBridgeServer({
         runId,
         error: error.message || "Probe failed.",
         code: error.code,
+        ...(error.codexErrorInfo
+          ? { codexErrorInfo: error.codexErrorInfo }
+          : {}),
+        ...(Number.isFinite(error.httpStatusCode)
+          ? { httpStatusCode: error.httpStatusCode }
+          : {}),
       });
     } finally {
       activeRunsByBlockUid.delete(blockUid);
