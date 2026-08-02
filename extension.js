@@ -4928,36 +4928,6 @@ export async function pairBridge({
   return result;
 }
 
-export async function checkBridge({
-  fetchImpl = window.fetch.bind(window),
-  graph = currentGraphName(),
-  bridgeUrl = currentBridgeUrl(),
-} = {}) {
-  try {
-    const response = await fetchImpl(`${bridgeUrl}/health`, {
-      headers: { "x-roam-graph": graphHeaderValue(graph) },
-    });
-    const result = await response.json();
-    if (!response.ok || !result.ok) {
-      throw new Error(result.error || `HTTP ${response.status}`);
-    }
-    if (result.graph && result.graph !== graph) {
-      throw new Error(
-        `bridge is paired to graph "${result.graph}", but Roam has ` +
-        `"${graph}" open; pair this graph from the Codex panel`,
-      );
-    }
-    notify(
-      `Bridge is ${result.appServer}; graph is ${result.graph}.`,
-      "success",
-    );
-    return result;
-  } catch (error) {
-    notify(`Bridge unavailable: ${error.message}`, "danger");
-    throw error;
-  }
-}
-
 function configuredDefaultAccess(value) {
   return CHAT_ACCESS_MODES.has(value) ? value : "auto";
 }
@@ -5127,11 +5097,6 @@ export default {
       callback: workFromCommandPalette,
     });
 
-    extensionAPI.ui.commandPalette.addCommand({
-      label: "Codex: Check local bridge",
-      "disable-hotkey": true,
-      callback: () => void checkBridge(),
-    });
   },
   onunload: () => {
     EXTENSION_SETTINGS = null;
