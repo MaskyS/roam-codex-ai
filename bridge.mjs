@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import {
   appendFile,
   chmod,
@@ -14,6 +14,7 @@ import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { EventEmitter } from "node:events";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 export const RUNTIME_HOME = resolve(homedir(), ".roam-better-ai");
@@ -30,6 +31,63 @@ export function runtimeCwdForGraph(graph) {
 }
 
 export const DEFAULT_RUNTIME_CWD = runtimeCwdForGraph("unconfigured");
+export const BRIDGE_CONFIG_PATH = resolve(RUNTIME_HOME, "config.json");
+export const PAIRING_CODE_PATH = resolve(RUNTIME_HOME, "pairing-code");
+const execFileAsync = promisify(execFile);
+
+export async function readBridgeConfig(path = BRIDGE_CONFIG_PATH) {
+  try {
+    const parsed = JSON.parse(await readFile(path, "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+export async function writeBridgeConfig(config, path = BRIDGE_CONFIG_PATH) {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await writeFile(path, `${JSON.stringify(config, null, 2)}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+}
+
+export function validPairingGraphName(value) {
+  return typeof value === "string" &&
+    value.trim().length > 0 &&
+    value.length <= 200 &&
+    !/[\u0000-\u001f]/.test(value);
+}
+
+export async function requestPairingConsent({
+  graph,
+  platform = process.platform,
+  execFileImpl = execFileAsync,
+} = {}) {
+  if (platform !== "darwin") return { supported: false };
+  const message =
+    `Roam graph ${JSON.stringify(graph)} wants to use your local Codex bridge.`;
+  const script =
+    `display dialog ${JSON.stringify(message)} ` +
+    'with title "Roam Codex bridge" buttons {"Deny", "Allow"} ' +
+    'default button "Deny" cancel button "Deny" with icon caution ' +
+    "giving up after 60";
+  try {
+    const { stdout } = await execFileImpl("osascript", ["-e", script], {
+      timeout: 70_000,
+    });
+    const text = String(stdout);
+    return {
+      supported: true,
+      allowed: text.includes("button returned:Allow") &&
+        !text.includes("gave up:true"),
+    };
+  } catch (error) {
+    if (error?.code === "ENOENT") return { supported: false };
+    return { supported: true, allowed: false };
+  }
+}
+
 const DEFAULT_CODEX_HOME = resolve(
   process.env.CODEX_HOME || resolve(homedir(), ".codex"),
 );
@@ -1630,15 +1688,33 @@ export function createTraceWriter(
 
 export function createBridgeServer({
   token,
-  graph,
-  pairing = createPairingSession(),
-  client = new AppServerClient(),
+  graph: initialGraph = null,
+  client: initialClient = null,
+  createClient = (boundGraph) =>
+    new AppServerClient({ runtimeCwd: runtimeCwdForGraph(boundGraph) }),
+  onBind = async () => {},
+  requestConsent = requestPairingConsent,
+  pairingCodePath = PAIRING_CODE_PATH,
   trace = createTraceWriter(),
 } = {}) {
   if (!token) throw new Error("A bridge bearer token is required.");
-  if (typeof graph !== "string" || !graph.trim()) {
-    throw new Error("A bridge graph is required.");
-  }
+  let graph = typeof initialGraph === "string" && initialGraph.trim()
+    ? initialGraph.trim()
+    : null;
+  let client = initialClient || (graph ? createClient(graph) : null);
+  let pairingSession = null;
+  let consentInFlight = false;
+
+  const bindGraph = async (nextGraph) => {
+    if (graph === nextGraph && client) return;
+    const previousClient = client;
+    graph = nextGraph;
+    client = createClient(nextGraph);
+    if (previousClient) {
+      void Promise.resolve(previousClient.stop()).catch(() => {});
+    }
+    await onBind(nextGraph);
+  };
   const activeRunsByBlockUid = new Map();
   const activeRunsByThreadId = new Map();
   const activeRunsById = new Map();
@@ -1655,7 +1731,7 @@ export function createBridgeServer({
     return true;
   };
 
-  return createServer(async (request, response) => {
+  const server = createServer(async (request, response) => {
     const origin = request.headers.origin;
     if (!isAllowedOrigin(origin)) {
       sendJson(response, 403, { error: "Origin is not allowed." }, null);
@@ -1690,15 +1766,15 @@ export function createBridgeServer({
       sendJson(response, 400, { error: "Invalid Roam graph header." }, origin);
       return;
     }
-    if (requestedGraph && requestedGraph !== graph) {
+    if (graph && requestedGraph && requestedGraph !== graph) {
       sendJson(
         response,
         409,
         {
           error:
-            `This bridge serves graph "${graph}", but the request came from ` +
-            `graph "${requestedGraph}". Restart with ` +
-            `ROAM_GRAPH=${JSON.stringify(requestedGraph)}.`,
+            `This bridge is paired to graph "${graph}". ` +
+            "Pair this graph from the Roam panel to switch.",
+          code: "GRAPH_MISMATCH",
         },
         origin,
       );
@@ -1713,7 +1789,7 @@ export function createBridgeServer({
           ok: true,
           graph,
           version: BRIDGE_VERSION,
-          appServer: client.ready ? "ready" : "idle",
+          appServer: client?.ready ? "ready" : "idle",
         },
         origin,
       );
@@ -1738,33 +1814,93 @@ export function createBridgeServer({
         sendJson(response, status, { error: error.message }, origin);
         return;
       }
-      if (body?.graph !== graph) {
+      if (!validPairingGraphName(body?.graph)) {
+        sendJson(response, 400, { error: "A valid graph name is required." }, origin);
+        return;
+      }
+      const pairingGraph = body.graph.trim();
+
+      if (typeof body.code === "string" && body.code.trim()) {
+        if (!pairingSession?.verify(body.code)) {
+          sendJson(
+            response,
+            403,
+            {
+              error:
+                "That pairing code is invalid or expired. Click Pair again " +
+                "for a fresh one.",
+            },
+            origin,
+          );
+          return;
+        }
+        pairingSession = null;
+        await bindGraph(pairingGraph);
+        await trace({ event: "pair.bound", graph: pairingGraph, via: "code" });
+        sendJson(response, 200, { graph: pairingGraph, token }, origin);
+        return;
+      }
+
+      if (consentInFlight) {
         sendJson(
           response,
           409,
-          {
-            error:
-              `This bridge serves graph "${graph}". Restart it with ` +
-              `ROAM_GRAPH=${JSON.stringify(body?.graph || "<active-graph>")}.`,
-          },
+          { error: "A pairing request is already waiting for consent." },
           origin,
         );
         return;
       }
-      if (!pairing.verify(body?.code)) {
+      consentInFlight = true;
+      let consent;
+      try {
+        consent = await requestConsent({ graph: pairingGraph });
+      } finally {
+        consentInFlight = false;
+      }
+      if (!consent.supported) {
+        pairingSession = createPairingSession();
+        try {
+          await mkdir(dirname(pairingCodePath), {
+            recursive: true,
+            mode: 0o700,
+          });
+          await writeFile(pairingCodePath, `${pairingSession.code}\n`, {
+            encoding: "utf8",
+            mode: 0o600,
+          });
+        } catch {
+          // The code is still verifiable; only the on-disk copy failed.
+        }
+        sendJson(response, 200, { codeRequired: true }, origin);
+        return;
+      }
+      if (!consent.allowed) {
         sendJson(
           response,
           403,
-          {
-            error:
-              "Pairing code is invalid or unavailable. Restart the bridge " +
-              "to generate a new code.",
-          },
+          { error: "Pairing was declined on this computer." },
           origin,
         );
         return;
       }
-      sendJson(response, 200, { graph, token }, origin);
+      pairingSession = null;
+      await bindGraph(pairingGraph);
+      await trace({ event: "pair.bound", graph: pairingGraph, via: "dialog" });
+      sendJson(response, 200, { graph: pairingGraph, token }, origin);
+      return;
+    }
+
+    if (!client) {
+      sendJson(
+        response,
+        409,
+        {
+          error:
+            "The bridge isn't paired to a graph yet. Pair from the Roam panel.",
+          code: "NOT_BOUND",
+        },
+        origin,
+      );
       return;
     }
 
@@ -2535,6 +2671,8 @@ export function createBridgeServer({
       response.end();
     }
   });
+  server.stopClient = () => Promise.resolve(client?.stop()).catch(() => {});
+  return server;
 }
 
 export async function ensureBridgeToken(
@@ -2564,25 +2702,27 @@ export async function ensureBridgeToken(
   return token;
 }
 
-async function main() {
+export async function startBridge({
+  host = process.env.ROAM_CODEX_HOST || DEFAULT_HOST,
+  port = Number(process.env.ROAM_CODEX_PORT || DEFAULT_PORT),
+} = {}) {
   const token = await ensureBridgeToken();
-  if (process.argv.includes("--show-token")) {
-    process.stdout.write(`${token}\n`);
-    return;
-  }
-
-  const host = process.env.ROAM_CODEX_HOST || DEFAULT_HOST;
-  const port = Number(process.env.ROAM_CODEX_PORT || DEFAULT_PORT);
-  const graph = process.env.ROAM_GRAPH?.trim();
-  if (!graph) {
-    throw new Error(
-      "ROAM_GRAPH is required. Set it to the active graph name before " +
-      "starting the bridge.",
-    );
-  }
-  const pairing = createPairingSession();
-  const client = new AppServerClient({ runtimeCwd: runtimeCwdForGraph(graph) });
-  const server = createBridgeServer({ token, graph, pairing, client });
+  const config = await readBridgeConfig();
+  const graph = typeof config.graph === "string" && config.graph.trim()
+    ? config.graph.trim()
+    : null;
+  const server = createBridgeServer({
+    token,
+    graph,
+    createClient: (boundGraph) => new AppServerClient({
+      runtimeCwd: runtimeCwdForGraph(boundGraph),
+      command: config.codexBin || process.env.CODEX_BIN || "codex",
+    }),
+    onBind: async (boundGraph) => {
+      const current = await readBridgeConfig();
+      await writeBridgeConfig({ ...current, graph: boundGraph });
+    },
+  });
 
   await new Promise((resolveListen, rejectListen) => {
     server.once("error", rejectListen);
@@ -2592,21 +2732,24 @@ async function main() {
   process.stdout.write(
     [
       `Roam Codex bridge listening on http://${host}:${port}`,
-      `Graph: ${graph}`,
-      `Pairing code: ${pairing.code}`,
-      "Pairing code expires in 5 minutes and can be used once.",
-      "Bearer token diagnostics: npm run show-token",
-      `Trace: ${resolve(ROOT, ".dev", "last-run.jsonl")}`,
+      graph
+        ? `Graph: ${graph}`
+        : "Graph: not paired yet — open the Codex panel in Roam and click Pair.",
       "",
     ].join("\n"),
   );
 
   const shutdown = async () => {
     await new Promise((resolveClose) => server.close(resolveClose));
-    await client.stop();
+    await server.stopClient();
   };
   process.once("SIGINT", () => void shutdown().finally(() => process.exit(0)));
   process.once("SIGTERM", () => void shutdown().finally(() => process.exit(0)));
+  return server;
+}
+
+async function main() {
+  await startBridge();
 }
 
 const isMain =

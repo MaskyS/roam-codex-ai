@@ -507,6 +507,9 @@ export async function probeBridgeConnection({
   } catch {
     // A non-JSON reply is treated through the status checks below.
   }
+  if (response.ok && result.ok === true && result.graph === null) {
+    return { state: "unpaired", graph, bridgeUrl };
+  }
   if (
     response.status === 409 ||
     (typeof result.graph === "string" && result.graph !== graph)
@@ -2534,6 +2537,7 @@ export function createChatPanel({
   let connectionRetryTimer = null;
   let connectionProbeVersion = 0;
   let connectionNote = "";
+  let pairingCodeRequired = false;
   let enabledMcpServers = sanitizeEnabledMcpServers(
     readEnabledMcpServersImpl(),
   );
@@ -4367,7 +4371,17 @@ export function createChatPanel({
       connectionCard.hidden = true;
       return;
     }
+    const wasHidden = connectionCard.hidden === true;
     connectionCard.hidden = false;
+    if (wasHidden) {
+      const reduceMotion = Boolean(
+        matchMediaImpl?.("(prefers-reduced-motion: reduce)")?.matches,
+      );
+      connectionCard.scrollIntoView?.({
+        block: "nearest",
+        behavior: reduceMotion ? "auto" : "smooth",
+      });
+    }
     const addTitle = (text) => connectionCard.appendChild(
       createPanelElement(doc, "h3", "roam-codex-connection-title", text),
     );
@@ -4390,31 +4404,43 @@ export function createChatPanel({
       actions.appendChild(button);
     };
 
+    const addPairingControls = (label) => {
+      if (pairingCodeRequired) {
+        const input = createPanelElement(
+          doc,
+          "input",
+          "roam-codex-connection-input",
+        );
+        input.setAttribute("type", "text");
+        input.setAttribute("aria-label", "Bridge pairing code");
+        input.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") void startPairing(input.value);
+        });
+        connectionCard.appendChild(input);
+        if (focusInput) input.focus?.();
+        addAction(label, () => startPairing(input.value));
+      } else {
+        addAction(label, () => startPairing());
+      }
+    };
+
     if (connection.state === "checking") {
       addTitle("Connecting to the local Codex bridge…");
     } else if (connection.state === "wrong-graph") {
-      addTitle("The bridge serves a different graph");
+      addTitle("The bridge is paired to a different graph");
       addText(
         connection.detail ||
-          `Restart the bridge with ROAM_GRAPH=${JSON.stringify(connection.graph)}.`,
+          "Pairing switches the bridge over to this graph.",
       );
-      addAction("Try again", refreshConnection);
+      addPairingControls("Use this graph instead");
     } else if (connection.state === "unpaired") {
       addTitle("Pair this device with the bridge");
-      addText("Enter the one-time pairing code shown in the bridge terminal.");
-      const input = createPanelElement(
-        doc,
-        "input",
-        "roam-codex-connection-input",
+      addText(
+        pairingCodeRequired
+          ? "Enter the one-time pairing code."
+          : "Click Pair, then choose Allow in the dialog that opens on this computer.",
       );
-      input.setAttribute("type", "text");
-      input.setAttribute("aria-label", "Bridge pairing code");
-      input.addEventListener("keydown", (event) => {
-        if (event.key === "Enter") void startPairing(input.value);
-      });
-      connectionCard.appendChild(input);
-      if (focusInput) input.focus?.();
-      addAction("Pair", () => startPairing(input.value));
+      addPairingControls("Pair");
     } else if (connection.state === "signed-out") {
       addTitle("Sign in to Codex");
       addText(
@@ -4430,7 +4456,7 @@ export function createChatPanel({
         doc,
         "code",
         "roam-codex-connection-command",
-        `ROAM_GRAPH=${JSON.stringify(connection.graph || "")} npm start`,
+        "npx roam-codex-bridge",
       ));
       addAction("Try again", refreshConnection);
     }
@@ -4495,12 +4521,20 @@ export function createChatPanel({
 
   const startPairing = async (code) => {
     try {
-      await pairRequest({ code });
+      await pairRequest(code === undefined ? {} : { code });
+      pairingCodeRequired = false;
       connectionNote = "";
       await refreshConnection();
     } catch (error) {
+      if (error.code === "CODE_REQUIRED") {
+        pairingCodeRequired = true;
+        connectionNote =
+          "Run npx roam-codex-bridge code in a terminal, then enter the code here.";
+        renderConnectionCard({ focusInput: true });
+        return;
+      }
       connectionNote = error.message || "Pairing failed.";
-      renderConnectionCard({ focusInput: true });
+      renderConnectionCard({ focusInput: pairingCodeRequired });
     }
   };
 
@@ -4833,16 +4867,20 @@ export async function pairBridge({
   storage = window.localStorage,
   graph = currentGraphName(),
   bridgeUrl = currentBridgeUrl(),
-  code,
+  code = null,
 } = {}) {
-  const pairingCode = typeof code === "string" ? code.trim() : "";
-  if (!pairingCode || pairingCode.length > 64 || /[\u0000-\u001f]/.test(pairingCode)) {
-    throw new Error("Enter the one-time pairing code shown by the local bridge.");
+  const body = { graph };
+  if (code !== null && code !== undefined) {
+    const pairingCode = String(code).trim();
+    if (!pairingCode || pairingCode.length > 64 || /[\u0000-\u001f]/.test(pairingCode)) {
+      throw new Error("Enter the one-time pairing code from the bridge.");
+    }
+    body.code = pairingCode;
   }
   const response = await fetchImpl(`${bridgeUrl}/pair`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ graph, code: pairingCode }),
+    body: JSON.stringify(body),
   });
 
   let result = {};
@@ -4852,16 +4890,20 @@ export async function pairBridge({
     // A useful status error is emitted below.
   }
 
+  if (response.ok && result.codeRequired === true) {
+    const error = new Error(
+      "This computer asks for a pairing code instead of a dialog.",
+    );
+    error.code = "CODE_REQUIRED";
+    throw error;
+  }
   if (!response.ok || typeof result.token !== "string") {
     throw new Error(
       result.error || `Bridge pairing returned HTTP ${response.status}.`,
     );
   }
   if (result.graph !== graph) {
-    throw new Error(
-      `Bridge is configured for graph "${result.graph}"; ` +
-      `restart it with ROAM_GRAPH=${JSON.stringify(graph)}.`,
-    );
+    throw new Error(`The bridge paired to graph "${result.graph}" instead.`);
   }
 
   storage.setItem(tokenKey(graph), result.token);
@@ -4882,10 +4924,10 @@ export async function checkBridge({
     if (!response.ok || !result.ok) {
       throw new Error(result.error || `HTTP ${response.status}`);
     }
-    if (result.graph !== graph) {
+    if (result.graph && result.graph !== graph) {
       throw new Error(
-        `bridge serves graph "${result.graph}", but Roam has "${graph}" open; ` +
-        `restart the bridge with ROAM_GRAPH=${JSON.stringify(graph)}`,
+        `bridge is paired to graph "${result.graph}", but Roam has ` +
+        `"${graph}" open; pair this graph from the Codex panel`,
       );
     }
     notify(
@@ -5066,20 +5108,6 @@ export default {
     extensionAPI.ui.commandPalette.addCommand({
       label: "Codex: Do this block",
       callback: workFromCommandPalette,
-    });
-
-    extensionAPI.ui.commandPalette.addCommand({
-      label: "Codex: Pair local bridge",
-      "disable-hotkey": true,
-      callback: () => {
-        const code = globalThis.window?.prompt?.(
-          "Enter the one-time pairing code shown in the bridge terminal:",
-        );
-        if (code === null || code === undefined) return;
-        void pairBridge({ code }).catch((error) => {
-          notify(`Bridge pairing failed: ${error.message}`, "danger");
-        });
-      },
     });
 
     extensionAPI.ui.commandPalette.addCommand({

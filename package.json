@@ -7,7 +7,6 @@
   "scripts": {
     "dev": "node --watch bridge.mjs",
     "start": "node bridge.mjs",
-    "show-token": "node bridge.mjs --show-token",
     "test": "node --test",
     "check": "node --check bridge.mjs && node --check extension.js && node --test"
   },

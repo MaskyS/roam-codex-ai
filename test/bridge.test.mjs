@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter, once } from "node:events";
+import { readFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { PassThrough } from "node:stream";
@@ -15,6 +16,7 @@ import {
   parseAndValidatePlan,
   runtimeAppServerArgs,
   runtimeCwdForGraph,
+  requestPairingConsent,
   runtimeThreadConfig,
   scanConfigMcpServerNames,
   toolApprovalResponse,
@@ -1280,6 +1282,119 @@ test("manual chat streams an approval and resumes after the authenticated answer
   assert.equal(events.at(-1).result.reply, "Renamed");
 });
 
+test("pairing binds the graph, creates its client, and persists the choice", async (t) => {
+  const created = [];
+  const bound = [];
+  const server = createBridgeServer({
+    token: "secret-token",
+    graph: null,
+    createClient: (graph) => {
+      created.push(graph);
+      return { ready: false, async listMcpServers() { return []; } };
+    },
+    onBind: async (graph) => bound.push(graph),
+    requestConsent: async ({ graph }) => {
+      assert.equal(graph, "My Graph");
+      return { supported: true, allowed: true };
+    },
+    trace: async () => {},
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const origin = "https://roamresearch.com";
+
+  const unbound = await (await fetch(`${base}/health`, { headers: { origin } })).json();
+  assert.equal(unbound.ok, true);
+  assert.equal(unbound.graph, null);
+
+  const tooEarly = await fetch(`${base}/mcp-servers`, {
+    headers: { origin, authorization: "Bearer secret-token" },
+  });
+  assert.equal(tooEarly.status, 409);
+  assert.equal((await tooEarly.json()).code, "NOT_BOUND");
+
+  const paired = await fetch(`${base}/pair`, {
+    method: "POST",
+    headers: { origin, "content-type": "application/json" },
+    body: JSON.stringify({ graph: "My Graph" }),
+  });
+  assert.equal(paired.status, 200);
+  assert.deepEqual(await paired.json(), {
+    graph: "My Graph",
+    token: "secret-token",
+  });
+  assert.deepEqual(created, ["My Graph"]);
+  assert.deepEqual(bound, ["My Graph"]);
+
+  const health = await (await fetch(`${base}/health`, { headers: { origin } })).json();
+  assert.equal(health.graph, "My Graph");
+
+  const nowServed = await fetch(`${base}/mcp-servers`, {
+    headers: { origin, authorization: "Bearer secret-token" },
+  });
+  assert.equal(nowServed.status, 200);
+});
+
+test("a declined pairing dialog refuses to bind", async (t) => {
+  const server = createBridgeServer({
+    token: "secret-token",
+    graph: null,
+    createClient: () => ({ ready: false }),
+    requestConsent: async () => ({ supported: true, allowed: false }),
+    trace: async () => {},
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const origin = "https://roamresearch.com";
+
+  const declined = await fetch(`${base}/pair`, {
+    method: "POST",
+    headers: { origin, "content-type": "application/json" },
+    body: JSON.stringify({ graph: "maskys" }),
+  });
+  assert.equal(declined.status, 403);
+  const health = await (await fetch(`${base}/health`, { headers: { origin } })).json();
+  assert.equal(health.graph, null);
+});
+
+test("the consent dialog reads Allow, Deny, and timeouts from osascript", async () => {
+  const allow = await requestPairingConsent({
+    graph: "maskys",
+    platform: "darwin",
+    execFileImpl: async (command, args) => {
+      assert.equal(command, "osascript");
+      assert.match(args[1], /wants to use your local Codex bridge/);
+      return { stdout: "button returned:Allow\n" };
+    },
+  });
+  assert.deepEqual(allow, { supported: true, allowed: true });
+
+  const timedOut = await requestPairingConsent({
+    graph: "maskys",
+    platform: "darwin",
+    execFileImpl: async () => ({ stdout: "button returned:Deny, gave up:true\n" }),
+  });
+  assert.equal(timedOut.allowed, false);
+
+  const denied = await requestPairingConsent({
+    graph: "maskys",
+    platform: "darwin",
+    execFileImpl: async () => {
+      throw Object.assign(new Error("User canceled"), { code: 1 });
+    },
+  });
+  assert.deepEqual(denied, { supported: true, allowed: false });
+
+  assert.deepEqual(
+    await requestPairingConsent({ graph: "maskys", platform: "linux" }),
+    { supported: false },
+  );
+});
+
 test("auth status and browser sign-in flow through the app-server client", async () => {
   const client = new AppServerClient({ runtimeCwd: "/runtime/agent" });
   client.start = async () => {};
@@ -1555,8 +1670,9 @@ test("bridge enforces bearer auth and graph restriction", async (t) => {
   const server = createBridgeServer({
     token: "secret-token",
     graph: "maskys",
-    pairing: createPairingSession({ code: "ABCDEF-123456" }),
     client,
+    requestConsent: async () => ({ supported: false }),
+    pairingCodePath: resolve(tmpdir(), `roam-pairing-code-${process.pid}`),
     trace: async (entry) => traceEntries.push(entry),
   });
   server.listen(0, "127.0.0.1");
@@ -1597,7 +1713,7 @@ test("bridge enforces bearer auth and graph restriction", async (t) => {
   });
   assert.equal(untrustedPair.status, 403);
 
-  const missingCode = await fetch(`${base}/pair`, {
+  const codeless = await fetch(`${base}/pair`, {
     method: "POST",
     headers: {
       origin: "https://roamresearch.com",
@@ -1605,17 +1721,18 @@ test("bridge enforces bearer auth and graph restriction", async (t) => {
     },
     body: JSON.stringify({ graph: "maskys" }),
   });
-  assert.equal(missingCode.status, 403);
+  assert.equal(codeless.status, 200);
+  assert.deepEqual(await codeless.json(), { codeRequired: true });
 
-  const wrongPairGraph = await fetch(`${base}/pair`, {
+  const namelessGraph = await fetch(`${base}/pair`, {
     method: "POST",
     headers: {
       origin: "https://roamresearch.com",
       "content-type": "application/json",
     },
-    body: JSON.stringify({ graph: "other", code: "ABCDEF-123456" }),
+    body: JSON.stringify({ graph: "   " }),
   });
-  assert.equal(wrongPairGraph.status, 409);
+  assert.equal(namelessGraph.status, 400);
 
   const incorrectCode = await fetch(`${base}/pair`, {
     method: "POST",
@@ -1627,13 +1744,17 @@ test("bridge enforces bearer auth and graph restriction", async (t) => {
   });
   assert.equal(incorrectCode.status, 403);
 
+  const issuedCode = (await readFile(
+    resolve(tmpdir(), `roam-pairing-code-${process.pid}`),
+    "utf8",
+  )).trim();
   const pair = await fetch(`${base}/pair`, {
     method: "POST",
     headers: {
       origin: "https://roamresearch.com",
       "content-type": "application/json",
     },
-    body: JSON.stringify({ graph: "maskys", code: "abcdef-123456" }),
+    body: JSON.stringify({ graph: "maskys", code: issuedCode }),
   });
   assert.equal(pair.status, 200);
   assert.deepEqual(await pair.json(), {
@@ -1734,7 +1855,7 @@ test("bridge enforces bearer auth and graph restriction", async (t) => {
   assert.deepEqual(calls, [{ graph: "maskys", blockUid: "abcdefghi" }]);
   assert.deepEqual(
     traceEntries.map((entry) => entry.event),
-    ["probe.started", "probe.completed"],
+    ["pair.bound", "probe.started", "probe.completed"],
   );
 });
 

@@ -2790,11 +2790,16 @@ test("an unpaired panel focuses the pairing input and keeps errors quiet", async
     (element) => element.className === "roam-codex-connection-card",
   );
   assert.equal(card.hidden, false);
-  const input = card.children.find(
-    (child) => child.className === "roam-codex-connection-input",
+  assert.equal(
+    card.children.some(
+      (child) => child.className === "roam-codex-connection-input",
+    ),
+    false,
   );
-  assert.ok(input);
-  assert.equal(input.focused, true);
+  const pairButton = card.children
+    .find((child) => child.className === "roam-codex-connection-actions")
+    ?.children.find((child) => child.textContent === "Pair");
+  assert.ok(pairButton);
   const progressText = elements.find(
     (element) => element.className === "roam-codex-chat-progress-text",
   );
