@@ -2524,6 +2524,7 @@ export function createChatPanel({
     "div",
     "roam-codex-chat-transcript-wrap",
   );
+  transcriptWrap.hidden = true;
   let transcript = null;
   const transcriptMount = createPanelElement(doc, "div");
   transcriptWrap.appendChild(transcriptMount);
@@ -2547,6 +2548,10 @@ export function createChatPanel({
   body.appendChild(transcriptWrap);
 
   const updateScrollLatestButton = () => {
+    if (!transcript) {
+      scrollLatestButton.hidden = true;
+      return;
+    }
     const scrollHeight = Number(transcript.scrollHeight) || 0;
     const clientHeight = Number(transcript.clientHeight) || 0;
     const scrollTop = Number(transcript.scrollTop) || 0;
@@ -2561,6 +2566,7 @@ export function createChatPanel({
       distanceFromBottom <= CHAT_SCROLL_BOTTOM_THRESHOLD;
   };
   const scrollToLatest = () => {
+    if (!transcript) return;
     const reduceMotion = Boolean(
       matchMediaImpl?.("(prefers-reduced-motion: reduce)")?.matches,
     );
@@ -2585,7 +2591,7 @@ export function createChatPanel({
   transcriptHandle.setAttribute("role", "separator");
   transcriptHandle.setAttribute("aria-orientation", "horizontal");
   transcriptHandle.setAttribute("aria-label", "Resize the conversation area");
-  transcriptHandle.hidden = false;
+  transcriptHandle.hidden = true;
   body.appendChild(transcriptHandle);
 
   const createRoot = window.ReactDOMClient?.createRoot;
@@ -2647,7 +2653,7 @@ export function createChatPanel({
   };
   transcriptHandle.addEventListener("pointerdown", (event) => {
     if (!Number.isFinite(event?.clientY)) return;
-    const measured = transcript.getBoundingClientRect?.()?.height;
+    const measured = transcript?.getBoundingClientRect?.()?.height;
     transcriptResize = {
       startY: event.clientY,
       startHeight: Number.isFinite(measured) && measured > 0
@@ -2860,6 +2866,11 @@ export function createChatPanel({
 
   const renderMessages = ({ scroll = true } = {}) => {
     if (closed) return;
+    const hasTranscriptContent = messages.length > 0 ||
+      approvalCards.size > 0 ||
+      Boolean(progressState.text || progressState.running);
+    transcriptWrap.hidden = !hasTranscriptContent;
+    transcriptHandle.hidden = !hasTranscriptContent;
     transcriptRoot.render(window.React.createElement(ChatTranscript, {
       messages,
       approvals: [...approvalCards.values()],
@@ -2870,13 +2881,13 @@ export function createChatPanel({
       onDecide: decideApproval,
       transcriptRef: (node) => {
         transcript = node;
+        if (!node) return;
+        if (scroll) node.scrollTop = node.scrollHeight;
+        updateScrollLatestButton();
       },
       onScroll: updateScrollLatestButton,
       height: transcriptHeight,
     }));
-    transcriptHandle.hidden = false;
-    if (scroll && transcript) transcript.scrollTop = transcript.scrollHeight;
-    updateScrollLatestButton();
   };
 
   const setProgress = (text = "", kind = "") => {
@@ -3834,7 +3845,10 @@ export function createChatPanel({
       })
       .catch((error) => {
         if (closed) return;
-        if (!["NOT_PAIRED", "BRIDGE_UNREACHABLE"].includes(error.code)) {
+        const connectionSetupFailure =
+          ["NOT_PAIRED", "BRIDGE_UNREACHABLE"].includes(error.code) ||
+          [401, 409].includes(error.status);
+        if (!connectionSetupFailure) {
           modelsError = "Models unavailable";
           renderControls();
           setProgress(error.message, "error");

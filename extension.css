@@ -779,6 +779,10 @@
   touch-action: none;
 }
 
+.roam-codex-chat-resize[hidden] {
+  display: none;
+}
+
 .roam-codex-chat-resize::before {
   background: rgba(92, 112, 128, 0.3);
   border-radius: 2px;

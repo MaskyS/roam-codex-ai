@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { EventEmitter, once } from "node:events";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import {
@@ -10,7 +10,9 @@ import {
   DEFAULT_RUNTIME_CWD,
   createBridgeServer,
   createPairingSession,
+  ensureBridgeToken,
   ensureRuntimeGraphAccess,
+  legacyBridgeTokenPaths,
   createProgressNormalizer,
   isAllowedOrigin,
   runtimeAppServerArgs,
@@ -22,6 +24,67 @@ import {
   turnFailureError,
   validateRuntimeInstructionSources,
 } from "../bridge.mjs";
+import {
+  SERVICE_RUNTIME_FILES,
+  installServiceRuntime,
+  plistXml,
+} from "../bin.mjs";
+
+test("the LaunchAgent runs a private stable copy instead of the npx cache", async (t) => {
+  const root = resolve(
+    tmpdir(),
+    `roam-better-ai-service-install-${process.pid}-${Date.now()}`,
+  );
+  const sourceRoot = resolve(root, ".npm", "_npx", "cache", "package");
+  const runtimeHome = resolve(root, ".roam-better-ai");
+  await mkdir(sourceRoot, { recursive: true });
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  for (const filename of SERVICE_RUNTIME_FILES) {
+    await writeFile(resolve(sourceRoot, filename), `fixture:${filename}\n`);
+  }
+
+  const installed = await installServiceRuntime({
+    sourceRoot,
+    runtimeHome,
+    version: "9.8.7",
+  });
+  assert.equal(
+    installed.installPath,
+    resolve(runtimeHome, "app", "9.8.7"),
+  );
+  assert.equal(
+    installed.servicePath,
+    resolve(runtimeHome, "app", "9.8.7", "bin.mjs"),
+  );
+  assert.doesNotMatch(installed.servicePath, /\.npm\/_npx/);
+  for (const filename of SERVICE_RUNTIME_FILES) {
+    assert.equal(
+      await readFile(resolve(installed.installPath, filename), "utf8"),
+      `fixture:${filename}\n`,
+    );
+  }
+  assert.equal(
+    (await stat(resolve(installed.installPath, "bin.mjs"))).mode & 0o777,
+    0o700,
+  );
+  assert.equal(
+    (await stat(resolve(installed.installPath, "bridge.mjs"))).mode & 0o777,
+    0o600,
+  );
+
+  const plist = plistXml({
+    nodeBin: "/stable/node",
+    servicePath: installed.servicePath,
+    pathValue: "/stable/bin:/usr/bin",
+  });
+  assert.match(plist, /<string>\/stable\/node<\/string>/);
+  assert.match(
+    plist,
+    /<string>.*\.roam-better-ai\/app\/9\.8\.7\/bin\.mjs<\/string>/,
+  );
+  assert.doesNotMatch(plist, /\.npm\/_npx/);
+});
 
 test("runtime threads use a stable per-graph working directory", () => {
   assert.notEqual(DEFAULT_RUNTIME_CWD, process.cwd());
@@ -37,6 +100,65 @@ test("runtime threads use a stable per-graph working directory", () => {
     runtimeCwdForGraph("graph").toLowerCase(),
   );
   assert.ok(runtimeCwdForGraph("🧠".repeat(200)).split("/").at(-1).length < 100);
+});
+
+test("the bridge token lives outside the versioned install and migrates once", async (t) => {
+  const home = resolve(tmpdir(), `roam-token-home-${process.pid}`);
+  const tokenPath = resolve(home, "bridge-token");
+  const legacyPath = resolve(home, "app", "0.9.1", ".dev", "bridge-token");
+  t.after(() => rm(home, { recursive: true, force: true }));
+  await rm(home, { recursive: true, force: true });
+
+  // A packaged 0.9.1 install paired and kept its token beside the copy.
+  await mkdir(dirname(legacyPath), { recursive: true });
+  await writeFile(legacyPath, "already-paired-token\n");
+
+  const migrated = await ensureBridgeToken(tokenPath, {
+    legacyTokenPaths: await legacyBridgeTokenPaths({
+      root: "/nonexistent",
+      runtimeHome: home,
+    }),
+  });
+  assert.equal(migrated, "already-paired-token");
+  assert.equal(
+    (await readFile(tokenPath, "utf8")).trim(),
+    "already-paired-token",
+  );
+
+  // The stored token wins on every later start, upgrade or not.
+  assert.equal(
+    await ensureBridgeToken(tokenPath, { legacyTokenPaths: [] }),
+    "already-paired-token",
+  );
+
+  // A clean machine still gets a fresh secret.
+  const freshHome = resolve(tmpdir(), `roam-token-fresh-${process.pid}`);
+  const freshPath = resolve(freshHome, "bridge-token");
+  t.after(() => rm(freshHome, { recursive: true, force: true }));
+  const fresh = await ensureBridgeToken(freshPath, { legacyTokenPaths: [] });
+  assert.match(fresh, /^[A-Za-z0-9_-]{20,}$/);
+  assert.notEqual(fresh, "already-paired-token");
+});
+
+test("legacy token candidates prefer the newest packaged install", async (t) => {
+  const home = resolve(tmpdir(), `roam-token-order-${process.pid}`);
+  t.after(() => rm(home, { recursive: true, force: true }));
+  await mkdir(resolve(home, "app", "0.9.0"), { recursive: true });
+  await mkdir(resolve(home, "app", "0.9.1"), { recursive: true });
+
+  const candidates = await legacyBridgeTokenPaths({
+    root: "/checkout",
+    runtimeHome: home,
+  });
+  assert.equal(candidates[0], resolve("/checkout", ".dev", "bridge-token"));
+  assert.equal(
+    candidates[1],
+    resolve(home, "app", "0.9.1", ".dev", "bridge-token"),
+  );
+  assert.equal(
+    candidates[2],
+    resolve(home, "app", "0.9.0", ".dev", "bridge-token"),
+  );
 });
 
 test("pairing codes expire, bound guesses, and succeed only once", () => {

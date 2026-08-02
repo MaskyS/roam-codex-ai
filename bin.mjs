@@ -1,11 +1,20 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  copyFile,
+  mkdir,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
+  BRIDGE_VERSION,
   PAIRING_CODE_PATH,
   RUNTIME_HOME,
   readBridgeConfig,
@@ -16,6 +25,14 @@ import {
 const execFileAsync = promisify(execFile);
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const SERVICE_LABEL = "com.roam-better-ai.bridge";
+export const SERVICE_INSTALL_ROOT = resolve(RUNTIME_HOME, "app");
+export const SERVICE_RUNTIME_FILES = Object.freeze([
+  "bin.mjs",
+  "bridge.mjs",
+  "package.json",
+  "runtime-agent.md",
+  "runtime-work-agent.md",
+]);
 const PLIST_PATH = resolve(
   homedir(),
   "Library",
@@ -46,7 +63,7 @@ async function launchctl(args) {
   }
 }
 
-function plistXml({ nodeBin, servicePath, pathValue }) {
+export function plistXml({ nodeBin, servicePath, pathValue }) {
   const escape = (value) =>
     String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;");
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -73,6 +90,32 @@ function plistXml({ nodeBin, servicePath, pathValue }) {
 `;
 }
 
+export function serviceInstallPath({
+  runtimeHome = RUNTIME_HOME,
+  version = BRIDGE_VERSION,
+} = {}) {
+  return resolve(runtimeHome, "app", version);
+}
+
+export async function installServiceRuntime({
+  sourceRoot = ROOT,
+  runtimeHome = RUNTIME_HOME,
+  version = BRIDGE_VERSION,
+} = {}) {
+  const installPath = serviceInstallPath({ runtimeHome, version });
+  await mkdir(installPath, { recursive: true, mode: 0o700 });
+  await chmod(installPath, 0o700);
+  for (const filename of SERVICE_RUNTIME_FILES) {
+    const destination = resolve(installPath, filename);
+    await copyFile(resolve(sourceRoot, filename), destination);
+    await chmod(destination, filename === "bin.mjs" ? 0o700 : 0o600);
+  }
+  return {
+    installPath,
+    servicePath: resolve(installPath, "bin.mjs"),
+  };
+}
+
 async function setup() {
   const codexBin = await which("codex");
   if (!codexBin) {
@@ -84,7 +127,6 @@ async function setup() {
     return;
   }
   const nodeBin = process.execPath;
-  const servicePath = resolve(ROOT, "bin.mjs");
 
   const config = await readBridgeConfig();
   await writeBridgeConfig({ ...config, codexBin, nodeBin });
@@ -98,6 +140,8 @@ async function setup() {
     say();
     return;
   }
+
+  const { servicePath } = await installServiceRuntime();
 
   const pathValue = [
     dirname(nodeBin),
@@ -180,11 +224,11 @@ async function stop() {
 async function uninstall() {
   await stop();
   await rm(PLIST_PATH, { force: true });
+  await rm(SERVICE_INSTALL_ROOT, { recursive: true, force: true });
   say("Background service removed.");
-  say(`Configuration and logs remain in ${RUNTIME_HOME}`);
+  say(`Configuration and logs remain in ${RUNTIME_HOME}.`);
 }
 
-const command = process.argv[2] || "setup";
 const commands = {
   setup,
   run: async () => {
@@ -206,11 +250,28 @@ const commands = {
   },
 };
 
-const handler = commands[command];
-if (!handler) {
-  say(`Unknown command: ${command}`);
-  await commands.help();
-  process.exitCode = 1;
-} else {
+export async function runCli(command = process.argv[2] || "setup") {
+  const handler = commands[command];
+  if (!handler) {
+    say(`Unknown command: ${command}`);
+    await commands.help();
+    process.exitCode = 1;
+    return;
+  }
   await handler();
+}
+
+async function isDirectInvocation() {
+  if (!process.argv[1]) return false;
+  try {
+    return await realpath(process.argv[1]) === await realpath(
+      fileURLToPath(import.meta.url),
+    );
+  } catch {
+    return false;
+  }
+}
+
+if (await isDirectInvocation()) {
+  await runCli();
 }

@@ -117,6 +117,17 @@ Lowercase filesystem-safe graph names retain a readable directory. Other names
 use a bounded readable prefix plus a digest of the exact name so Unicode,
 case-only, and long graph names remain distinct on macOS filesystems.
 
+The bridge bearer token lives at `~/.roam-better-ai/bridge-token`, shared by
+every version. It must never live beside the running copy: installs before
+0.9.2 kept it under the install directory, so each upgrade minted a new token
+and silently unpaired the user. A missing token is adopted once from the older
+locations before a new one is generated.
+
+The CLI copies the files needed by the LaunchAgent to
+`~/.roam-better-ai/app/<bridge-version>/` and writes that stable `bin.mjs` path
+into the plist. The service must never point into `~/.npm/_npx/`; that cache is
+an installation source, not a durable runtime location.
+
 Every `thread/start` and `thread/resume` result is audited. User-global Codex
 guidance under the active `CODEX_HOME` may apply; project instruction sources
 are rejected. This prevents this repository's `AGENTS.md`, project config, and
@@ -206,6 +217,11 @@ Start the bridge in the foreground for development:
 ```bash
 npm start
 ```
+
+To exercise the actual packaged-service path from a checkout, run
+`node bin.mjs setup`. Confirm the plist targets
+`~/.roam-better-ai/app/<bridge-version>/bin.mjs`, then use `node bin.mjs status`
+and a `launchctl kickstart` cycle to verify automatic recovery.
 
 Open the Codex panel, select Pair, and approve the native dialog. If the dialog
 is unavailable, run `node bin.mjs code` and paste that fallback code into the

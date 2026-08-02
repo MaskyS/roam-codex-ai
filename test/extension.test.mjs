@@ -23,6 +23,11 @@ globalThis.window = {
 };
 
 const reactRoots = [];
+const deferredReactCommits = [];
+let deferReactCommits = false;
+const flushReactCommits = () => {
+  for (const commit of deferredReactCommits.splice(0)) commit();
+};
 window.React = {
   createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
 };
@@ -71,8 +76,15 @@ window.ReactDOMClient = {
       unmounted: false,
       render(node) {
         if (this.unmounted) throw new Error("Cannot update an unmounted root.");
-        const rendered = renderNode(node);
-        container.replaceChildren(...(Array.isArray(rendered) ? rendered : [rendered]).filter(Boolean));
+        const commit = () => {
+          if (this.unmounted) return;
+          const rendered = renderNode(node);
+          container.replaceChildren(
+            ...(Array.isArray(rendered) ? rendered : [rendered]).filter(Boolean),
+          );
+        };
+        if (deferReactCommits) deferredReactCommits.push(commit);
+        else commit();
       },
       unmount() {
         this.unmounted = true;
@@ -92,6 +104,10 @@ test("only a visible connection card opts into flex layout", () => {
   assert.match(
     css,
     /\.roam-codex-connection-card:not\(\[hidden\]\)\s*\{\s*display:\s*flex;\s*\}/,
+  );
+  assert.match(
+    css,
+    /\.roam-codex-chat-resize\[hidden\]\s*\{\s*display:\s*none;\s*\}/,
   );
 });
 
@@ -418,6 +434,47 @@ function panelElements(controller) {
   visit(controller.controlsElement);
   return elements;
 }
+
+test("chat panel tolerates React committing its roots after render returns", async () => {
+  const doc = createFakePanelDocument();
+  let controller;
+  deferReactCommits = true;
+  try {
+    controller = createChatPanel({
+      doc,
+      api: {},
+      storage: { getItem: () => null, setItem: () => {} },
+      rootBlockUid: "root123",
+      setTimeoutImpl: () => 1,
+      clearTimeoutImpl: () => {},
+      requestModelsImpl: async () => [],
+      requestMessagesImpl: async () => [],
+      requestHistoryImpl: async () => ({
+        threads: [],
+        missingThreadIds: [],
+        unavailableThreadIds: [],
+      }),
+    });
+    assert.equal(
+      panelElements(controller).some(
+        (element) => element.className === "roam-codex-chat-transcript",
+      ),
+      false,
+    );
+    deferReactCommits = false;
+    flushReactCommits();
+    assert.equal(
+      panelElements(controller).some(
+        (element) => element.className === "roam-codex-chat-transcript",
+      ),
+      true,
+    );
+  } finally {
+    deferReactCommits = false;
+    flushReactCommits();
+    await controller?.close();
+  }
+});
 
 test("chat state keeps versioned conversation records without a parallel draft", () => {
   const values = new Map();
@@ -2996,6 +3053,55 @@ test("an unpaired panel offers codeless pairing and keeps errors quiet", async (
   await controller.close();
 });
 
+test("an invalid bridge token stays in the connection card, not the transcript", async () => {
+  const doc = createFakePanelDocument();
+  const controller = createChatPanel({
+    doc,
+    api: {},
+    storage: {
+      getItem: () => "stale-token",
+      setItem: () => {},
+    },
+    rootBlockUid: "root123",
+    setIntervalImpl: () => 1,
+    clearIntervalImpl: () => {},
+    setTimeoutImpl: () => 1,
+    clearTimeoutImpl: () => {},
+    probeConnectionImpl: async () => ({ state: "unpaired", graph: "maskys" }),
+    requestModelsImpl: async () => {
+      const error = new Error("Invalid bridge token.");
+      error.status = 401;
+      throw error;
+    },
+    requestMessagesImpl: async () => [],
+    requestHistoryImpl: async () => ({
+      threads: [],
+      missingThreadIds: [],
+      unavailableThreadIds: [],
+    }),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const elements = panelElements(controller);
+  const card = elements.find(
+    (element) => element.className === "roam-codex-connection-card",
+  );
+  const transcriptWrap = elements.find(
+    (element) => element.className === "roam-codex-chat-transcript-wrap",
+  );
+  const transcriptHandle = elements.find(
+    (element) => element.className === "roam-codex-chat-resize",
+  );
+  const progressText = elements.find(
+    (element) => element.className === "roam-codex-chat-progress-text",
+  );
+  assert.equal(card.hidden, false);
+  assert.equal(progressText.textContent || "", "");
+  assert.equal(transcriptWrap.hidden, true);
+  assert.equal(transcriptHandle.hidden, true);
+  await controller.close();
+});
+
 test("fallback pairing focuses the code and submits it with Enter", async () => {
   const doc = createFakePanelDocument();
   const pairCalls = [];
@@ -3176,7 +3282,9 @@ test("the connection card explains failures and clears once connected", async ()
     doc,
     api: {},
     storage: {
-      getItem: () => null,
+      getItem: (key) => key === "roam-codex-lab.chat-transcript-height.maskys"
+        ? "640"
+        : null,
       setItem: () => {},
     },
     rootBlockUid: "root123",
@@ -3205,7 +3313,15 @@ test("the connection card explains failures and clears once connected", async ()
   let card = elements.find(
     (element) => element.className === "roam-codex-connection-card",
   );
+  const transcriptWrap = elements.find(
+    (element) => element.className === "roam-codex-chat-transcript-wrap",
+  );
+  const transcriptHandle = elements.find(
+    (element) => element.className === "roam-codex-chat-resize",
+  );
   assert.equal(card.hidden, false);
+  assert.equal(transcriptWrap.hidden, true);
+  assert.equal(transcriptHandle.hidden, true);
   assert.equal(
     card.children.some(
       (child) => child.textContent === "The Codex bridge isn't running",
@@ -3296,7 +3412,9 @@ test("the model picker clears a stale catalog error after reconnecting", async (
 });
 
 test("the transcript resize handle drags, clamps, and persists its height", async () => {
-  const values = new Map();
+  const values = new Map([
+    ["roam-codex-lab.chat-transcript-height.maskys", "640"],
+  ]);
   const doc = createFakePanelDocument();
   const controller = createChatPanel({
     doc,
@@ -3306,6 +3424,12 @@ test("the transcript resize handle drags, clamps, and persists its height", asyn
       setItem: (key, value) => values.set(key, value),
     },
     rootBlockUid: "root123",
+    readPromptImpl: async () => ({ uid: "root123", text: "Hello" }),
+    requestChatImpl: async () => ({
+      threadId: "thread_resize_123",
+      turnId: "turn-resize",
+      reply: "Hello back",
+    }),
     requestModelsImpl: async () => [],
     requestMessagesImpl: async () => [],
     requestHistoryImpl: async () => ({
@@ -3318,13 +3442,21 @@ test("the transcript resize handle drags, clamps, and persists its height", asyn
   const handle = panelElements(controller).find(
     (element) => element.className === "roam-codex-chat-resize",
   );
-  const transcript = panelElements(controller).find(
+  let transcript = panelElements(controller).find(
     (element) => element.className === "roam-codex-chat-transcript",
   );
   const transcriptWrap = panelElements(controller).find(
     (element) => element.className === "roam-codex-chat-transcript-wrap",
   );
+  assert.equal(handle.hidden, true);
+  assert.equal(transcriptWrap.hidden, true);
+
+  await controller.send();
+  transcript = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-transcript",
+  );
   assert.equal(handle.hidden, false);
+  assert.equal(transcriptWrap.hidden, false);
   assert.equal(handle.role, "separator");
   assert.equal(transcriptWrap.style.height, "640px");
   assert.equal(transcriptWrap.style.maxHeight, "640px");

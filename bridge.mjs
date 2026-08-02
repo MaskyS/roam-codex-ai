@@ -3,6 +3,7 @@ import {
   appendFile,
   chmod,
   mkdir,
+  readdir,
   readFile,
   writeFile,
 } from "node:fs/promises";
@@ -2333,24 +2334,68 @@ export function createBridgeServer({
   return server;
 }
 
+export const BRIDGE_TOKEN_PATH = resolve(RUNTIME_HOME, "bridge-token");
+export const LEGACY_BRIDGE_TOKEN_PATH = resolve(ROOT, ".dev", "bridge-token");
+
+export async function legacyBridgeTokenPaths({
+  root = ROOT,
+  runtimeHome = RUNTIME_HOME,
+} = {}) {
+  const candidates = [resolve(root, ".dev", "bridge-token")];
+  try {
+    const appRoot = resolve(runtimeHome, "app");
+    const versions = await readdir(appRoot);
+    // Newest install first, so the most recently paired token wins.
+    for (const version of versions.sort().reverse()) {
+      candidates.push(resolve(appRoot, version, ".dev", "bridge-token"));
+    }
+  } catch {
+    // No packaged installs to migrate from.
+  }
+  return candidates;
+}
+
+async function readTokenFile(tokenPath) {
+  try {
+    const existing = (await readFile(tokenPath, "utf8")).trim();
+    return existing || null;
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    return null;
+  }
+}
+
 export async function ensureBridgeToken(
-  tokenPath = resolve(ROOT, ".dev", "bridge-token"),
+  tokenPath = BRIDGE_TOKEN_PATH,
+  { legacyTokenPaths = null } = {},
 ) {
   if (process.env.ROAM_CODEX_BRIDGE_TOKEN) {
     return process.env.ROAM_CODEX_BRIDGE_TOKEN;
   }
 
-  try {
-    const existing = (await readFile(tokenPath, "utf8")).trim();
-    if (existing) {
-      await chmod(tokenPath, 0o600);
-      return existing;
-    }
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
+  const existing = await readTokenFile(tokenPath);
+  if (existing) {
+    await chmod(tokenPath, 0o600);
+    return existing;
   }
 
   await mkdir(dirname(tokenPath), { recursive: true, mode: 0o700 });
+
+  // Installs before 0.9.2 kept the token beside the running copy of the
+  // bridge, so every upgrade minted a new one and forced the user to pair
+  // again. Adopt that token once so upgrades stay silent.
+  const candidates = legacyTokenPaths || (await legacyBridgeTokenPaths());
+  for (const candidate of candidates) {
+    if (candidate === tokenPath) continue;
+    const legacy = await readTokenFile(candidate);
+    if (!legacy) continue;
+    await writeFile(tokenPath, `${legacy}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    return legacy;
+  }
+
   const token = randomBytes(32).toString("base64url");
   await writeFile(tokenPath, `${token}\n`, {
     encoding: "utf8",
