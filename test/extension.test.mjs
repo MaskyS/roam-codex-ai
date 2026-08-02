@@ -38,13 +38,18 @@ window.ReactDOMClient = {
         if (name.startsWith("on") && typeof value === "function") {
           element.addEventListener(name.slice(2).toLowerCase(), value);
         } else if (name === "className") element.className = value;
-        else if (name === "data-state") element.dataset.state = value;
+        else if (name.startsWith("data-")) {
+          const key = name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+          element.dataset[key] = value;
+        }
         else if (name === "disabled") element.disabled = value;
         else element.setAttribute(name, value);
       }
       for (const child of node.children.flat(Infinity)) {
         const rendered = renderNode(child);
-        if (typeof rendered === "string") element.textContent += rendered;
+        if (typeof rendered === "string") {
+          element.textContent = `${element.textContent || ""}${rendered}`;
+        }
         else if (rendered) element.appendChild(rendered);
       }
       return element;

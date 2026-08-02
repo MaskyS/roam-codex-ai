@@ -1702,6 +1702,8 @@ async function waitForChatPanelHost(
 
 function createPanelElement(doc, tag, className, text = "") {
   const element = doc.createElement(tag);
+  // Minimal test documents do not provide this native DOM back-reference.
+  if (!element.ownerDocument) element.ownerDocument = doc;
   if (className) element.className = className;
   if (text) element.textContent = text;
   return element;
@@ -1734,6 +1736,56 @@ function ChatApprovalCards({ approvals, decide }) {
       button(approvalId, state, "reject", "Reject"),
       button(approvalId, state, "accept", "Allow")),
   ));
+}
+function ChatHistory({ items, activeThreadId, error, running, onNew, onSelect }) {
+  const h = window.React.createElement;
+  const item = (className, label, title, props = {}, ...children) => h(
+    "button", {
+      type: "button",
+      className,
+      title,
+      role: "menuitem",
+      disabled: running,
+      ...props,
+    }, ...(children.length ? children : [label]),
+  );
+  const entries = items.length
+    ? items.map((entry) => item(
+      `roam-codex-chat-history-item${entry.active ? " is-active" : ""}`,
+      "",
+      `Resume ${entry.title}`,
+      {
+        key: entry.threadId,
+        "data-thread-id": entry.threadId,
+        "data-availability": entry.availability,
+        "aria-current": entry.active ? "true" : undefined,
+        onClick: () => onSelect(entry.threadId),
+      },
+      h("span", { className: "roam-codex-chat-history-title" }, entry.title),
+      h("span", { className: "roam-codex-chat-history-date" },
+        ["missing", "unavailable"].includes(entry.availability)
+          ? "Unavailable"
+          : conversationDateLabel(entry.updatedAt)),
+    ))
+    : [h("div", {
+      key: "empty",
+      className: "roam-codex-chat-history-empty",
+    }, error || "No previous chats yet.")];
+  return [
+    item(
+      `roam-codex-chat-history-item roam-codex-chat-history-new${
+        activeThreadId ? "" : " is-active"
+      }`,
+      "+ New chat",
+      "Start a new conversation",
+      { key: "new", "aria-current": activeThreadId ? undefined : "true", onClick: onNew },
+    ),
+    ...entries,
+    ...(error && items.length ? [h("div", {
+      key: "error",
+      className: "roam-codex-chat-history-error",
+    }, error)] : []),
+  ];
 }
 export function renderRoamMarkdown(
   element,
@@ -2750,6 +2802,7 @@ export function createChatPanel({
   if (!window.React?.createElement || !createRoot)
     throw new Error("Codex chat requires Roam's React 18 globals.");
   const approvalRoot = createRoot(approvalContainer);
+  const historyRoot = createRoot(historyPopover);
   transcript.appendChild(approvalContainer);
   transcript.appendChild(progress);
   const syncTranscriptStatus = ({ scroll = false } = {}) => {
@@ -3688,73 +3741,15 @@ export function createChatPanel({
   };
 
   const renderHistory = () => {
-    historyPopover.replaceChildren();
-    const newButton = panelButton(
-      doc,
-      "roam-codex-chat-history-item roam-codex-chat-history-new",
-      "+ New chat",
-      "Start a new conversation",
-    );
-    newButton.setAttribute("role", "menuitem");
-    newButton.disabled = running;
-    if (!state.activeThreadId) {
-      newButton.className += " is-active";
-      newButton.setAttribute("aria-current", "true");
-    }
-    newButton.addEventListener("click", beginNewConversation);
-    historyPopover.appendChild(newButton);
-
     const items = historyItems();
-    if (!items.length) {
-      historyPopover.appendChild(createPanelElement(
-        doc,
-        "div",
-        "roam-codex-chat-history-empty",
-        historyError || "No previous chats yet.",
-      ));
-      return;
-    }
-
-    for (const item of items) {
-      const button = panelButton(
-        doc,
-        "roam-codex-chat-history-item",
-        "",
-        `Resume ${item.title}`,
-      );
-      button.setAttribute("role", "menuitem");
-      button.dataset.threadId = item.threadId;
-      button.dataset.availability = item.availability;
-      button.disabled = running;
-      if (item.active) {
-        button.className += " is-active";
-        button.setAttribute("aria-current", "true");
-      }
-      button.appendChild(createPanelElement(
-        doc,
-        "span",
-        "roam-codex-chat-history-title",
-        item.title,
-      ));
-      button.appendChild(createPanelElement(
-        doc,
-        "span",
-        "roam-codex-chat-history-date",
-        ["missing", "unavailable"].includes(item.availability)
-          ? "Unavailable"
-          : conversationDateLabel(item.updatedAt),
-      ));
-      button.addEventListener("click", () => void selectConversation(item.threadId));
-      historyPopover.appendChild(button);
-    }
-    if (historyError) {
-      historyPopover.appendChild(createPanelElement(
-        doc,
-        "div",
-        "roam-codex-chat-history-error",
-        historyError,
-      ));
-    }
+    historyRoot.render(window.React.createElement(ChatHistory, {
+      items,
+      activeThreadId: state.activeThreadId,
+      error: historyError,
+      running,
+      onNew: beginNewConversation,
+      onSelect: (threadId) => void selectConversation(threadId),
+    }));
   };
 
   const loadHistory = async ({ reconcileActive = false } = {}) => {
@@ -4244,6 +4239,7 @@ export function createChatPanel({
     copyFeedbackTimers.clear();
     disposeRenderedMessages();
     approvalRoot.unmount();
+    historyRoot.unmount();
     header.remove();
     panel.remove();
     controls.remove();
