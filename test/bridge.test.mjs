@@ -1403,9 +1403,16 @@ test("an active chat turn accepts a steer through the bridge", async (t) => {
   const emptyResponse = await fetch(`${base}/runs/${runId}/steer`, {
     method: "POST",
     headers,
-    body: JSON.stringify({ message: "   " }),
+    body: JSON.stringify({ graph: "maskys", message: "   " }),
   });
   assert.equal(emptyResponse.status, 400);
+
+  const missingGraphResponse = await fetch(`${base}/runs/${runId}/steer`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ message: "Actually focus on tests" }),
+  });
+  assert.equal(missingGraphResponse.status, 400);
 
   const steerResponse = await fetch(`${base}/runs/${runId}/steer`, {
     method: "POST",
@@ -1572,6 +1579,18 @@ test("bridge enforces bearer auth and graph restriction", async (t) => {
     body: JSON.stringify({ graph: "other", blockUid: "abcdefghi" }),
   });
   assert.equal(wrongGraph.status, 400);
+
+  const missingGraph = await fetch(`${base}/probe`, {
+    method: "POST",
+    headers: {
+      origin: "https://roamresearch.com",
+      authorization: "Bearer secret-token",
+      "content-type": "application/json",
+      "x-roam-graph": "maskys",
+    },
+    body: JSON.stringify({ blockUid: "abcdefghi" }),
+  });
+  assert.equal(missingGraph.status, 400);
 
   const unauthorizedHistory = await fetch(`${base}/threads/summaries`, {
     method: "POST",

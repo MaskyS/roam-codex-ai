@@ -1938,7 +1938,7 @@ export function createBridgeServer({
         return;
       }
 
-      if (body.graph && body.graph !== graph) {
+      if (body?.graph !== graph) {
         sendJson(
           response,
           400,
@@ -2211,7 +2211,7 @@ export function createBridgeServer({
         sendJson(response, status, { error: error.message }, origin);
         return;
       }
-      if (body.graph && body.graph !== graph) {
+      if (body?.graph !== graph) {
         sendJson(
           response,
           400,
@@ -2360,7 +2360,7 @@ export function createBridgeServer({
       sendJson(response, 400, { error: "Invalid Roam block UID." }, origin);
       return;
     }
-    if (body.graph && body.graph !== graph) {
+    if (body?.graph !== graph) {
       sendJson(
         response,
         400,

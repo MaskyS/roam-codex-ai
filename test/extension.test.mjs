@@ -2615,6 +2615,10 @@ test("Send during an active turn steers it instead of starting a new one", async
     { uid: "root123", text: "Steer this way" },
   ];
   const steerCalls = [];
+  let finishSteer;
+  const steer = new Promise((resolve) => {
+    finishSteer = resolve;
+  });
   let chatCalls = 0;
   const doc = createFakePanelDocument();
   const controller = createChatPanel({
@@ -2636,6 +2640,7 @@ test("Send during an active turn steers it instead of starting a new one", async
     },
     steerRequest: async (runId, message) => {
       steerCalls.push({ runId, message });
+      await steer;
       return { ok: true, turnId: "turn-1" };
     },
     requestModelsImpl: async () => [],
@@ -2651,12 +2656,16 @@ test("Send during an active turn steers it instead of starting a new one", async
   await new Promise((resolve) => setTimeout(resolve, 0));
   await new Promise((resolve) => setTimeout(resolve, 0));
 
+  const steering = controller.send();
   await controller.send();
+  await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(steerCalls, [{
     runId: "12345678-1234-1234-1234-123456789abc",
     message: "Steer this way",
   }]);
   assert.equal(chatCalls, 1);
+  finishSteer();
+  await steering;
 
   finishTurn();
   await sending;
@@ -2674,6 +2683,7 @@ test("a rejected steer resends the intact draft once the turn settles", async ()
     { uid: "root123", text: "Steer this way" },
   ];
   const chatMessages = [];
+  const lifecycle = [];
   const doc = createFakePanelDocument();
   const controller = createChatPanel({
     doc,
@@ -2683,9 +2693,18 @@ test("a rejected steer resends the intact draft once the turn settles", async ()
       setItem: () => {},
     },
     rootBlockUid: "root123",
+    scratchPrompt: true,
     setIntervalImpl: () => 1,
     clearIntervalImpl: () => {},
     readPromptImpl: async () => prompts.shift(),
+    clearScratchPromptImpl: async (prompt) => {
+      lifecycle.push(`clear:${prompt.text}`);
+      return true;
+    },
+    restorePromptImpl: async (prompt) => {
+      lifecycle.push(`restore:${prompt.text}`);
+      return true;
+    },
     requestChatImpl: async (message, { onStarted }) => {
       chatMessages.push(message);
       if (chatMessages.length === 1) {
@@ -2716,11 +2735,22 @@ test("a rejected steer resends the intact draft once the turn settles", async ()
 
   const steering = controller.send();
   await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(lifecycle, [
+    "clear:Start here",
+    "clear:Steer this way",
+    "restore:Steer this way",
+  ]);
   finishTurn();
   await sending;
   await steering;
 
   assert.deepEqual(chatMessages, ["Start here", "Steer this way"]);
+  assert.deepEqual(lifecycle, [
+    "clear:Start here",
+    "clear:Steer this way",
+    "restore:Steer this way",
+    "clear:Steer this way",
+  ]);
   await controller.close();
 });
 
@@ -3709,6 +3739,7 @@ test("requestRunSteer posts the message to the authenticated steer endpoint", as
   );
   assert.equal(captured.init.method, "POST");
   assert.equal(captured.init.headers.authorization, "Bearer local-token");
+  assert.equal(captured.init.headers["x-roam-graph"], "maskys");
   assert.deepEqual(JSON.parse(captured.init.body), {
     graph: "maskys",
     message: "Actually focus on tests",

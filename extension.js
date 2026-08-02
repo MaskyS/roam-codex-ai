@@ -689,7 +689,9 @@ export async function requestRunCancellation(runId, {
 
 export async function requestRunSteer(runId, message, {
   fetchImpl = window.fetch.bind(window),
-  token = getToken(),
+  graph = currentGraphName(),
+  bridgeUrl = currentBridgeUrl(),
+  token = getToken({ graph }),
 } = {}) {
   if (!token) {
     throw new Error(
@@ -701,14 +703,15 @@ export async function requestRunSteer(runId, message, {
   }
 
   const response = await fetchImpl(
-    `${BRIDGE_URL}/runs/${encodeURIComponent(runId)}/steer`,
+    `${bridgeUrl}/runs/${encodeURIComponent(runId)}/steer`,
     {
       method: "POST",
       headers: {
         authorization: `Bearer ${token}`,
         "content-type": "application/json",
+        "x-roam-graph": graphHeaderValue(graph),
       },
-      body: JSON.stringify({ graph: GRAPH, message: String(message) }),
+      body: JSON.stringify({ graph, message: String(message) }),
     },
   );
   let result = {};
@@ -2436,6 +2439,7 @@ export function createChatPanel({
   );
   let runId = null;
   let running = false;
+  let steerPending = false;
   let runStartedAt = 0;
   let elapsedIntervalId = null;
   let closed = false;
@@ -3792,7 +3796,7 @@ export function createChatPanel({
   const syncSendButton = () => {
     const steering = running && Boolean(runId);
     sendButton.hidden = false;
-    sendButton.disabled = !modelsReady || (running && !runId);
+    sendButton.disabled = !modelsReady || (running && (!runId || steerPending));
     sendButton.classList?.toggle?.("is-steering", steering);
     const label = sendButton.firstChild;
     if (label && typeof label.nodeValue === "string") {
@@ -3922,7 +3926,16 @@ export function createChatPanel({
 
   const send = async () => {
     if (running) {
-      if (runId) return steerActiveTurn(runId);
+      if (runId && !steerPending) {
+        steerPending = true;
+        syncSendButton();
+        try {
+          return await steerActiveTurn(runId);
+        } finally {
+          steerPending = false;
+          syncSendButton();
+        }
+      }
       return null;
     }
     setRunning(true);
