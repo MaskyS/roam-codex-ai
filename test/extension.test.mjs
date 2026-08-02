@@ -31,6 +31,49 @@ const flushReactCommits = () => {
 window.React = {
   createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
 };
+window.Blueprint = {
+  Core: {
+    Position: {
+      BOTTOM_LEFT: "bottom-left",
+      RIGHT_TOP: "right-top",
+    },
+    Popover({
+      children,
+      content,
+      isOpen,
+      onInteraction,
+      popoverClassName,
+      position,
+    }) {
+      const target = Array.isArray(children) ? children[0] : children;
+      const targetClick = target?.props?.onClick;
+      const enhancedTarget = target && onInteraction
+        ? {
+          ...target,
+          props: {
+            ...target.props,
+            onClick: (event) => {
+              targetClick?.(event);
+              onInteraction(!isOpen, event);
+            },
+          },
+        }
+        : target;
+      const positionedContent = content && {
+        ...content,
+        props: {
+          ...content.props,
+          hidden: !isOpen,
+          "data-popover-position": position,
+        },
+      };
+      if (popoverClassName?.includes("submenu-popover")) {
+        return isOpen ? [enhancedTarget, positionedContent] : enhancedTarget;
+      }
+      return [enhancedTarget, positionedContent];
+    },
+  },
+};
 window.ReactDOM = {};
 window.ReactDOMClient = {
   createRoot(container) {
@@ -523,6 +566,12 @@ function panelElements(controller) {
   visit(controller.element);
   visit(controller.controlsElement);
   return elements;
+}
+
+function pickerMenuRows(menu) {
+  return menu.children.filter(
+    (element) => element.className?.includes?.("roam-codex-chat-picker-item"),
+  );
 }
 
 test("chat panel tolerates React committing its roots after render returns", async () => {
@@ -2744,7 +2793,7 @@ test("chat clears a scratch composer before requesting a reply", async () => {
   );
   assert.equal(pickerButton.textContent, "GPT-5.6-Sol · Low");
   assert.equal(pickerMenu.hidden, true);
-  assert.equal(pickerSubmenu.hidden, true);
+  assert.equal(pickerSubmenu, undefined);
   pickerButton.listeners.click();
   pickerButton = panelElements(controller).find(
     (element) => element.className === "roam-codex-chat-picker-button",
@@ -2756,22 +2805,24 @@ test("chat clears a scratch composer before requesting a reply", async () => {
     (element) => element.className === "roam-codex-chat-picker-submenu",
   );
   assert.equal(pickerMenu.hidden, false);
+  assert.equal(pickerMenu.dataset.popoverPosition, "bottom-left");
   assert.deepEqual(
-    pickerMenu.children.map((row) => row.children?.[0]?.textContent),
+    pickerMenuRows(pickerMenu).map((row) => row.children?.[0]?.textContent),
     ["Model", "Effort", "Access"],
   );
   assert.deepEqual(
-    pickerMenu.children.map((row) => row.children?.[1]?.textContent),
+    pickerMenuRows(pickerMenu).map((row) => row.children?.[1]?.textContent),
     ["GPT-5.6-Sol", "Low", "Auto"],
   );
-  pickerMenu.children[1].listeners.mouseenter();
+  pickerMenuRows(pickerMenu)[1].listeners.mouseenter();
   pickerSubmenu = panelElements(controller).find(
     (element) => element.className === "roam-codex-chat-picker-submenu",
   );
   assert.deepEqual(
-    pickerMenu.children.map((row) => row.children?.[0]?.textContent),
+    pickerMenuRows(pickerMenu).map((row) => row.children?.[0]?.textContent),
     ["Model", "Effort", "Access"],
   );
+  assert.equal(pickerSubmenu.dataset.popoverPosition, "right-top");
   assert.equal(pickerSubmenu.hidden, false);
   assert.deepEqual(
     pickerSubmenu.children.map((option) => option.children?.[0]?.textContent),
@@ -2790,7 +2841,7 @@ test("chat clears a scratch composer before requesting a reply", async () => {
     (element) => element.className === "roam-codex-chat-picker-submenu",
   );
   assert.equal(pickerMenu.hidden, true);
-  assert.equal(pickerSubmenu.hidden, true);
+  assert.equal(pickerSubmenu, undefined);
   assert.equal(chatRequests, 0);
   assert.equal(readChatState({ storage }).activeThreadId, null);
 
@@ -3718,7 +3769,7 @@ test("an invalid bridge token stays in the connection card, not the transcript",
   assert.equal(card.hidden, false);
   assert.equal(progressText.textContent || "", "");
   assert.equal(transcriptWrap.hidden, true);
-  assert.equal(transcriptHandle.hidden, true);
+  assert.equal(transcriptHandle.hidden, false);
   await controller.close();
 });
 
@@ -3942,7 +3993,7 @@ test("the connection card explains failures and clears once connected", async ()
   );
   assert.equal(card.hidden, false);
   assert.equal(transcriptWrap.hidden, true);
-  assert.equal(transcriptHandle.hidden, true);
+  assert.equal(transcriptHandle.hidden, false);
   assert.equal(
     card.children.some(
       (child) => child.textContent === "The Codex bridge isn't running",
@@ -4069,7 +4120,7 @@ test("the transcript resize handle drags, clamps, and persists its height", asyn
   const transcriptWrap = panelElements(controller).find(
     (element) => element.className === "roam-codex-chat-transcript-wrap",
   );
-  assert.equal(handle.hidden, true);
+  assert.equal(handle.hidden, false);
   assert.equal(transcriptWrap.hidden, true);
 
   await controller.send();
@@ -4315,16 +4366,16 @@ test("the picker offers Speed from serviceTiers and sends the chosen tier", asyn
     (element) => element.className === "roam-codex-chat-picker-menu",
   );
   assert.deepEqual(
-    pickerMenu.children.map((row) => row.children?.[0]?.textContent),
+    pickerMenuRows(pickerMenu).map((row) => row.children?.[0]?.textContent),
     ["Model", "Effort", "Speed", "Access"],
   );
-  assert.equal(pickerMenu.children[2].children[1].textContent, "Standard");
-  pickerMenu.children[2].listeners.mouseenter();
+  assert.equal(pickerMenuRows(pickerMenu)[2].children[1].textContent, "Standard");
+  pickerMenuRows(pickerMenu)[2].listeners.mouseenter();
   pickerSubmenu = panelElements(controller).find(
     (element) => element.className === "roam-codex-chat-picker-submenu",
   );
   assert.deepEqual(
-    pickerMenu.children.map((row) => row.children?.[0]?.textContent),
+    pickerMenuRows(pickerMenu).map((row) => row.children?.[0]?.textContent),
     ["Model", "Effort", "Speed", "Access"],
   );
   assert.deepEqual(
@@ -4342,7 +4393,7 @@ test("the picker offers Speed from serviceTiers and sends the chosen tier", asyn
     (element) => element.className === "roam-codex-chat-picker-submenu",
   );
   assert.equal(pickerMenu.hidden, true);
-  assert.equal(pickerSubmenu.hidden, true);
+  assert.equal(pickerSubmenu, undefined);
   assert.equal(pickerButton.textContent, "GPT-5.6-Sol · Low");
   assert.equal(pickerButton.dataset.speed, "fast");
 
@@ -4410,11 +4461,11 @@ test("the Tools picker reads and persists MCP consent through extension settings
     (element) => element.className === "roam-codex-chat-picker-menu",
   );
   assert.deepEqual(
-    openToolsMenu.children.map((row) => row.children?.[0]?.textContent),
+    pickerMenuRows(openToolsMenu).map((row) => row.children?.[0]?.textContent),
     ["Model", "Effort", "Access", "Tools"],
   );
-  assert.equal(openToolsMenu.children[3].children[1].textContent, "Roam + 1");
-  openToolsMenu.children[3].listeners.mouseenter();
+  assert.equal(pickerMenuRows(openToolsMenu)[3].children[1].textContent, "Roam + 1");
+  pickerMenuRows(openToolsMenu)[3].listeners.mouseenter();
   const openToolsSubmenu = panelElements(controller).find(
     (element) => element.className === "roam-codex-chat-picker-submenu",
   );
@@ -4509,7 +4560,7 @@ test("Manual access shows Allow and Reject before a Roam write continues", async
   const openAccessMenu = panelElements(controller).find(
     (element) => element.className === "roam-codex-chat-picker-menu",
   );
-  const accessRow = openAccessMenu.children.at(-1);
+  const accessRow = pickerMenuRows(openAccessMenu).at(-1);
   assert.equal(accessRow.children[0].textContent, "Access");
   accessRow.listeners.mouseenter();
   const openAccessSubmenu = panelElements(controller).find(

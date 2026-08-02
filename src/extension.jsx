@@ -2857,7 +2857,7 @@ export function createChatPanel({
   transcriptHandle.setAttribute("role", "separator");
   transcriptHandle.setAttribute("aria-orientation", "horizontal");
   transcriptHandle.setAttribute("aria-label", "Resize the conversation area");
-  transcriptHandle.hidden = true;
+  transcriptHandle.hidden = false;
   body.appendChild(transcriptHandle);
 
   const createRoot = window.ReactDOMClient?.createRoot;
@@ -3219,7 +3219,7 @@ export function createChatPanel({
       approvalCards.size > 0 ||
       Boolean(progressState.text || progressState.running);
     transcriptWrap.hidden = !hasTranscriptContent;
-    transcriptHandle.hidden = !hasTranscriptContent;
+    transcriptHandle.hidden = false;
     transcriptRoot.render(window.React.createElement(ChatTranscript, {
       messages,
       approvals: [...approvalCards.values()],
@@ -3491,10 +3491,10 @@ export function createChatPanel({
       shortcutIsMac: sendShortcutIsMac,
       levelLabel: effortLabel,
       actions: {
-        togglePicker: () => {
+        togglePicker: (nextOpen) => {
           if (running || !modelsReady) return;
-          pickerOpen = !pickerOpen;
-          pickerLevel = null;
+          pickerOpen = typeof nextOpen === "boolean" ? nextOpen : !pickerOpen;
+          if (!pickerOpen) pickerLevel = null;
           renderControls();
         },
         openPickerLevel: (level) => {
@@ -4220,7 +4220,14 @@ export function createChatPanel({
 
   const handleDocumentClick = (event) => {
     if (historyOpen && !header.contains?.(event.target)) closeHistory();
-    if (pickerOpen && !controls.contains?.(event.target)) closePicker();
+    const inPickerPortal = event.target?.closest?.(
+      ".roam-codex-chat-picker-portal",
+    );
+    if (
+      pickerOpen &&
+      !controls.contains?.(event.target) &&
+      !inPickerPortal
+    ) closePicker();
   };
 
   const close = () => {

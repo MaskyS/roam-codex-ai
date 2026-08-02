@@ -408,32 +408,53 @@ function ChatPickerOption({ option, onPick }) {
   );
 }
 
+const PICKER_POPOVER_MODIFIERS = {
+  flip: { enabled: true },
+  preventOverflow: {
+    boundariesElement: "viewport",
+    padding: 8,
+  },
+};
+
 function ChatPicker({ picker, levelLabel, onToggle, onOpenLevel, onPick }) {
+  const Blueprint = globalThis.window?.Blueprint?.Core;
+  if (!Blueprint?.Popover) {
+    throw new Error("Codex chat requires Roam's Blueprint globals.");
+  }
+  const { Popover, Position } = Blueprint;
   const openLevel = (level) => onOpenLevel(level);
-  return (
-    <div className="roam-codex-chat-picker">
-      <button
-        type="button"
-        className="roam-codex-chat-picker-button"
-        title="Choose the model, reasoning effort, speed, and access"
-        aria-label="Model, effort, speed, and access"
-        aria-haspopup="menu"
-        aria-expanded={String(picker.open)}
-        data-speed={picker.speed}
-        disabled={picker.disabled}
-        onClick={onToggle}
-      >
-        {picker.label}
-      </button>
-      <div
-        className="roam-codex-chat-picker-menu"
-        role="menu"
-        aria-label="Model, effort, speed, and access options"
-        hidden={!picker.open}
-      >
-        {picker.rows.map((row) => (
+  const submenu = (row) => (
+    <div
+      className="roam-codex-chat-picker-submenu"
+      role="menu"
+      aria-label={`${levelLabel(row.level)} options`}
+    >
+      {picker.options.map((option) => (
+        <ChatPickerOption key={option.id} option={option} onPick={onPick} />
+      ))}
+    </div>
+  );
+  const menu = (
+    <div
+      className="roam-codex-chat-picker-menu"
+      role="menu"
+      aria-label="Model, effort, speed, and access options"
+    >
+      {picker.rows.map((row) => (
+        <Popover
+          key={row.level}
+          autoFocus={false}
+          content={submenu(row)}
+          isOpen={picker.open && row.level === picker.level}
+          minimal={true}
+          modifiers={PICKER_POPOVER_MODIFIERS}
+          popoverClassName="roam-codex-chat-picker-popover roam-codex-chat-picker-submenu-popover"
+          portalClassName="roam-codex-chat-picker-portal"
+          position={Position.RIGHT_TOP}
+          transitionDuration={100}
+          usePortal={true}
+        >
           <button
-            key={row.level}
             type="button"
             className={`roam-codex-chat-picker-item${
               row.level === picker.level ? " is-open" : ""
@@ -461,20 +482,40 @@ function ChatPicker({ picker, levelLabel, onToggle, onOpenLevel, onPick }) {
               ›
             </span>
           </button>
-        ))}
-      </div>
-      <div
-        className="roam-codex-chat-picker-submenu"
-        role="menu"
-        aria-label={picker.level
-          ? `${levelLabel(picker.level)} options`
-          : undefined}
-        hidden={!picker.level}
+        </Popover>
+      ))}
+    </div>
+  );
+  return (
+    <div className="roam-codex-chat-picker">
+      <Popover
+        autoFocus={false}
+        content={menu}
+        isOpen={picker.open}
+        minimal={true}
+        modifiers={PICKER_POPOVER_MODIFIERS}
+        onInteraction={(nextOpen) => {
+          if (Boolean(nextOpen) !== picker.open) onToggle(Boolean(nextOpen));
+        }}
+        popoverClassName="roam-codex-chat-picker-popover"
+        portalClassName="roam-codex-chat-picker-portal"
+        position={Position.BOTTOM_LEFT}
+        transitionDuration={100}
+        usePortal={true}
       >
-        {picker.options.map((option) => (
-          <ChatPickerOption key={option.id} option={option} onPick={onPick} />
-        ))}
-      </div>
+        <button
+          type="button"
+          className="roam-codex-chat-picker-button"
+          title="Choose the model, reasoning effort, speed, and access"
+          aria-label="Model, effort, speed, and access"
+          aria-haspopup="menu"
+          aria-expanded={String(picker.open)}
+          data-speed={picker.speed}
+          disabled={picker.disabled}
+        >
+          {picker.label}
+        </button>
+      </Popover>
     </div>
   );
 }
