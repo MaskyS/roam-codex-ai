@@ -36,6 +36,7 @@ const AGENT_GUIDELINES_PAGE_TITLE = "roam/agent guidelines";
 const MAX_GRAPH_GUIDELINES_LENGTH = 20_000;
 const CHAT_TRANSCRIPT_HEIGHT_KEY_PREFIX = "roam-codex-lab.chat-transcript-height";
 const CHAT_TRANSCRIPT_MIN_HEIGHT = 140;
+const CHAT_TRANSCRIPT_DEFAULT_HEIGHT = 320;
 const CHAT_TRANSCRIPT_MAX_HEIGHT = 640;
 const CHAT_SCROLL_BOTTOM_THRESHOLD = 24;
 const CHAT_ACCESS_MODES = new Set(["auto", "read-only", "manual"]);
@@ -2857,7 +2858,7 @@ export function createChatPanel({
   transcriptHandle.setAttribute("role", "separator");
   transcriptHandle.setAttribute("aria-orientation", "horizontal");
   transcriptHandle.setAttribute("aria-label", "Resize the conversation area");
-  transcriptHandle.hidden = false;
+  transcriptHandle.hidden = true;
   body.appendChild(transcriptHandle);
 
   const createRoot = window.ReactDOMClient?.createRoot;
@@ -2892,7 +2893,7 @@ export function createChatPanel({
     }
   };
   let transcriptHeight = readStoredTranscriptHeight() ??
-    CHAT_TRANSCRIPT_MAX_HEIGHT;
+    CHAT_TRANSCRIPT_DEFAULT_HEIGHT;
   applyTranscriptHeight(transcriptHeight);
 
   let transcriptResize = null;
@@ -2919,12 +2920,15 @@ export function createChatPanel({
   };
   transcriptHandle.addEventListener("pointerdown", (event) => {
     if (!Number.isFinite(event?.clientY)) return;
-    const measured = transcript?.getBoundingClientRect?.()?.height;
+    const measured = transcriptWrap?.getBoundingClientRect?.()?.height;
+    const styled = Number.parseFloat(transcriptWrap.style?.height);
     transcriptResize = {
       startY: event.clientY,
       startHeight: Number.isFinite(measured) && measured > 0
         ? measured
-        : transcriptHeight ?? 300,
+        : Number.isFinite(styled) && styled > 0
+          ? styled
+          : transcriptHeight,
     };
     doc.addEventListener?.("pointermove", handleTranscriptResizeMove, true);
     doc.addEventListener?.("pointerup", stopTranscriptResize, true);
@@ -3215,11 +3219,9 @@ export function createChatPanel({
 
   const renderMessages = ({ scroll = true } = {}) => {
     if (closed) return;
-    const hasTranscriptContent = messages.length > 0 ||
-      approvalCards.size > 0 ||
-      Boolean(progressState.text || progressState.running);
-    transcriptWrap.hidden = !hasTranscriptContent;
-    transcriptHandle.hidden = false;
+    const conversationAreaAvailable = connection.state === "connected";
+    transcriptWrap.hidden = !conversationAreaAvailable;
+    transcriptHandle.hidden = !conversationAreaAvailable;
     transcriptRoot.render(window.React.createElement(ChatTranscript, {
       messages,
       approvals: [...approvalCards.values()],
@@ -4407,6 +4409,7 @@ export function createChatPanel({
     if (stateChanged) connectionNote = "";
     connection = next;
     renderConnectionCard({ focusInput: stateChanged });
+    renderMessages({ scroll: false });
     if (connection.state === "connected") {
       if (connectionRetryTimer !== null) {
         clearTimeoutImpl?.(connectionRetryTimer);

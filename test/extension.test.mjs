@@ -3769,7 +3769,7 @@ test("an invalid bridge token stays in the connection card, not the transcript",
   assert.equal(card.hidden, false);
   assert.equal(progressText.textContent || "", "");
   assert.equal(transcriptWrap.hidden, true);
-  assert.equal(transcriptHandle.hidden, false);
+  assert.equal(transcriptHandle.hidden, true);
   await controller.close();
 });
 
@@ -3993,7 +3993,7 @@ test("the connection card explains failures and clears once connected", async ()
   );
   assert.equal(card.hidden, false);
   assert.equal(transcriptWrap.hidden, true);
-  assert.equal(transcriptHandle.hidden, false);
+  assert.equal(transcriptHandle.hidden, true);
   assert.equal(
     card.children.some(
       (child) => child.textContent === "The Codex bridge isn't running",
@@ -4109,7 +4109,10 @@ test("the transcript resize handle drags, clamps, and persists its height", asyn
       missingThreadIds: [],
       unavailableThreadIds: [],
     }),
+    probeConnectionImpl: async () => ({ state: "connected", graph: "maskys" }),
+    authRequest: async () => ({ auth: "authenticated", method: "chatgpt" }),
   });
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
   const handle = panelElements(controller).find(
     (element) => element.className === "roam-codex-chat-resize",
@@ -4121,19 +4124,8 @@ test("the transcript resize handle drags, clamps, and persists its height", asyn
     (element) => element.className === "roam-codex-chat-transcript-wrap",
   );
   assert.equal(handle.hidden, false);
-  assert.equal(transcriptWrap.hidden, true);
-
-  await controller.send();
-  transcript = panelElements(controller).find(
-    (element) => element.className === "roam-codex-chat-transcript",
-  );
-  assert.equal(handle.hidden, false);
   assert.equal(transcriptWrap.hidden, false);
-  assert.equal(handle.role, "separator");
   assert.equal(transcriptWrap.style.height, "640px");
-  assert.equal(transcriptWrap.style.maxHeight, "640px");
-  assert.equal(transcript.style.height, "640px");
-  assert.equal(transcript.style.maxHeight, "640px");
 
   handle.listeners.pointerdown({ clientY: 100, preventDefault() {} });
   doc.listeners.pointermove({ clientY: -180, preventDefault() {} });
@@ -4143,6 +4135,18 @@ test("the transcript resize handle drags, clamps, and persists its height", asyn
     values.get("roam-codex-lab.chat-transcript-height.maskys"),
     "360",
   );
+
+  await controller.send();
+  transcript = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-transcript",
+  );
+  assert.equal(handle.hidden, false);
+  assert.equal(transcriptWrap.hidden, false);
+  assert.equal(handle.role, "separator");
+  assert.equal(transcriptWrap.style.height, "360px");
+  assert.equal(transcriptWrap.style.maxHeight, "360px");
+  assert.equal(transcript.style.height, "360px");
+  assert.equal(transcript.style.maxHeight, "360px");
 
   handle.listeners.pointerdown({ clientY: 0, preventDefault() {} });
   doc.listeners.pointermove({ clientY: 10_000, preventDefault() {} });
