@@ -5,9 +5,6 @@ Chat in the right sidebar, ask Codex to read or change the active graph, or run
 a focused block as a direct graph task. Conversations stay attached to the
 graph while Codex runs locally through its official App Server.
 
-> **Pre-release:** Roam Depot distribution is not ready yet. The extension is
-> loaded through Developer Mode for now; the bridge installs from npm.
-
 ## What you can do
 
 - Open persistent Codex chat beside any Roam block.
@@ -30,14 +27,17 @@ block`.
 - Roam Research Desktop
 - Node.js 20 or later
 - A signed-in [Codex CLI](https://github.com/openai/codex)
-- Roam Developer Mode while the extension is in beta
 
 The current integration is tested with Codex CLI `0.144.4` and
 `@roam-research/roam-mcp` `0.9.1`.
 
-## Install the current beta
+## Install
 
-### 1. Install the bridge
+### 1. Install Roam Codex
+
+In Roam, open **Settings → Roam Depot**, find **Roam Codex**, and install it.
+
+### 2. Install the bridge
 
 The bridge is a small local program that connects Roam to the Codex App Server.
 Run this once in a terminal:
@@ -57,22 +57,6 @@ If the Codex CLI is missing, the command tells you how to install it:
 ```bash
 npm install -g @openai/codex && codex login
 ```
-
-### 2. Load the developer extension
-
-Clone this repository, then in Roam open **Settings → Roam Depot**, enable
-Developer Mode, choose **Load extension**, and select the cloned folder.
-
-```bash
-git clone https://github.com/MaskyS/roam-codex-ai.git
-cd roam-codex-ai
-npm ci
-npm run build
-```
-
-The build uses esbuild only to turn the extension's JSX source into the
-`extension.js` file loaded by Roam. React itself comes from Roam and is not
-included in the build.
 
 ### 3. Pair Roam with the bridge
 
@@ -202,12 +186,12 @@ offers a **Sign in** button that opens the browser flow.
 Inspect the ignored local trace at `.dev/last-run.jsonl`. It contains runtime
 diagnostics, not the bridge bearer token.
 
-## Remove the beta
+## Remove
 
-Stop the bridge and remove or disable the developer extension in Roam. Roam
-removes extension commands and styles on unload. Device-local tokens, runtime
-profiles, and Codex thread files remain on disk until you explicitly remove
-them.
+Run `npx roam-codex-bridge uninstall`, then remove or disable Roam Codex in
+Roam Depot. Roam removes extension commands and styles on unload. Device-local
+tokens, runtime profiles, and Codex thread files remain on disk until you
+explicitly remove them.
 
 ## Development and project status
 
