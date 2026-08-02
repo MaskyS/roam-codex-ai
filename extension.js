@@ -1469,128 +1469,6 @@ export function stopAllRunningPresentations() {
   for (const stop of [...ACTIVE_PRESENTATIONS.values()]) stop();
 }
 
-function formatComment(comment) {
-  return `**Codex** — ${singleLine(comment.text)}`;
-}
-
-function escapeMarkdownLinkText(value) {
-  return singleLine(value)
-    .replaceAll("\\", "\\\\")
-    .replaceAll("]", "\\]");
-}
-
-function formatSource(source) {
-  const title = escapeMarkdownLinkText(source.title);
-  const url = String(source.url).replaceAll("(", "%28").replaceAll(")", "%29");
-  return `[${title}](${url}) — ${singleLine(source.supports)}`;
-}
-
-function formatSourcesComment(sources) {
-  return [
-    "- **Codex** — Sources",
-    ...sources.map((source) => `  - ${formatSource(source)}`),
-  ].join("\n");
-}
-
-function commentToOpenIndex(comments) {
-  for (let index = comments.length - 1; index >= 0; index -= 1) {
-    if (
-      comments[index].kind === "question" ||
-      comments[index].kind === "warning"
-    ) {
-      return index;
-    }
-  }
-  return comments.length - 1;
-}
-
-export async function applyRunPlan(
-  sourceBlockUid,
-  plan,
-  {
-    api = getRoamApi(),
-  } = {},
-) {
-  if (
-    !plan ||
-    !Array.isArray(plan.edits) ||
-    !Array.isArray(plan.comments) ||
-    !Array.isArray(plan.sources)
-  ) {
-    throw new Error("Bridge returned an invalid edit plan.");
-  }
-
-  const targetUids = new Map([["source", sourceBlockUid]]);
-  const createdUids = [];
-
-  for (const edit of plan.edits) {
-    const parentUid = targetUids.get(edit.parent);
-    if (!parentUid) {
-      throw new Error(`Edit "${edit.id}" has an unknown parent.`);
-    }
-
-    const uid = api.util.generateUID();
-    await api.data.block.create({
-      location: { "parent-uid": parentUid, order: "last" },
-      block: {
-        uid,
-        string: singleLine(edit.text),
-      },
-    });
-    targetUids.set(edit.id, uid);
-    createdUids.push(uid);
-  }
-
-  const sourcesByTarget = new Map();
-  for (const source of plan.sources) {
-    if (!targetUids.has(source.target)) {
-      throw new Error("A Codex source has an unknown target.");
-    }
-    const group = sourcesByTarget.get(source.target) || [];
-    group.push(source);
-    sourcesByTarget.set(source.target, group);
-  }
-
-  const commentUids = [];
-  const sourceCommentUids = [];
-  const openFirstSourceComment = plan.comments.length === 0;
-  let sourceCommentIndex = 0;
-  for (const [target, sources] of sourcesByTarget) {
-    const result = await api.data.block.addComment({
-      "block-uid": targetUids.get(target),
-      "reply-markdown": formatSourcesComment(sources),
-      "open-comment": openFirstSourceComment && sourceCommentIndex === 0,
-    });
-    const uids = result?.uids || [];
-    sourceCommentUids.push(...uids);
-    commentUids.push(...uids);
-    sourceCommentIndex += 1;
-  }
-
-  const openedCommentIndex = commentToOpenIndex(plan.comments);
-  for (const [index, comment] of plan.comments.entries()) {
-    const targetUid = targetUids.get(comment.target);
-    if (!targetUid) {
-      throw new Error("A Codex comment has an unknown target.");
-    }
-
-    const result = await api.data.block.addComment({
-      "block-uid": targetUid,
-      "reply-string": formatComment(comment),
-      "open-comment": index === openedCommentIndex,
-    });
-    commentUids.push(...(result?.uids || []));
-  }
-
-  return {
-    outcome: plan.outcome,
-    research: plan.research,
-    createdUids,
-    sourceCommentUids,
-    commentUids,
-  };
-}
-
 export async function workOnBlock(
   blockUid,
   {
@@ -1615,19 +1493,18 @@ export async function workOnBlock(
   ACTIVE_BLOCK_UIDS.add(blockUid);
   let statusUid;
   let stopPresentation;
-  let applied;
+  let result;
   let failure;
 
   try {
     statusUid = await createRunningStatus(blockUid, { api, storage });
     stopPresentation = startPresentation(statusUid);
-    const run = await request(blockUid, {
+    result = await request(blockUid, {
       onProgress: (progress) => stopPresentation?.update?.(progress),
       onStarted: ({ runId }) => {
         stopPresentation?.setCancelHandler?.(() => cancelRequest(runId));
       },
     });
-    applied = await applyRunPlan(blockUid, run.plan, { api });
   } catch (error) {
     failure = error;
   } finally {
@@ -1647,13 +1524,7 @@ export async function workOnBlock(
   if (failure) {
     if (failure.code === "TURN_INTERRUPTED") {
       notifyImpl("Codex stopped.", "primary");
-      return {
-        outcome: "stopped",
-        research: "not_needed",
-        createdUids: [],
-        sourceCommentUids: [],
-        commentUids: [],
-      };
+      return { outcome: "stopped", reply: "" };
     }
     if (failure.code === "NOT_PAIRED") {
       notifyImpl(
@@ -1667,21 +1538,9 @@ export async function workOnBlock(
     throw failure;
   }
 
-  if (applied.outcome === "applied") {
-    const commentSuffix = applied.commentUids.length
-      ? " Comments are open in the sidebar."
-      : "";
-    const action = applied.sourceCommentUids.length
-      ? "researched and updated"
-      : "updated";
-    notifyImpl(`Codex ${action} the outline.${commentSuffix}`, "success");
-  } else if (applied.outcome === "needs_input") {
-    notifyImpl("Codex needs input in the comments sidebar.", "warning");
-  } else {
-    notifyImpl("Codex left a comment without changing the outline.", "primary");
-  }
-
-  return applied;
+  const reply = typeof result?.reply === "string" ? result.reply.trim() : "";
+  notifyImpl(reply || "Codex finished this block.", "success");
+  return { outcome: "completed", reply };
 }
 
 export function findChatPanelHost(

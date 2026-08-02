@@ -8,13 +8,11 @@ import test from "node:test";
 import {
   AppServerClient,
   DEFAULT_RUNTIME_CWD,
-  buildProbePrompt,
   createBridgeServer,
   createPairingSession,
   ensureRuntimeGraphAccess,
   createProgressNormalizer,
   isAllowedOrigin,
-  parseAndValidatePlan,
   runtimeAppServerArgs,
   runtimeCwdForGraph,
   requestPairingConsent,
@@ -222,182 +220,6 @@ test("tool approvals answer every question with the exact offered label", () => 
   );
 });
 
-test("runtime prompt keeps useful links in the outline and source lists in comments", () => {
-  const prompt = buildProbePrompt({
-    graph: "maskys",
-    blockUid: "abcdefghi",
-  });
-
-  assert.match(prompt, /Include contextual links/);
-  assert.match(prompt, /outline should remain useful with comments closed/);
-  assert.match(prompt, /do not create Sources, Citations, or References blocks/);
-  assert.match(prompt, /renders each targeted source group as a native Roam comment/);
-  assert.doesNotMatch(prompt, /never inline in edit text/);
-});
-
-test("plan parser accepts topologically ordered edits and targeted comments", () => {
-  assert.deepEqual(
-    parseAndValidatePlan(
-      JSON.stringify({
-        outcome: "applied",
-        research: "completed",
-        edits: [
-          { id: "b1", parent: "source", text: "Find the form" },
-          { id: "b2", parent: "b1", text: "Check the deadline" },
-        ],
-        comments: [
-          {
-            target: "b2",
-            kind: "question",
-            text: "Which vehicle is this for?",
-          },
-        ],
-        sources: [
-          {
-            target: "b1",
-            title: "Official form",
-            url: "https://authority.example/form",
-            supports: "The current application form.",
-          },
-        ],
-      }),
-    ),
-    {
-      outcome: "applied",
-      research: "completed",
-      edits: [
-        { id: "b1", parent: "source", text: "Find the form" },
-        { id: "b2", parent: "b1", text: "Check the deadline" },
-      ],
-      comments: [
-        {
-          target: "b2",
-          kind: "question",
-          text: "Which vehicle is this for?",
-        },
-      ],
-      sources: [
-        {
-          target: "b1",
-          title: "Official form",
-          url: "https://authority.example/form",
-          supports: "The current application form.",
-        },
-      ],
-    },
-  );
-});
-
-test("plan parser rejects forward parent references", () => {
-  assert.throws(
-    () =>
-      parseAndValidatePlan(
-        JSON.stringify({
-          outcome: "applied",
-          research: "not_needed",
-          edits: [
-            { id: "b1", parent: "b2", text: "First" },
-            { id: "b2", parent: "source", text: "Second" },
-          ],
-          comments: [],
-          sources: [],
-        }),
-      ),
-    /earlier edit/,
-  );
-});
-
-test("needs-input plans require a question and cannot edit", () => {
-  assert.throws(
-    () =>
-      parseAndValidatePlan(
-        JSON.stringify({
-          outcome: "needs_input",
-          research: "not_needed",
-          edits: [{ id: "b1", parent: "source", text: "Guess" }],
-          comments: [
-            { target: "source", kind: "question", text: "Which one?" },
-          ],
-          sources: [],
-        }),
-      ),
-    /cannot contain edits/,
-  );
-  assert.throws(
-    () =>
-      parseAndValidatePlan(
-        JSON.stringify({
-          outcome: "needs_input",
-          research: "not_needed",
-          edits: [],
-          comments: [
-            { target: "source", kind: "note", text: "More detail needed." },
-          ],
-          sources: [],
-        }),
-      ),
-    /question comment/,
-  );
-});
-
-test("completed research requires valid sources", () => {
-  assert.throws(
-    () =>
-      parseAndValidatePlan(
-        JSON.stringify({
-          outcome: "applied",
-          research: "completed",
-          edits: [{ id: "b1", parent: "source", text: "Current fact" }],
-          comments: [],
-          sources: [],
-        }),
-      ),
-    /must contain a source/,
-  );
-  assert.throws(
-    () =>
-      parseAndValidatePlan(
-        JSON.stringify({
-          outcome: "applied",
-          research: "completed",
-          edits: [{ id: "b1", parent: "source", text: "Current fact" }],
-          comments: [],
-          sources: [
-            {
-              target: "b1",
-              title: "Unsafe",
-              url: "javascript:alert(1)",
-              supports: "Nothing",
-            },
-          ],
-        }),
-      ),
-    /public http\(s\) URL/,
-  );
-});
-
-test("unavailable required research cannot make edits", () => {
-  assert.throws(
-    () =>
-      parseAndValidatePlan(
-        JSON.stringify({
-          outcome: "applied",
-          research: "unavailable",
-          edits: [{ id: "b1", parent: "source", text: "Unverified fact" }],
-          comments: [
-            {
-              target: "source",
-              kind: "warning",
-              text: "Research failed.",
-            },
-          ],
-          sources: [],
-        }),
-      ),
-    /Unavailable research requires no changes/,
-  );
-});
-
 test("origin policy allows Roam and rejects unrelated sites", () => {
   assert.equal(isAllowedOrigin("https://roamresearch.com"), true);
   assert.equal(isAllowedOrigin("roam://maskys"), true);
@@ -437,95 +259,6 @@ test("progress normalizer combines readable summaries and labels tool activity",
     { kind: "summary", text: "Checking context" },
     { kind: "activity", text: "Reading a web source" },
   ]);
-});
-
-test("app-server probe requests concise summaries and forwards only its turn", async () => {
-  const client = new AppServerClient({ runtimeCwd: "/runtime/agent" });
-  const requests = [];
-  const progress = [];
-  client.start = async () => {};
-  client.request = async (method, params) => {
-    requests.push({ method, params });
-    if (method === "thread/start") {
-      return { thread: { id: "thread-test" }, instructionSources: [] };
-    }
-    if (method === "turn/start") {
-      queueMicrotask(() => {
-        client.emit("notification", {
-          method: "item/reasoning/summaryTextDelta",
-          params: {
-            threadId: "other-thread",
-            turnId: "other-turn",
-            itemId: "reason-other",
-            summaryIndex: 0,
-            delta: "Ignore me",
-          },
-        });
-        client.emit("notification", {
-          method: "item/reasoning/summaryTextDelta",
-          params: {
-            threadId: "thread-test",
-            turnId: "turn-test",
-            itemId: "reason-test",
-            summaryIndex: 0,
-            delta: "Reading context",
-          },
-        });
-        client.emit("notification", {
-          method: "item/completed",
-          params: {
-            threadId: "thread-test",
-            turnId: "turn-test",
-            item: {
-              type: "agentMessage",
-              phase: "final_answer",
-              text: JSON.stringify({
-                outcome: "applied",
-                research: "not_needed",
-                edits: [{ id: "b1", parent: "source", text: "Result" }],
-                comments: [],
-                sources: [],
-              }),
-            },
-          },
-        });
-        client.emit("notification", {
-          method: "turn/completed",
-          params: {
-            threadId: "thread-test",
-            turn: { id: "turn-test", status: "completed", items: [] },
-          },
-        });
-      });
-      return { turn: { id: "turn-test" } };
-    }
-    return {};
-  };
-
-  const result = await client.runProbe({
-    graph: "maskys",
-    blockUid: "abcdefghi",
-    onProgress: (event) => progress.push(event),
-  });
-
-  const turnStart = requests.find((request) => request.method === "turn/start");
-  const threadStart = requests.find((request) => request.method === "thread/start");
-  assert.equal(threadStart.params.cwd, "/runtime/agent");
-  assert.equal(threadStart.params.approvalPolicy, "never");
-  assert.equal(turnStart.params.summary, "concise");
-  assert.ok(
-    threadStart.params.config.mcp_servers.roam.enabled_tools.includes(
-      "get_block",
-    ),
-  );
-  assert.equal(
-    threadStart.params.config.mcp_servers.roam.enabled_tools.includes(
-      "update_block",
-    ),
-    false,
-  );
-  assert.deepEqual(progress, [{ kind: "summary", text: "Reading context" }]);
-  assert.equal(result.plan.edits[0].text, "Result");
 });
 
 test("app-server chat starts and resumes a persistent panel conversation", async () => {
@@ -1457,6 +1190,109 @@ test("the consent dialog reads Allow, Deny, and timeouts from osascript", async 
   );
 });
 
+test("a work run is a chat turn with the block prompt and work instructions", async () => {
+  const client = new AppServerClient({ runtimeCwd: "/runtime/agent" });
+  const requests = [];
+  client.start = async () => {};
+  client.request = async (method, params) => {
+    requests.push({ method, params });
+    if (method === "thread/start") {
+      return { thread: { id: "thread-work" }, instructionSources: [] };
+    }
+    if (method === "turn/start") {
+      queueMicrotask(() => {
+        client.emit("notification", {
+          method: "turn/completed",
+          params: {
+            threadId: "thread-work",
+            turn: {
+              id: "turn-work",
+              status: "completed",
+              items: [{
+                type: "agentMessage",
+                phase: "final_answer",
+                text: "Added a comparison beneath the block.",
+              }],
+            },
+          },
+        });
+      });
+      return { turn: { id: "turn-work" } };
+    }
+    return {};
+  };
+
+  const result = await client.runWork({
+    graph: "maskys",
+    blockUid: "abcdefghi",
+  });
+  assert.equal(result.reply, "Added a comparison beneath the block.");
+
+  const threadStart = requests.find((entry) => entry.method === "thread/start");
+  const turnStart = requests.find((entry) => entry.method === "turn/start");
+  assert.equal(threadStart.params.ephemeral, true);
+  assert.equal(threadStart.params.serviceName, "roam_codex_work");
+  assert.match(
+    threadStart.params.developerInstructions,
+    /block-task runtime/,
+  );
+  assert.equal(
+    threadStart.params.config.mcp_servers.roam.enabled_tools.includes(
+      "create_block",
+    ),
+    true,
+  );
+  assert.equal(turnStart.params.outputSchema, undefined);
+  assert.match(turnStart.params.input[0].text, /Work on Roam block UID/);
+  assert.match(turnStart.params.input[0].text, /Codex\/running/);
+
+  await assert.rejects(
+    () => client.runWork({ graph: "maskys", blockUid: "no" }),
+    (error) => error.code === "BLOCK_UID_INVALID",
+  );
+});
+
+test("read-only access keeps write tools away from a work run", async () => {
+  const client = new AppServerClient({ runtimeCwd: "/runtime/agent" });
+  const requests = [];
+  client.start = async () => {};
+  client.request = async (method, params) => {
+    requests.push({ method, params });
+    if (method === "thread/start") {
+      return { thread: { id: "thread-ro" }, instructionSources: [] };
+    }
+    if (method === "turn/start") {
+      queueMicrotask(() => {
+        client.emit("notification", {
+          method: "turn/completed",
+          params: {
+            threadId: "thread-ro",
+            turn: {
+              id: "turn-ro",
+              status: "completed",
+              items: [{ type: "agentMessage", phase: "final_answer", text: "Read only." }],
+            },
+          },
+        });
+      });
+      return { turn: { id: "turn-ro" } };
+    }
+    return {};
+  };
+
+  await client.runWork({
+    graph: "maskys",
+    blockUid: "abcdefghi",
+    accessMode: "read-only",
+  });
+  const threadStart = requests.find((entry) => entry.method === "thread/start");
+  const tools = threadStart.params.config.mcp_servers.roam.enabled_tools;
+  assert.equal(tools.includes("get_block"), true);
+  assert.equal(tools.includes("create_block"), false);
+  assert.equal(tools.includes("delete_block"), false);
+  assert.equal(threadStart.params.approvalPolicy, "never");
+});
+
 test("a failed turn keeps the Codex error classification", async () => {
   const usageLimited = turnFailureError({
     status: "failed",
@@ -1740,20 +1576,14 @@ test("bridge enforces bearer auth and graph restriction", async (t) => {
   const calls = [];
   const client = {
     ready: false,
-    async runProbe({ onProgress, onStarted, ...input }) {
+    async runWork({ onProgress, onStarted, onApproval, ...input }) {
       calls.push(input);
       onProgress({ kind: "activity", text: "Reading the selected block" });
       await onStarted({ threadId: "thr_test", turnId: "turn_test" });
       return {
         threadId: "thr_test",
         turnId: "turn_test",
-        plan: {
-          outcome: "applied",
-          research: "not_needed",
-          edits: [{ id: "b1", parent: "source", text: "Test" }],
-          comments: [],
-          sources: [],
-        },
+        reply: "Added three blocks beneath it.",
       };
     },
   };
@@ -1943,11 +1773,15 @@ test("bridge enforces bearer auth and graph restriction", async (t) => {
     "completed",
   ]);
   assert.equal(events[1].text, "Reading the selected block");
-  assert.equal(events[2].result.plan.edits[0].text, "Test");
-  assert.deepEqual(calls, [{ graph: "maskys", blockUid: "abcdefghi" }]);
+  assert.equal(events[2].result.reply, "Added three blocks beneath it.");
+  assert.deepEqual(calls, [{
+    graph: "maskys",
+    blockUid: "abcdefghi",
+    accessMode: "auto",
+  }]);
   assert.deepEqual(
     traceEntries.map((entry) => entry.event),
-    ["pair.bound", "probe.started", "probe.completed"],
+    ["pair.bound", "work.started", "work.completed"],
   );
 });
 
@@ -1956,7 +1790,7 @@ test("bridge cancellation interrupts the active app-server turn", async (t) => {
   const interruptCalls = [];
   const client = {
     ready: true,
-    async runProbe({ onStarted }) {
+    async runWork({ onStarted }) {
       await onStarted({ threadId: "thread-cancel", turnId: "turn-cancel" });
       return new Promise((_resolve, reject) => {
         rejectProbe = reject;
@@ -2019,6 +1853,6 @@ test("bridge cancellation interrupts the active app-server turn", async (t) => {
   ]);
   assert.deepEqual(
     traceEntries.map((entry) => entry.event),
-    ["probe.started", "probe.cancel.requested", "probe.interrupted"],
+    ["work.started", "work.cancel.requested", "work.interrupted"],
   );
 });
