@@ -20,8 +20,9 @@ const CHAT_PANEL_ID = "roam-codex-chat-panel";
 const CHAT_CONTROLS_ID = "roam-codex-chat-controls";
 const CHAT_PANEL_CLASS = "roam-codex-chat-panel";
 const SIDEBAR_CHAT_LAUNCHER_ID = "roam-codex-sidebar-chat-launcher";
-const CHAT_STATE_VERSION = 2;
+const CHAT_STATE_VERSION = 3;
 const CHAT_STATE_KEY_PREFIX = `roam-codex-lab.chat-state.v${CHAT_STATE_VERSION}`;
+const LEGACY_CHAT_STATE_KEY_PREFIX = "roam-codex-lab.chat-state.v2";
 const INSTALLATION_ID_KEY_PREFIX = "roam-codex-lab.installation-id";
 const THREAD_PAGE_PREFIX = "Codex/thread/";
 const THREAD_ID_FIELD = "Codex thread::";
@@ -112,6 +113,10 @@ export function chatStateKey(graph) {
   return graphStorageKey(CHAT_STATE_KEY_PREFIX, graph);
 }
 
+export function legacyChatStateKey(graph) {
+  return graphStorageKey(LEGACY_CHAT_STATE_KEY_PREFIX, graph);
+}
+
 function tokenKey(graph) {
   return graphStorageKey(TOKEN_KEY_PREFIX, graph);
 }
@@ -141,6 +146,11 @@ function emptyChatState({
       speed: null,
       access: defaultAccess,
     },
+    threadPreferences: {},
+    lastSeenUpdatedAt: {},
+    pendingThreads: {},
+    // Conversation membership is an in-memory view assembled from Roam plus
+    // pending page-creation retries. writeChatState deliberately omits it.
     conversations: {},
   };
 }
@@ -165,6 +175,66 @@ function validBlockUid(value) {
   return typeof value === "string" && /^[A-Za-z0-9_-]{6,64}$/.test(value);
 }
 
+function sanitizeConversationPreferences(value, fallbackAccess = "auto") {
+  return {
+    model: typeof value?.model === "string" ? value.model : null,
+    effort: typeof value?.effort === "string" ? value.effort : null,
+    speed: typeof value?.speed === "string" ? value.speed : null,
+    access: CHAT_ACCESS_MODES.has(value?.access)
+      ? value.access
+      : fallbackAccess,
+  };
+}
+
+function sanitizeThreadPreferences(value) {
+  const preferences = {};
+  for (const [threadId, record] of Object.entries(value || {}).slice(0, 500)) {
+    if (!validThreadId(threadId)) continue;
+    preferences[threadId] = sanitizeConversationPreferences(record);
+  }
+  return preferences;
+}
+
+function sanitizeLastSeenUpdatedAt(value) {
+  const markers = {};
+  for (const [threadId, timestamp] of Object.entries(value || {}).slice(0, 500)) {
+    if (!validThreadId(threadId) || !Number.isFinite(timestamp) || timestamp < 0) {
+      continue;
+    }
+    markers[threadId] = timestamp;
+  }
+  return markers;
+}
+
+function sanitizePendingThreads(value) {
+  const pending = {};
+  for (const [threadId, record] of Object.entries(value || {}).slice(0, 100)) {
+    if (!validThreadId(threadId) || record?.threadId !== threadId) continue;
+    const createdAt = Number.isFinite(record.createdAt) && record.createdAt > 0
+      ? record.createdAt
+      : Date.now();
+    pending[threadId] = {
+      threadId,
+      createdAt,
+      titleHint: typeof record.titleHint === "string"
+        ? singleLine(record.titleHint).slice(0, 80)
+        : "",
+    };
+  }
+  return pending;
+}
+
+export function discardLegacyChatState({
+  storage = window.localStorage,
+  key = legacyChatStateKey(),
+} = {}) {
+  try {
+    storage.removeItem?.(key);
+  } catch {
+    // A device that cannot remove obsolete cache can still use v3 state.
+  }
+}
+
 export function readChatState({
   storage = window.localStorage,
   key = chatStateKey(),
@@ -182,61 +252,40 @@ export function readChatState({
     return emptyChatState({ defaultAccess, defaultModel });
   }
 
-  const conversations = {};
-  for (const [threadId, record] of Object.entries(value.conversations || {})) {
-    if (!validThreadId(threadId) || record?.threadId !== threadId) continue;
-    conversations[threadId] = {
-      threadId,
-      createdAt: Number.isFinite(record.createdAt) ? record.createdAt : Date.now(),
-      updatedAt: Number.isFinite(record.updatedAt) ? record.updatedAt : Date.now(),
-      model: typeof record.model === "string" ? record.model : null,
-      effort: typeof record.effort === "string" ? record.effort : null,
-      speed: typeof record.speed === "string" ? record.speed : null,
-      access: CHAT_ACCESS_MODES.has(record.access) ? record.access : "auto",
-      threadPageUid: typeof record.threadPageUid === "string"
-        ? record.threadPageUid
-        : null,
-      threadPageTitle: typeof record.threadPageTitle === "string" &&
-          record.threadPageTitle.startsWith(THREAD_PAGE_PREFIX)
-        ? record.threadPageTitle
-        : null,
-      originInstallationId: typeof record.originInstallationId === "string"
-        ? record.originInstallationId
-        : null,
-      lastSeenUpdatedAt: Number.isFinite(record.lastSeenUpdatedAt)
-        ? record.lastSeenUpdatedAt
-        : 0,
-      availability: ["available", "missing", "unavailable", "pending"].includes(
-          record.availability,
-        )
-        ? record.availability
-        : "pending",
-      pendingGraphIndex: record.pendingGraphIndex === true,
-    };
-  }
-
-  const activeThreadId = validThreadId(value.activeThreadId) &&
-      conversations[value.activeThreadId]
-    ? value.activeThreadId
-    : null;
+  const threadPreferences = sanitizeThreadPreferences(value.threadPreferences);
+  const lastSeenUpdatedAt = sanitizeLastSeenUpdatedAt(value.lastSeenUpdatedAt);
+  const pendingThreads = sanitizePendingThreads(value.pendingThreads);
+  const conversations = Object.fromEntries(
+    Object.values(pendingThreads).map((record) => {
+      const preferences = threadPreferences[record.threadId] ||
+        sanitizeConversationPreferences(null);
+      return [record.threadId, {
+        threadId: record.threadId,
+        createdAt: record.createdAt,
+        updatedAt: record.createdAt,
+        ...preferences,
+        threadPageUid: null,
+        threadPageTitle: null,
+        originInstallationId: null,
+        lastSeenUpdatedAt: lastSeenUpdatedAt[record.threadId] || 0,
+        availability: "pending",
+        pendingGraphIndex: true,
+      }];
+    }),
+  );
 
   return {
     version: CHAT_STATE_VERSION,
-    activeThreadId,
-    newConversationPreferences: {
-      model: typeof value.newConversationPreferences?.model === "string"
-        ? value.newConversationPreferences.model
-        : null,
-      effort: typeof value.newConversationPreferences?.effort === "string"
-        ? value.newConversationPreferences.effort
-        : null,
-      speed: typeof value.newConversationPreferences?.speed === "string"
-        ? value.newConversationPreferences.speed
-        : null,
-      access: CHAT_ACCESS_MODES.has(value.newConversationPreferences?.access)
-        ? value.newConversationPreferences.access
-        : defaultAccess,
-    },
+    activeThreadId: validThreadId(value.activeThreadId)
+      ? value.activeThreadId
+      : null,
+    newConversationPreferences: sanitizeConversationPreferences(
+      value.newConversationPreferences,
+      defaultAccess,
+    ),
+    threadPreferences,
+    lastSeenUpdatedAt,
+    pendingThreads,
     conversations,
   };
 }
@@ -245,7 +294,19 @@ export function writeChatState(
   state,
   { storage = window.localStorage, key = chatStateKey() } = {},
 ) {
-  storage.setItem(key, JSON.stringify({ ...state, version: CHAT_STATE_VERSION }));
+  storage.setItem(key, JSON.stringify({
+    version: CHAT_STATE_VERSION,
+    activeThreadId: validThreadId(state?.activeThreadId)
+      ? state.activeThreadId
+      : null,
+    newConversationPreferences: sanitizeConversationPreferences(
+      state?.newConversationPreferences,
+      EXTENSION_CONFIG.defaultAccess,
+    ),
+    threadPreferences: sanitizeThreadPreferences(state?.threadPreferences),
+    lastSeenUpdatedAt: sanitizeLastSeenUpdatedAt(state?.lastSeenUpdatedAt),
+    pendingThreads: sanitizePendingThreads(state?.pendingThreads),
+  }));
 }
 
 function getRoamApi() {
@@ -2426,6 +2487,7 @@ export function createChatPanel({
     throw new Error("The Codex chat panel requires a Roam block.");
   }
 
+  discardLegacyChatState({ storage });
   let state = readChatState({ storage, defaultAccess, defaultModel });
   let messages = [];
   let models = [];
@@ -2682,23 +2744,30 @@ export function createChatPanel({
   const currentRecord = () => state.activeThreadId
     ? state.conversations[state.activeThreadId]
     : null;
-  const currentPreferences = () =>
-    currentRecord() || state.newConversationPreferences;
+  const currentPreferences = () => {
+    if (!state.activeThreadId) return state.newConversationPreferences;
+    return state.threadPreferences[state.activeThreadId] ||
+      currentRecord() ||
+      state.newConversationPreferences;
+  };
 
   const savePreferences = () => {
     const model = pickerModel || null;
     const effort = pickerEffort || null;
     const speed = pickerSpeed || null;
     const access = CHAT_ACCESS_MODES.has(pickerAccess) ? pickerAccess : "auto";
+    const preferences = { model, effort, speed, access };
     const record = currentRecord();
+    if (state.activeThreadId) {
+      state.threadPreferences[state.activeThreadId] = preferences;
+    }
     if (record) {
       record.model = model;
       record.effort = effort;
       record.speed = speed;
       record.access = access;
-      record.updatedAt = now();
-    } else {
-      state.newConversationPreferences = { model, effort, speed, access };
+    } else if (!state.activeThreadId) {
+      state.newConversationPreferences = preferences;
     }
     persist();
   };
@@ -2707,24 +2776,42 @@ export function createChatPanel({
     if (!validThreadId(threadId)) return;
     const timestamp = now();
     const previous = state.conversations[threadId];
+    const previousPreferences = state.threadPreferences[threadId] || previous;
+    const preferences = {
+      model: pickerModel || previousPreferences?.model || null,
+      effort: pickerEffort || previousPreferences?.effort || null,
+      speed: pickerSpeed || previousPreferences?.speed || null,
+      access: CHAT_ACCESS_MODES.has(pickerAccess)
+        ? pickerAccess
+        : previousPreferences?.access || "auto",
+    };
+    state.threadPreferences[threadId] = preferences;
+    if (!previous?.threadPageUid && !graphThreadRecords.has(threadId)) {
+      state.pendingThreads[threadId] = {
+        threadId,
+        createdAt: state.pendingThreads[threadId]?.createdAt ||
+          previous?.createdAt ||
+          timestamp,
+        titleHint: state.pendingThreads[threadId]?.titleHint || "",
+      };
+    }
+    if (completed) {
+      state.lastSeenUpdatedAt[threadId] = Math.max(
+        state.lastSeenUpdatedAt[threadId] || 0,
+        timestamp,
+      );
+    }
     state.conversations[threadId] = {
       threadId,
       createdAt: previous?.createdAt || timestamp,
       updatedAt: completed ? timestamp : previous?.updatedAt || timestamp,
-      model: pickerModel || previous?.model || null,
-      effort: pickerEffort || previous?.effort || null,
-      speed: pickerSpeed || previous?.speed || null,
-      access: CHAT_ACCESS_MODES.has(pickerAccess)
-        ? pickerAccess
-        : previous?.access || "auto",
+      ...preferences,
       threadPageUid: previous?.threadPageUid || null,
       threadPageTitle: previous?.threadPageTitle || null,
       originInstallationId: previous?.originInstallationId || null,
-      lastSeenUpdatedAt: completed
-        ? Math.max(previous?.lastSeenUpdatedAt || 0, timestamp)
-        : previous?.lastSeenUpdatedAt || 0,
+      lastSeenUpdatedAt: state.lastSeenUpdatedAt[threadId] || 0,
       availability: "available",
-      pendingGraphIndex: previous?.pendingGraphIndex || false,
+      pendingGraphIndex: Boolean(state.pendingThreads[threadId]),
     };
     state.activeThreadId = threadId;
     state.newConversationPreferences = {
@@ -2739,6 +2826,8 @@ export function createChatPanel({
   const applyGraphRecord = (graphRecord) => {
     if (!validThreadId(graphRecord?.threadId)) return null;
     const previous = state.conversations[graphRecord.threadId] || {};
+    const preferences = state.threadPreferences[graphRecord.threadId] ||
+      sanitizeConversationPreferences(previous);
     const record = {
       threadId: graphRecord.threadId,
       createdAt: graphRecord.createdAt || previous.createdAt || now(),
@@ -2747,22 +2836,66 @@ export function createChatPanel({
         previous.updatedAt || 0,
         graphRecord.createdAt || 0,
       ),
-      model: previous.model || null,
-      effort: previous.effort || null,
-      speed: previous.speed || null,
-      access: CHAT_ACCESS_MODES.has(previous.access) ? previous.access : "auto",
+      ...preferences,
       threadPageUid: graphRecord.threadPageUid,
       threadPageTitle: graphRecord.threadPageTitle,
       originInstallationId: graphRecord.originInstallationId || null,
-      lastSeenUpdatedAt: previous.lastSeenUpdatedAt || 0,
-      availability: previous.availability === "available"
-        ? "available"
+      lastSeenUpdatedAt: state.lastSeenUpdatedAt[graphRecord.threadId] || 0,
+      availability: ["available", "missing", "unavailable"].includes(
+          previous.availability,
+        )
+        ? previous.availability
         : "pending",
       pendingGraphIndex: false,
     };
     state.conversations[graphRecord.threadId] = record;
     graphThreadRecords.set(graphRecord.threadId, graphRecord);
+    delete state.pendingThreads[graphRecord.threadId];
     return record;
+  };
+
+  const rebuildConversationMembership = (graphRecords) => {
+    const previousConversations = state.conversations;
+    const pendingThreads = Object.values(state.pendingThreads);
+    state.conversations = {};
+    graphThreadRecords.clear();
+
+    for (const pendingThread of pendingThreads) {
+      const previous = previousConversations[pendingThread.threadId] || {};
+      const preferences = state.threadPreferences[pendingThread.threadId] ||
+        sanitizeConversationPreferences(previous);
+      state.conversations[pendingThread.threadId] = {
+        threadId: pendingThread.threadId,
+        createdAt: pendingThread.createdAt,
+        updatedAt: previous.updatedAt || pendingThread.createdAt,
+        ...preferences,
+        threadPageUid: null,
+        threadPageTitle: null,
+        originInstallationId: null,
+        lastSeenUpdatedAt:
+          state.lastSeenUpdatedAt[pendingThread.threadId] || 0,
+        availability: previous.availability || "pending",
+        pendingGraphIndex: true,
+      };
+    }
+    for (const graphRecord of graphRecords || []) applyGraphRecord(graphRecord);
+
+    const memberThreadIds = new Set(Object.keys(state.conversations));
+    for (const threadId of Object.keys(state.threadPreferences)) {
+      if (!memberThreadIds.has(threadId)) delete state.threadPreferences[threadId];
+    }
+    for (const threadId of Object.keys(state.lastSeenUpdatedAt)) {
+      if (!memberThreadIds.has(threadId)) delete state.lastSeenUpdatedAt[threadId];
+    }
+    for (const threadId of threadSummaries.keys()) {
+      if (!memberThreadIds.has(threadId)) threadSummaries.delete(threadId);
+    }
+    if (
+      state.activeThreadId &&
+      !memberThreadIds.has(state.activeThreadId)
+    ) {
+      state.activeThreadId = null;
+    }
   };
 
   const mirrorThreadName = async (graphRecord) => {
@@ -2782,6 +2915,18 @@ export function createChatPanel({
     { completedAt = null } = {},
   ) => {
     if (!validThreadId(threadId) || !api.data?.page?.create) return null;
+    const record = state.conversations[threadId];
+    if (!record?.threadPageUid && !graphThreadRecords.has(threadId)) {
+      state.pendingThreads[threadId] = {
+        threadId,
+        createdAt: state.pendingThreads[threadId]?.createdAt ||
+          record?.createdAt ||
+          now(),
+        titleHint: singleLine(title || "").slice(0, 80),
+      };
+      if (record) record.pendingGraphIndex = true;
+      persist();
+    }
     let pending = threadIndexPromises.get(threadId);
     if (!pending) {
       pending = (async () => {
@@ -2820,8 +2965,8 @@ export function createChatPanel({
           if (record) {
             record.pendingGraphIndex = true;
             record.availability = "pending";
-            persist();
           }
+          persist();
           throw error;
         } finally {
           threadIndexPromises.delete(threadId);
@@ -3266,6 +3411,7 @@ export function createChatPanel({
           record.lastSeenUpdatedAt || 0,
           serverTimestampMs(summary?.updatedAt),
         );
+        state.lastSeenUpdatedAt[threadId] = record.lastSeenUpdatedAt;
         persist();
       }
       renderMessages();
@@ -3312,9 +3458,7 @@ export function createChatPanel({
     try {
       const graphIndex = await requestGraphIndexImpl();
       if (closed || loadVersion !== historyLoadVersion) return;
-      for (const graphRecord of graphIndex?.records || []) {
-        applyGraphRecord(graphRecord);
-      }
+      rebuildConversationMembership(graphIndex?.records || []);
       if (graphIndex?.errors?.length) {
         historyError = `${graphIndex.errors.length} thread page${
           graphIndex.errors.length === 1 ? " has" : "s have"

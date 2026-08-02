@@ -1023,8 +1023,7 @@
   margin-left: auto;
 }
 
-.roam-codex-chat-send,
-.roam-codex-chat-stop {
+.roam-codex-chat-send {
   border-radius: 6px;
   cursor: pointer;
   font: inherit;
@@ -1060,10 +1059,55 @@
 }
 
 .roam-codex-chat-stop {
-  background: transparent;
-  border: 1px solid rgba(194, 48, 48, 0.45);
+  align-items: center;
+  appearance: none;
+  background: rgba(194, 48, 48, 0.08);
+  border: 1px solid rgba(194, 48, 48, 0.18);
+  border-radius: 50%;
   color: #c23030;
-  padding: 6px 14px;
+  cursor: pointer;
+  display: inline-flex;
+  flex: 0 0 auto;
+  height: 30px;
+  justify-content: center;
+  padding: 0;
+  transition: background 100ms ease, border-color 100ms ease,
+    box-shadow 100ms ease, transform 100ms ease;
+  width: 30px;
+}
+
+.roam-codex-chat-stop:hover:not(:disabled) {
+  background: rgba(194, 48, 48, 0.14);
+  border-color: rgba(194, 48, 48, 0.3);
+  transform: translateY(-1px);
+}
+
+.roam-codex-chat-stop:focus-visible {
+  background: rgba(194, 48, 48, 0.12);
+  border-color: rgba(194, 48, 48, 0.38);
+  box-shadow: 0 0 0 2px rgba(194, 48, 48, 0.18);
+  outline: none;
+}
+
+.roam-codex-chat-stop-icon {
+  background: currentColor;
+  border-radius: 2px;
+  display: block;
+  height: 9px;
+  width: 9px;
+}
+
+.bp3-dark .roam-codex-chat-stop,
+.bp4-dark .roam-codex-chat-stop {
+  background: rgba(219, 55, 55, 0.14);
+  border-color: rgba(255, 115, 115, 0.24);
+  color: #ff7373;
+}
+
+.bp3-dark .roam-codex-chat-stop:hover:not(:disabled),
+.bp4-dark .roam-codex-chat-stop:hover:not(:disabled) {
+  background: rgba(219, 55, 55, 0.22);
+  border-color: rgba(255, 115, 115, 0.36);
 }
 
 .roam-codex-chat-send:disabled,

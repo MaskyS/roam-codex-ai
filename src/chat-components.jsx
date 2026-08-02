@@ -385,11 +385,12 @@ export function ChatControls({
           type="button"
           className="roam-codex-chat-stop"
           title="Stop the current Codex turn"
+          aria-label="Stop the current Codex turn"
           hidden={!running}
           disabled={stopDisabled}
           onClick={actions.stop}
         >
-          Stop
+          <span className="roam-codex-chat-stop-icon" aria-hidden="true" />
         </button>
         {/* Keep Roam's native block editor focused until send snapshots it.
             Moving focus here first would lose the active composer window. */}

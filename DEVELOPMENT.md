@@ -61,8 +61,14 @@ turn after the active run settles.
 
 Conversation history is graph-scoped and contains only thread IDs indexed in
 that graph. The bridge reads those exact threads without listing or resuming
-unrelated Codex work. Messages use Roam's native `renderString`; every native
-renderer mount is unmounted when its transcript changes or closes.
+unrelated Codex work. Valid `Codex/thread/*` pages are the durable membership
+index; App Server supplies live names, previews, timestamps, and availability.
+Graph-scoped `localStorage` holds only the active pointer, per-thread picker
+preferences, read markers, and retries for a thread whose graph page could not
+yet be created. Clearing that device state does not remove a conversation from
+history, and a missing App Server thread does not remove its Roam record.
+Messages use Roam's native `renderString`; every native renderer mount is
+unmounted when its transcript changes or closes.
 
 ## Graph access and tools
 

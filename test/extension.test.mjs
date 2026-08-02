@@ -121,6 +121,7 @@ const {
   configureExtension,
   copyRoamText,
   createChatPanel,
+  discardLegacyChatState,
   ensureGraphThreadRecord,
   findChatPanelHost,
   findSidebarBlockWindow,
@@ -156,6 +157,7 @@ const {
   installSidebarChatLauncher,
   installChatToggleHotkey,
   installSettingsPanel,
+  legacyChatStateKey,
   mountSidebarChatLauncher,
   chatStateKey,
   normalizeBridgeUrl,
@@ -163,6 +165,28 @@ const {
   workOnBlock,
   writeChatState,
 } = await import("../extension.js");
+
+function graphThreadRecord(threadId, {
+  createdAt = 10,
+  lastActiveAt = 20,
+  title = `Codex/thread/${threadId}`,
+  originInstallationId = "installation-other-device",
+} = {}) {
+  return {
+    threadId,
+    createdAt,
+    lastActiveAt,
+    threadPageUid: `page-${threadId}`,
+    threadPageTitle: title,
+    originInstallationId,
+    metadataUids: {
+      thread: `thread-field-${threadId}`,
+      origin: `origin-field-${threadId}`,
+      createdAt: `created-field-${threadId}`,
+      lastActiveAt: `active-field-${threadId}`,
+    },
+  };
+}
 
 test("chat messages use Roam's native string renderer and unmount cleanly", async () => {
   const element = { textContent: "" };
@@ -476,11 +500,12 @@ test("chat panel tolerates React committing its roots after render returns", asy
   }
 });
 
-test("chat state keeps versioned conversation records without a parallel draft", () => {
+test("chat state persists only graph-scoped device preferences and indexing retries", () => {
   const values = new Map();
   const storage = {
     getItem: (key) => values.get(key) ?? null,
     setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key),
   };
   const initial = readChatState({ storage, key: "chat-test" });
   assert.equal(Object.hasOwn(initial, "draft"), false);
@@ -489,6 +514,22 @@ test("chat state keeps versioned conversation records without a parallel draft",
   const state = {
     ...initial,
     activeThreadId: "thread_12345678",
+    threadPreferences: {
+      thread_12345678: {
+        model: "model-from-list",
+        effort: "medium",
+        speed: "priority",
+        access: "auto",
+      },
+    },
+    lastSeenUpdatedAt: { thread_12345678: 20 },
+    pendingThreads: {
+      thread_12345678: {
+        threadId: "thread_12345678",
+        createdAt: 10,
+        titleHint: "A pending chat",
+      },
+    },
     conversations: {
       thread_12345678: {
         threadId: "thread_12345678",
@@ -498,18 +539,39 @@ test("chat state keeps versioned conversation records without a parallel draft",
         effort: "medium",
         speed: null,
         access: "auto",
-        threadPageUid: null,
-        threadPageTitle: null,
-        originInstallationId: null,
-        lastSeenUpdatedAt: 0,
-        availability: "pending",
-        pendingGraphIndex: false,
+        threadPageUid: "graph-page-secret",
+        threadPageTitle: "Codex/thread/Graph metadata",
+        originInstallationId: "installation-secret",
+        lastSeenUpdatedAt: 20,
+        availability: "missing",
+        pendingGraphIndex: true,
       },
     },
   };
   writeChatState(state, { storage, key: "chat-test" });
 
-  assert.deepEqual(readChatState({ storage, key: "chat-test" }), state);
+  const serialized = JSON.parse(values.get("chat-test"));
+  assert.deepEqual(Object.keys(serialized).sort(), [
+    "activeThreadId",
+    "lastSeenUpdatedAt",
+    "newConversationPreferences",
+    "pendingThreads",
+    "threadPreferences",
+    "version",
+  ]);
+  assert.doesNotMatch(values.get("chat-test"), /graph-page-secret|installation-secret|missing/);
+  const reloaded = readChatState({ storage, key: "chat-test" });
+  assert.equal(reloaded.conversations.thread_12345678.pendingGraphIndex, true);
+  assert.equal(reloaded.conversations.thread_12345678.threadPageUid, null);
+  assert.equal(reloaded.conversations.thread_12345678.model, "model-from-list");
+
+  values.set(legacyChatStateKey("Graph One"), "obsolete membership");
+  values.set(legacyChatStateKey("Graph Two"), "other graph membership");
+  values.set("roam-codex-lab.bridge-token.Graph%20One", "device secret");
+  discardLegacyChatState({ storage, key: legacyChatStateKey("Graph One") });
+  assert.equal(values.has(legacyChatStateKey("Graph One")), false);
+  assert.equal(values.get(legacyChatStateKey("Graph Two")), "other graph membership");
+  assert.equal(values.get("roam-codex-lab.bridge-token.Graph%20One"), "device secret");
 
   values.set("chat-test", "{broken");
   assert.equal(readChatState({ storage, key: "chat-test" }).activeThreadId, null);
@@ -2474,22 +2536,18 @@ test("rapid history selections cannot render a stale transcript", async () => {
     setItem: (key, value) => values.set(key, value),
   };
   const state = readChatState({ storage });
-  state.conversations = {
+  state.threadPreferences = {
     thread_new_456: {
-      threadId: "thread_new_456",
-      createdAt: 30,
-      updatedAt: 40,
       model: "gpt-5.6-sol",
       effort: "low",
-      threadPageUid: null,
+      speed: null,
+      access: "auto",
     },
     thread_old_123: {
-      threadId: "thread_old_123",
-      createdAt: 10,
-      updatedAt: 20,
       model: "gpt-5.6-sol",
       effort: "low",
-      threadPageUid: null,
+      speed: null,
+      access: "auto",
     },
   };
   writeChatState(state, { storage });
@@ -2528,6 +2586,21 @@ test("rapid history selections cannot render a stale transcript", async () => {
       })),
       missingThreadIds: [],
       unavailableThreadIds: [],
+    }),
+    requestGraphIndexImpl: async () => ({
+      records: [
+        graphThreadRecord("thread_new_456", {
+          createdAt: 30,
+          lastActiveAt: 40,
+          title: "Codex/thread/Newer chat",
+        }),
+        graphThreadRecord("thread_old_123", {
+          createdAt: 10,
+          lastActiveAt: 20,
+          title: "Codex/thread/Older chat",
+        }),
+      ],
+      errors: [],
     }),
     requestMessagesImpl: (threadId) => new Promise((resolve) => {
       pendingMessages.set(threadId, resolve);
@@ -2580,14 +2653,12 @@ test("history closes accessibly and cannot switch during an active turn", async 
   };
   const state = readChatState({ storage });
   state.activeThreadId = "thread_active_1";
-  state.conversations = {
+  state.threadPreferences = {
     thread_active_1: {
-      threadId: "thread_active_1",
-      createdAt: 10,
-      updatedAt: 20,
       model: "gpt-5.6-sol",
       effort: "low",
-      threadPageUid: null,
+      speed: null,
+      access: "auto",
     },
   };
   writeChatState(state, { storage });
@@ -2642,6 +2713,10 @@ test("history closes accessibly and cannot switch during an active turn", async 
       missingThreadIds: [],
       unavailableThreadIds: [],
     }),
+    requestGraphIndexImpl: async () => ({
+      records: [graphThreadRecord("thread_active_1")],
+      errors: [],
+    }),
   });
   await Promise.resolve();
   await Promise.resolve();
@@ -2686,7 +2761,7 @@ test("history closes accessibly and cannot switch during an active turn", async 
   await controller.close();
 });
 
-test("Send stays alongside Stop while a turn runs and names its shortcut", async () => {
+test("Send stays beside an accessible stop icon while a turn runs", async () => {
   let finishTurn;
   const turn = new Promise((resolve) => {
     finishTurn = resolve;
@@ -2727,6 +2802,9 @@ test("Send stays alongside Stop while a turn runs and names its shortcut", async
   const shortcut = sendButton.children.find(
     (element) => element.className === "roam-codex-chat-send-kbd",
   );
+  const stopIcon = stopButton.children.find(
+    (element) => element.className === "roam-codex-chat-stop-icon",
+  );
   let progressMeta = elements.find(
     (element) => element.className === "roam-codex-chat-progress-meta",
   );
@@ -2748,6 +2826,11 @@ test("Send stays alongside Stop while a turn runs and names its shortcut", async
   assert.equal(shortcut.parentNode, sendButton);
   assert.equal(sendButton.hidden, false);
   assert.equal(stopButton.hidden, true);
+  assert.equal(stopButton.textContent, "");
+  assert.equal(stopButton["aria-label"], "Stop the current Codex turn");
+  assert.equal(stopButton.title, "Stop the current Codex turn");
+  assert.equal(stopIcon["aria-hidden"], "true");
+  assert.equal(stopIcon.parentNode, stopButton);
   assert.equal(progressMeta.hidden, true);
   assert.equal(progress.parentNode, transcript);
   assert.equal(stopButton.parentNode, actions);
@@ -3204,7 +3287,7 @@ test("a saved conversation on an unpaired device shows only the card", async () 
   const values = new Map([[
     chatStateKey("maskys"),
     JSON.stringify({
-      version: 2,
+      version: 3,
       activeThreadId: "thread_saved_123",
       newConversationPreferences: {
         model: null,
@@ -3212,32 +3295,32 @@ test("a saved conversation on an unpaired device shows only the card", async () 
         speed: null,
         access: "auto",
       },
-      enabledMcpServers: [],
-      conversations: {
+      threadPreferences: {
         thread_saved_123: {
-          threadId: "thread_saved_123",
-          createdAt: 10,
-          updatedAt: 20,
           model: null,
           effort: null,
           speed: null,
           access: "auto",
-          threadPageUid: null,
-          threadPageTitle: null,
-          originInstallationId: null,
-          lastSeenUpdatedAt: 0,
-          availability: "available",
-          pendingGraphIndex: false,
+        },
+      },
+      lastSeenUpdatedAt: {},
+      pendingThreads: {
+        thread_saved_123: {
+          threadId: "thread_saved_123",
+          createdAt: 10,
+          titleHint: "Saved chat",
         },
       },
     }),
   ]]);
+  values.set(legacyChatStateKey("maskys"), "obsolete v2 membership");
   const controller = createChatPanel({
     doc,
     api: {},
     storage: {
       getItem: (key) => values.get(key) ?? null,
       setItem: (key, value) => values.set(key, value),
+      removeItem: (key) => values.delete(key),
     },
     rootBlockUid: "root123",
     setIntervalImpl: () => 1,
@@ -3252,6 +3335,7 @@ test("a saved conversation on an unpaired device shows only the card", async () 
   });
   await new Promise((resolve) => setTimeout(resolve, 0));
   await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(values.has(legacyChatStateKey("maskys")), false);
 
   const elements = panelElements(controller);
   const card = elements.find(
@@ -3935,22 +4019,18 @@ test("missing and unavailable graph history are retained", async () => {
   };
   const state = readChatState({ storage });
   state.activeThreadId = "thread_missing_1";
-  state.conversations = {
+  state.threadPreferences = {
     thread_missing_1: {
-      threadId: "thread_missing_1",
-      createdAt: 10,
-      updatedAt: 20,
       model: "gpt-5.6-sol",
       effort: "low",
-      threadPageUid: null,
+      speed: null,
+      access: "auto",
     },
     thread_unavailable_2: {
-      threadId: "thread_unavailable_2",
-      createdAt: 30,
-      updatedAt: 40,
       model: "gpt-5.6-sol",
       effort: "low",
-      threadPageUid: null,
+      speed: null,
+      access: "auto",
     },
   };
   writeChatState(state, { storage });
@@ -3967,18 +4047,153 @@ test("missing and unavailable graph history are retained", async () => {
       missingThreadIds: ["thread_missing_1"],
       unavailableThreadIds: ["thread_unavailable_2"],
     }),
+    requestGraphIndexImpl: async () => ({
+      records: [
+        graphThreadRecord("thread_missing_1", {
+          title: "Codex/thread/Missing chat",
+        }),
+        graphThreadRecord("thread_unavailable_2", {
+          createdAt: 30,
+          lastActiveAt: 40,
+          title: "Codex/thread/Unavailable chat",
+        }),
+      ],
+      errors: [],
+    }),
   });
+  await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
 
   const saved = readChatState({ storage });
   assert.equal(saved.activeThreadId, "thread_missing_1");
-  assert.equal(Object.hasOwn(saved.conversations, "thread_missing_1"), true);
-  assert.equal(Object.hasOwn(saved.conversations, "thread_unavailable_2"), true);
-  assert.equal(saved.conversations.thread_missing_1.availability, "missing");
+  assert.deepEqual(Object.keys(saved.conversations), []);
+  assert.doesNotMatch(
+    values.get(chatStateKey("maskys")),
+    /"conversations"|"availability"|"threadPageUid"/,
+  );
+
+  const elements = panelElements(controller);
+  elements.find(
+    (element) => element.className === "roam-codex-chat-conversation",
+  ).listeners.click();
+  const historyItems = panelElements(controller).filter(
+    (element) => element.dataset?.threadId,
+  );
   assert.equal(
-    saved.conversations.thread_unavailable_2.availability,
+    historyItems.find((item) => item.dataset.threadId === "thread_missing_1")
+      .dataset.availability,
+    "missing",
+  );
+  assert.equal(
+    historyItems.find(
+      (item) => item.dataset.threadId === "thread_unavailable_2",
+    ).dataset.availability,
     "unavailable",
   );
+  await controller.close();
+});
+
+test("a cleared device rebuilds history from Roam records from any installation", async () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+  };
+  const doc = createFakePanelDocument();
+  const controller = createChatPanel({
+    doc,
+    storage,
+    api: { ui: { rightSidebar: { getWindows: () => [] } } },
+    rootBlockUid: "root123",
+    probeConnectionImpl: async () => ({ state: "connected", graph: "maskys" }),
+    requestModelsImpl: async () => [],
+    requestHistoryImpl: async (threadIds) => ({
+      threads: threadIds.map((id) => ({
+        id,
+        name: null,
+        preview: "App Server preview",
+        createdAt: id === "thread_device_a" ? 10 : 30,
+        updatedAt: id === "thread_device_a" ? 20 : 40,
+      })),
+      missingThreadIds: [],
+      unavailableThreadIds: [],
+    }),
+    requestGraphIndexImpl: async () => ({
+      records: [
+        graphThreadRecord("thread_device_a", {
+          title: "Codex/thread/First device",
+          originInstallationId: "installation-a",
+        }),
+        graphThreadRecord("thread_device_b", {
+          createdAt: 30,
+          lastActiveAt: 40,
+          title: "Codex/thread/Second device",
+          originInstallationId: "installation-b",
+        }),
+      ],
+      errors: [],
+    }),
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-conversation",
+  ).listeners.click();
+  const historyItems = panelElements(controller).filter(
+    (element) => element.dataset?.threadId,
+  );
+  assert.deepEqual(
+    historyItems.map((item) => item.dataset.threadId).sort(),
+    ["thread_device_a", "thread_device_b"],
+  );
+  assert.ok(historyItems.every((item) => item.dataset.availability === "available"));
+
+  const serialized = values.get(chatStateKey("maskys"));
+  assert.ok(serialized);
+  assert.doesNotMatch(serialized, /"conversations"|installation-a|installation-b/);
+  await controller.close();
+});
+
+test("a successful Roam refresh removes stale local preferences and active pointers", async () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+  };
+  const state = readChatState({ storage });
+  state.activeThreadId = "thread_stale_1";
+  state.threadPreferences.thread_stale_1 = {
+    model: "stale-model",
+    effort: "high",
+    speed: "priority",
+    access: "manual",
+  };
+  state.lastSeenUpdatedAt.thread_stale_1 = 50;
+  writeChatState(state, { storage });
+
+  const controller = createChatPanel({
+    doc: createFakePanelDocument(),
+    storage,
+    api: { ui: { rightSidebar: { getWindows: () => [] } } },
+    rootBlockUid: "root123",
+    probeConnectionImpl: async () => ({ state: "connected", graph: "maskys" }),
+    requestModelsImpl: async () => [],
+    requestHistoryImpl: async () => ({
+      threads: [],
+      missingThreadIds: ["thread_graph_1"],
+      unavailableThreadIds: [],
+    }),
+    requestGraphIndexImpl: async () => ({
+      records: [graphThreadRecord("thread_graph_1")],
+      errors: [],
+    }),
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const saved = readChatState({ storage });
+  assert.equal(saved.activeThreadId, null);
+  assert.deepEqual(saved.threadPreferences, {});
+  assert.deepEqual(saved.lastSeenUpdatedAt, {});
   await controller.close();
 });
 
@@ -4173,7 +4388,11 @@ test("bridge configuration is loopback-only and graph-scoped", async (t) => {
   ]) {
     assert.throws(() => normalizeBridgeUrl(invalid), /127\.0\.0\.1|loopback/);
   }
-  assert.equal(chatStateKey("Graph One"), "roam-codex-lab.chat-state.v2.Graph%20One");
+  assert.equal(chatStateKey("Graph One"), "roam-codex-lab.chat-state.v3.Graph%20One");
+  assert.equal(
+    legacyChatStateKey("Graph One"),
+    "roam-codex-lab.chat-state.v2.Graph%20One",
+  );
   assert.notEqual(chatStateKey("Graph One"), chatStateKey("Graph Two"));
 
   configureExtension({
@@ -4259,26 +4478,29 @@ test("configured defaults seed only new conversation preferences", () => {
   });
 
   const persisted = {
-    version: 2,
+    version: 3,
     activeThreadId: "thread_existing",
     newConversationPreferences: {},
-    conversations: {
+    threadPreferences: {
       thread_existing: {
-        threadId: "thread_existing",
         model: "gpt-existing",
         effort: "high",
+        speed: "priority",
         access: "read-only",
       },
     },
+    lastSeenUpdatedAt: {},
+    pendingThreads: {},
   };
   const state = readChatState({
     storage: { getItem: () => JSON.stringify(persisted) },
     defaultAccess: "manual",
     defaultModel: "gpt-new-default",
   });
-  assert.equal(state.conversations.thread_existing.model, "gpt-existing");
-  assert.equal(state.conversations.thread_existing.effort, "high");
-  assert.equal(state.conversations.thread_existing.access, "read-only");
+  assert.equal(state.threadPreferences.thread_existing.model, "gpt-existing");
+  assert.equal(state.threadPreferences.thread_existing.effort, "high");
+  assert.equal(state.threadPreferences.thread_existing.speed, "priority");
+  assert.equal(state.threadPreferences.thread_existing.access, "read-only");
 });
 
 test("requestProbe sends the fixed graph, UID, and bearer token", async () => {

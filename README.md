@@ -156,6 +156,10 @@ The active graph always comes from Roam and is not a setting.
   through the native dialog or short-lived fallback code.
 - The bearer token stays in the private bridge config and graph-scoped browser
   `localStorage`; it is not written to graph content or graph-synced settings.
+- Conversation membership is recorded by `Codex/thread/*` pages in Roam.
+  Device-local chat state contains only UI preferences, read markers, the
+  active pointer, and pending graph-index retries; it is not a second history
+  database.
 - Runtime files and Codex threads use a graph-specific directory under
   `~/.roam-better-ai/graphs/`.
 - The background service executable is copied to a private versioned directory
