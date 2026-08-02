@@ -4026,6 +4026,7 @@ export function createChatPanel({
         if (closed) return;
         models = Array.isArray(availableModels) ? availableModels : [];
         modelsReady = true;
+        modelsError = "";
         initPicker();
         renderControls();
         setRunning(running);

@@ -3043,6 +3043,62 @@ test("the connection card explains failures and clears once connected", async ()
   await controller.close();
 });
 
+test("the model picker clears a stale catalog error after reconnecting", async () => {
+  const timers = [];
+  const doc = createFakePanelDocument();
+  let modelRequests = 0;
+  const controller = createChatPanel({
+    doc,
+    api: {},
+    storage: {
+      getItem: () => null,
+      setItem: () => {},
+    },
+    rootBlockUid: "root123",
+    setIntervalImpl: () => 1,
+    clearIntervalImpl: () => {},
+    setTimeoutImpl: (callback) => {
+      timers.push(callback);
+      return timers.length;
+    },
+    clearTimeoutImpl: () => {},
+    probeConnectionImpl: async () => ({ state: "connected", graph: "maskys" }),
+    authRequest: async () => ({ auth: "authenticated", method: "chatgpt" }),
+    requestModelsImpl: async () => {
+      modelRequests += 1;
+      if (modelRequests === 1) throw new Error("Catalog unavailable");
+      return [{
+        id: "gpt-test",
+        displayName: "GPT Test",
+        isDefault: true,
+        supportedReasoningEfforts: [],
+        serviceTiers: [],
+      }];
+    },
+    requestMessagesImpl: async () => [],
+    requestHistoryImpl: async () => ({
+      threads: [],
+      missingThreadIds: [],
+      unavailableThreadIds: [],
+    }),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  let picker = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-button",
+  );
+  assert.equal(picker.textContent, "Models unavailable");
+
+  await timers.at(-1)();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  picker = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-button",
+  );
+  assert.equal(picker.textContent, "GPT Test");
+  assert.equal(picker.disabled, false);
+  await controller.close();
+});
+
 test("the transcript resize handle drags, clamps, and persists its height", async () => {
   const values = new Map();
   const doc = createFakePanelDocument();
