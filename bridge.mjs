@@ -41,6 +41,16 @@ const RUNTIME_WORK_INSTRUCTIONS = readFileSync(
   resolve(ROOT, "runtime-work-agent.md"),
   "utf8",
 ).trim();
+export const BRIDGE_VERSION = (() => {
+  try {
+    const manifest = JSON.parse(
+      readFileSync(resolve(ROOT, "package.json"), "utf8"),
+    );
+    return typeof manifest.version === "string" ? manifest.version : "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+})();
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 47321;
 const MAX_BODY_BYTES = 16 * 1024;
@@ -599,7 +609,7 @@ export class AppServerClient extends EventEmitter {
         clientInfo: {
           name: "roam_codex_lab",
           title: "Roam Codex Lab",
-          version: "0.8.0",
+          version: BRIDGE_VERSION,
         },
         capabilities: { experimentalApi: true },
       },
@@ -809,6 +819,31 @@ export class AppServerClient extends EventEmitter {
   async listMcpServers() {
     await this.start();
     return this.knownMcpServers || [];
+  }
+
+  async readAuthStatus() {
+    await this.start();
+    const result = await this.request("getAuthStatus", {
+      includeToken: false,
+      refreshToken: false,
+    });
+    return {
+      authenticated: Boolean(result?.authMethod),
+      method: result?.authMethod || null,
+    };
+  }
+
+  async startAccountLogin() {
+    await this.start();
+    const result = await this.request(
+      "account/login/start",
+      { type: "chatgpt" },
+      60_000,
+    );
+    if (result?.type !== "chatgpt" || typeof result.authUrl !== "string") {
+      throw new Error("Codex did not return a browser sign-in URL.");
+    }
+    return { loginId: result.loginId || null, authUrl: result.authUrl };
   }
 
   async setThreadName(threadId, name) {
@@ -1677,6 +1712,7 @@ export function createBridgeServer({
         {
           ok: true,
           graph,
+          version: BRIDGE_VERSION,
           appServer: client.ready ? "ready" : "idle",
         },
         origin,
@@ -1729,6 +1765,53 @@ export function createBridgeServer({
         return;
       }
       sendJson(response, 200, { graph, token }, origin);
+      return;
+    }
+
+    if (request.method === "GET" && request.url === "/auth") {
+      if (!bearerMatches(request.headers.authorization, token)) {
+        sendJson(response, 401, { error: "Invalid bridge token." }, origin);
+        return;
+      }
+      try {
+        const status = await client.readAuthStatus();
+        sendJson(
+          response,
+          200,
+          {
+            auth: status.authenticated ? "authenticated" : "signed-out",
+            method: status.method,
+          },
+          origin,
+        );
+      } catch (error) {
+        sendJson(
+          response,
+          502,
+          { error: error.message || "Could not read the Codex sign-in state." },
+          origin,
+        );
+      }
+      return;
+    }
+
+    if (request.method === "POST" && request.url === "/auth/login") {
+      if (!bearerMatches(request.headers.authorization, token)) {
+        sendJson(response, 401, { error: "Invalid bridge token." }, origin);
+        return;
+      }
+      try {
+        const login = await client.startAccountLogin();
+        await trace({ event: "auth.login.started", graph });
+        sendJson(response, 200, { ok: true, ...login }, origin);
+      } catch (error) {
+        sendJson(
+          response,
+          502,
+          { error: error.message || "Could not start the Codex sign-in." },
+          origin,
+        );
+      }
       return;
     }
 

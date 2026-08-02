@@ -1280,6 +1280,88 @@ test("manual chat streams an approval and resumes after the authenticated answer
   assert.equal(events.at(-1).result.reply, "Renamed");
 });
 
+test("auth status and browser sign-in flow through the app-server client", async () => {
+  const client = new AppServerClient({ runtimeCwd: "/runtime/agent" });
+  client.start = async () => {};
+  const calls = [];
+  client.request = async (method, params) => {
+    calls.push({ method, params });
+    if (method === "getAuthStatus") return { authMethod: "chatgpt" };
+    if (method === "account/login/start") {
+      return { type: "chatgpt", loginId: "login-1", authUrl: "https://auth.example/start" };
+    }
+    return {};
+  };
+
+  assert.deepEqual(await client.readAuthStatus(), {
+    authenticated: true,
+    method: "chatgpt",
+  });
+  assert.deepEqual(await client.startAccountLogin(), {
+    loginId: "login-1",
+    authUrl: "https://auth.example/start",
+  });
+  assert.deepEqual(calls.map((call) => call.method), [
+    "getAuthStatus",
+    "account/login/start",
+  ]);
+
+  client.request = async () => ({ authMethod: null });
+  assert.equal((await client.readAuthStatus()).authenticated, false);
+});
+
+test("bridge exposes health version plus auth state and sign-in endpoints", async (t) => {
+  const client = {
+    ready: false,
+    async readAuthStatus() {
+      return { authenticated: false, method: null };
+    },
+    async startAccountLogin() {
+      return { loginId: "login-1", authUrl: "https://auth.example/start" };
+    },
+  };
+  const server = createBridgeServer({
+    token: "secret-token",
+    graph: "maskys",
+    client,
+    trace: async () => {},
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const headers = {
+    origin: "https://roamresearch.com",
+    authorization: "Bearer secret-token",
+  };
+
+  const health = await (await fetch(`${base}/health`, {
+    headers: { origin: headers.origin },
+  })).json();
+  assert.equal(health.ok, true);
+  assert.match(health.version, /^\d+\.\d+\.\d+$/);
+
+  const unauthenticated = await fetch(`${base}/auth`, {
+    headers: { origin: headers.origin },
+  });
+  assert.equal(unauthenticated.status, 401);
+
+  const auth = await fetch(`${base}/auth`, { headers });
+  assert.equal(auth.status, 200);
+  assert.deepEqual(await auth.json(), { auth: "signed-out", method: null });
+
+  const login = await fetch(`${base}/auth/login`, {
+    method: "POST",
+    headers,
+  });
+  assert.equal(login.status, 200);
+  assert.deepEqual(await login.json(), {
+    ok: true,
+    loginId: "login-1",
+    authUrl: "https://auth.example/start",
+  });
+});
+
 test("steer requests append text input to the exact active turn", async () => {
   const client = new AppServerClient({ runtimeCwd: "/runtime/agent" });
   const calls = [];

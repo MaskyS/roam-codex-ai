@@ -51,6 +51,7 @@ const {
   requestRunApproval,
   requestRunCancellation,
   requestRunSteer,
+  probeBridgeConnection,
   renderRoamMarkdown,
   restoreClearedChatPromptBlock,
   runningPresentationText,
@@ -2754,6 +2755,157 @@ test("a rejected steer resends the intact draft once the turn settles", async ()
   await controller.close();
 });
 
+test("an unpaired panel focuses the pairing input and keeps errors quiet", async () => {
+  const doc = createFakePanelDocument();
+  const notPaired = () => {
+    const error = new Error("This device isn't paired with the local Codex bridge yet.");
+    error.code = "NOT_PAIRED";
+    throw error;
+  };
+  const controller = createChatPanel({
+    doc,
+    api: {},
+    storage: {
+      getItem: () => null,
+      setItem: () => {},
+    },
+    rootBlockUid: "root123",
+    setIntervalImpl: () => 1,
+    clearIntervalImpl: () => {},
+    setTimeoutImpl: () => 1,
+    clearTimeoutImpl: () => {},
+    probeConnectionImpl: async () => ({ state: "unpaired", graph: "maskys" }),
+    requestModelsImpl: async () => notPaired(),
+    requestMessagesImpl: async () => [],
+    requestHistoryImpl: async () => ({
+      threads: [],
+      missingThreadIds: [],
+      unavailableThreadIds: [],
+    }),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const elements = panelElements(controller);
+  const card = elements.find(
+    (element) => element.className === "roam-codex-connection-card",
+  );
+  assert.equal(card.hidden, false);
+  const input = card.children.find(
+    (child) => child.className === "roam-codex-connection-input",
+  );
+  assert.ok(input);
+  assert.equal(input.focused, true);
+  const progressText = elements.find(
+    (element) => element.className === "roam-codex-chat-progress-text",
+  );
+  assert.equal(progressText.textContent || "", "");
+  await controller.close();
+});
+
+test("Do this block without pairing opens the chat panel instead of a dead end", async () => {
+  let opened = 0;
+  const toasts = [];
+  await assert.rejects(
+    () => workOnBlock("block1234", {
+      api: {
+        util: { generateUID: () => "status-uid" },
+        data: {
+          block: {
+            create: async () => {},
+            delete: async () => {},
+          },
+        },
+      },
+      storage: {
+        getItem: () => null,
+        setItem: () => {},
+        removeItem: () => {},
+      },
+      request: async () => {
+        const error = new Error("This device isn't paired with the local Codex bridge yet.");
+        error.code = "NOT_PAIRED";
+        throw error;
+      },
+      notifyImpl: (message, intent) => toasts.push({ message, intent }),
+      startPresentation: () => () => {},
+      openChatImpl: async () => {
+        opened += 1;
+      },
+    }),
+    (error) => error.code === "NOT_PAIRED",
+  );
+  assert.equal(opened, 1);
+  assert.equal(toasts.at(-1).intent, "warning");
+  assert.match(toasts.at(-1).message, /Pair this device/);
+});
+
+test("the connection card explains failures and clears once connected", async () => {
+  const timers = [];
+  const doc = createFakePanelDocument();
+  let probeState = { state: "no-bridge", graph: "maskys" };
+  let authState = { auth: "signed-out", method: null };
+  const opened = [];
+  const controller = createChatPanel({
+    doc,
+    api: {},
+    storage: {
+      getItem: () => null,
+      setItem: () => {},
+    },
+    rootBlockUid: "root123",
+    setIntervalImpl: () => 1,
+    clearIntervalImpl: () => {},
+    setTimeoutImpl: (callback) => {
+      timers.push(callback);
+      return timers.length;
+    },
+    clearTimeoutImpl: () => {},
+    probeConnectionImpl: async () => probeState,
+    authRequest: async () => authState,
+    loginRequest: async () => ({ loginId: "login-1", authUrl: "https://auth.example/start" }),
+    openUrlImpl: (url) => opened.push(url),
+    requestModelsImpl: async () => [],
+    requestMessagesImpl: async () => [],
+    requestHistoryImpl: async () => ({
+      threads: [],
+      missingThreadIds: [],
+      unavailableThreadIds: [],
+    }),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const elements = panelElements(controller);
+  const card = elements.find(
+    (element) => element.className === "roam-codex-connection-card",
+  );
+  assert.equal(card.hidden, false);
+  assert.equal(
+    card.children.some(
+      (child) => child.textContent === "The Codex bridge isn't running",
+    ),
+    true,
+  );
+  assert.ok(timers.length >= 1);
+
+  probeState = { state: "connected", graph: "maskys" };
+  await timers.at(-1)();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(card.hidden, false);
+  const signIn = card.children
+    .find((child) => child.className === "roam-codex-connection-actions")
+    ?.children.find((child) => child.textContent?.includes?.("Sign in"));
+  assert.ok(signIn);
+  signIn.listeners.click();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(opened, ["https://auth.example/start"]);
+
+  authState = { auth: "authenticated", method: "chatgpt" };
+  await timers.at(-1)();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(card.hidden, true);
+  await controller.close();
+});
+
 test("the transcript resize handle drags, clamps, and persists its height", async () => {
   const values = new Map();
   const doc = createFakePanelDocument();
@@ -3763,6 +3915,51 @@ test("requestRunSteer posts the message to the authenticated steer endpoint", as
     ),
     (error) => error.status === 409 && error.code === "TURN_NOT_STEERABLE",
   );
+});
+
+test("connection probe classifies bridge, graph, pairing, and connected states", async () => {
+  const storage = { getItem: () => null };
+  const base = {
+    storage,
+    graph: "maskys",
+    bridgeUrl: "http://127.0.0.1:47321",
+  };
+
+  const down = await probeBridgeConnection({
+    ...base,
+    fetchImpl: async () => {
+      throw new Error("Failed to fetch");
+    },
+  });
+  assert.equal(down.state, "no-bridge");
+
+  const mismatch = await probeBridgeConnection({
+    ...base,
+    fetchImpl: async () => new Response(
+      JSON.stringify({ error: 'This bridge serves graph "other".' }),
+      { status: 409, headers: { "content-type": "application/json" } },
+    ),
+  });
+  assert.equal(mismatch.state, "wrong-graph");
+  assert.match(mismatch.detail, /serves graph/);
+
+  const healthy = (body) => async () => new Response(
+    JSON.stringify(body),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
+
+  const unpaired = await probeBridgeConnection({
+    ...base,
+    fetchImpl: healthy({ ok: true, graph: "maskys", appServer: "idle" }),
+  });
+  assert.equal(unpaired.state, "unpaired");
+
+  const connected = await probeBridgeConnection({
+    ...base,
+    storage: { getItem: () => "stored-token" },
+    fetchImpl: healthy({ ok: true, graph: "maskys", appServer: "ready" }),
+  });
+  assert.equal(connected.state, "connected");
 });
 
 test("requestRunApproval answers the authenticated pending approval endpoint", async () => {
