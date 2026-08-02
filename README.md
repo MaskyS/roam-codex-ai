@@ -148,8 +148,10 @@ Builder tasks inherit the user's ordinary read/write Roam connection and every
 Roam MCP tool, including developer-extension reload commands. The bridge uses a
 separate graph-scoped Roam connection for the runtime app-server, exposes graph
 read/write tools to persistent chat, and narrows the structured `Do this
-block` thread to its read-only tool list. Unrelated MCP servers and plugins stay
-disabled.
+block` thread to its read-only tool list. Plugins and unrelated MCP servers are
+disabled by default. The chat picker's Tools section lists configured Codex MCP
+servers; explicitly enabled servers are saved in graph-synced extension
+settings and added to non-read-only chat threads.
 
 Runtime instructions are deliberately separate from builder instructions:
 
@@ -166,13 +168,13 @@ Runtime instructions are deliberately separate from builder instructions:
   per-mode MCP allowlists enforce capability. Prompt or graph text cannot widen
   them.
 
-The app-server process and its threads run with a dedicated temporary runtime
-directory as their `cwd`, not this builder repository. The bridge checks the
-`instructionSources` returned by every `thread/start` and `thread/resume`:
-user-global Codex guidance under the active `CODEX_HOME` may apply, but any
-project instruction source is rejected. This prevents this repository's
-`AGENTS.md`, project configuration, and development skills from becoming part
-of the Roam agent's role.
+The app-server process and its threads run with a stable per-graph runtime
+directory at `~/.roam-better-ai/graphs/<graph>/` as their `cwd`, not this
+builder repository. The bridge checks the `instructionSources` returned by
+every `thread/start` and `thread/resume`: user-global Codex guidance under the
+active `CODEX_HOME` may apply, but any project instruction source is rejected.
+This prevents this repository's `AGENTS.md`, project configuration, and
+development skills from becoming part of the Roam agent's role.
 
 ## Prerequisites
 

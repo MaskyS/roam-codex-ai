@@ -353,6 +353,7 @@ test("chat state keeps versioned conversation records without a parallel draft",
   writeChatState(state, { storage, key: "chat-test" });
 
   assert.deepEqual(readChatState({ storage, key: "chat-test" }), state);
+
   values.set("chat-test", "{broken");
   assert.equal(readChatState({ storage, key: "chat-test" }).activeThreadId, null);
 });
@@ -633,6 +634,7 @@ test("panel chat streams a thread id, progress, and a panel-only reply", async (
     effort: "medium",
     serviceTier: null,
     accessMode: "auto",
+    enabledServers: ["felt", "felt", "", 42, "x".repeat(80)],
     onStarted: (event) => starts.push(event),
     onThread: (event) => threads.push(event),
     onProgress: (event) => progress.push(event),
@@ -655,6 +657,7 @@ test("panel chat streams a thread id, progress, and a panel-only reply", async (
     effort: "medium",
     serviceTier: null,
     accessMode: "auto",
+    enabledServers: ["felt"],
   });
   assert.deepEqual(starts, [{ runId: "run-1" }]);
   assert.deepEqual(threads, [{ threadId: "thread_12345678" }]);
@@ -2885,6 +2888,74 @@ test("the picker offers Speed from serviceTiers and sends the chosen tier", asyn
       accessMode: "auto",
     },
   ]);
+  await controller.close();
+});
+
+test("the Tools picker reads and persists MCP consent through extension settings", async () => {
+  const doc = createFakePanelDocument();
+  const settingsWrites = [];
+  const sent = [];
+  const controller = createChatPanel({
+    doc,
+    api: {},
+    storage: {
+      getItem: () => null,
+      setItem: () => {},
+    },
+    rootBlockUid: "root123",
+    readPromptImpl: async () => ({ uid: "root123", text: "Use my tools" }),
+    requestChatImpl: async (_message, options) => {
+      sent.push(options.enabledServers);
+      return { threadId: "thread_tools_123", turnId: "turn-1", reply: "ok" };
+    },
+    requestModelsImpl: async () => [{
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6-Sol",
+      isDefault: true,
+      defaultReasoningEffort: "low",
+      supportedReasoningEfforts: [{ reasoningEffort: "low" }],
+    }],
+    requestMcpServersImpl: async () => ["felt", "paper"],
+    readEnabledMcpServersImpl: () => ["felt", "felt", 7],
+    writeEnabledMcpServersImpl: async (servers) => settingsWrites.push(servers),
+    requestMessagesImpl: async () => [],
+    requestHistoryImpl: async () => ({
+      threads: [],
+      missingThreadIds: [],
+      unavailableThreadIds: [],
+    }),
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+
+  const elements = panelElements(controller);
+  const pickerButton = elements.find(
+    (element) => element.className === "roam-codex-chat-picker-button",
+  );
+  const pickerMenu = elements.find(
+    (element) => element.className === "roam-codex-chat-picker-menu",
+  );
+  const pickerSubmenu = elements.find(
+    (element) => element.className === "roam-codex-chat-picker-submenu",
+  );
+  pickerButton.listeners.click();
+  assert.deepEqual(
+    pickerMenu.children.map((row) => row.children?.[0]?.textContent),
+    ["Model", "Effort", "Access", "Tools"],
+  );
+  assert.equal(pickerMenu.children[3].children[1].textContent, "Roam + 1");
+  pickerMenu.children[3].listeners.mouseenter();
+  assert.deepEqual(
+    pickerSubmenu.children.map((option) => option.children?.[0]?.textContent),
+    ["Roam", "felt", "paper"],
+  );
+  assert.equal(pickerSubmenu.children[1]["aria-checked"], "true");
+  pickerSubmenu.children[2].listeners.click();
+  await Promise.resolve();
+  assert.deepEqual(settingsWrites, [["felt", "paper"]]);
+
+  await controller.send();
+  assert.deepEqual(sent, [["felt", "paper"]]);
   await controller.close();
 });
 

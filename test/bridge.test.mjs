@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter, once } from "node:events";
+import { homedir, tmpdir } from "node:os";
+import { resolve } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import {
@@ -11,18 +13,35 @@ import {
   isAllowedOrigin,
   parseAndValidatePlan,
   runtimeAppServerArgs,
+  runtimeCwdForGraph,
   runtimeThreadConfig,
+  scanConfigMcpServerNames,
   toolApprovalResponse,
   validateRuntimeInstructionSources,
 } from "../bridge.mjs";
 
-test("runtime threads use an isolated default working directory", () => {
+test("runtime threads use a stable per-graph working directory", () => {
   assert.notEqual(DEFAULT_RUNTIME_CWD, process.cwd());
-  assert.match(DEFAULT_RUNTIME_CWD, /roam-better-ai-runtime$/);
+  assert.equal(
+    DEFAULT_RUNTIME_CWD,
+    resolve(homedir(), ".roam-better-ai", "graphs", "maskys"),
+  );
+  assert.equal(
+    runtimeCwdForGraph("My Graph!"),
+    resolve(homedir(), ".roam-better-ai", "graphs", "My%20Graph!"),
+  );
+  assert.equal(
+    runtimeCwdForGraph(".."),
+    resolve(homedir(), ".roam-better-ai", "graphs", "_.."),
+  );
+  assert.notEqual(runtimeCwdForGraph("a/b"), runtimeCwdForGraph("a?b"));
 });
 
 test("app-server process starts in the isolated runtime directory", async () => {
-  const runtimeCwd = `${DEFAULT_RUNTIME_CWD}-process-test`;
+  const runtimeCwd = resolve(
+    tmpdir(),
+    `roam-better-ai-process-test-${process.pid}`,
+  );
   let spawnOptions;
   const child = new EventEmitter();
   child.stdin = new PassThrough();
@@ -38,11 +57,22 @@ test("app-server process starts in the isolated runtime directory", async () => 
           result: {},
         })}\n`));
       }
+      if (request.method === "config/read") {
+        queueMicrotask(() => child.stdout.write(`${JSON.stringify({
+          id: request.id,
+          result: {
+            config: {
+              mcp_servers: { roam: {}, paper: {}, node_repl: {} },
+            },
+          },
+        })}\n`));
+      }
     }
   });
 
   const client = new AppServerClient({
     runtimeCwd,
+    codexHome: "/nonexistent-codex-home",
     spawnProcess: (_command, _args, options) => {
       spawnOptions = options;
       return child;
@@ -50,6 +80,7 @@ test("app-server process starts in the isolated runtime directory", async () => 
   });
   await client.start();
   assert.equal(spawnOptions.cwd, runtimeCwd);
+  assert.deepEqual(client.knownMcpServers, ["node_repl", "paper"]);
   await client.stop();
 });
 
@@ -75,9 +106,15 @@ test("runtime instruction audit allows user-global guidance and rejects project 
 });
 
 test("runtime app-server exposes direct graph tools to persistent chat", () => {
-  const args = runtimeAppServerArgs({ roamHome: "/runtime/roam-home" });
+  const args = runtimeAppServerArgs({
+    roamHome: "/runtime/roam-home",
+    disableServers: ["node_repl", "roam", "felt server", "node_repl"],
+  });
   const joined = args.join(" ");
 
+  assert.match(joined, /mcp_servers\.roam\.command="npx"/);
+  assert.match(joined, /@roam-research\/roam-mcp/);
+  assert.match(joined, /mcp_servers\.roam\.enabled=true/);
   assert.match(joined, /mcp_servers\.roam\.env=\{HOME="\/runtime\/roam-home"\}/);
   assert.match(joined, /mcp_servers\.roam\.enabled_tools=/);
   assert.match(joined, /get_graph_guidelines/);
@@ -85,19 +122,46 @@ test("runtime app-server exposes direct graph tools to persistent chat", () => {
   assert.match(joined, /create_block/);
   assert.match(joined, /update_block/);
   assert.match(joined, /delete_block/);
-  assert.match(joined, /mcp_servers\.node_repl\.enabled=false/);
+  assert.match(joined, /"node_repl"=\{enabled=false\}/);
+  assert.match(joined, /"felt server"=\{enabled=false\}/);
+  assert.doesNotMatch(joined, /mcp_servers\.roam\.enabled=false/);
+  assert.equal(
+    args.filter((arg) => arg.includes('"node_repl"={enabled=false}')).length,
+    1,
+  );
 });
 
-test("every runtime thread repeats the MCP and plugin restrictions", () => {
-  const config = runtimeThreadConfig(["get_graph_guidelines", "get_block"]);
+test("every runtime thread disables all known servers except roam and opt-ins", () => {
+  const config = runtimeThreadConfig(["get_graph_guidelines", "get_block"], {
+    knownServers: ["paper", "node_repl", "felt", "roam"],
+    enabledServers: ["felt", "unknown"],
+  });
   assert.equal(config.features.plugins, false);
   assert.equal(config.features.apps, false);
   assert.equal(config.mcp_servers.paper.enabled, false);
   assert.equal(config.mcp_servers.node_repl.enabled, false);
+  assert.equal(config.mcp_servers.felt.enabled, true);
+  assert.equal(Object.hasOwn(config.mcp_servers, "unknown"), false);
+  assert.equal(config.mcp_servers.roam.enabled, true);
   assert.deepEqual(
     config.mcp_servers.roam.enabled_tools,
     ["get_graph_guidelines", "get_block"],
   );
+});
+
+test("config scanner finds MCP server names in headers and dotted keys", () => {
+  const names = scanConfigMcpServerNames([
+    "[mcp_servers.Railway]",
+    'args = ["-y"]',
+    '[mcp_servers."felt server"]',
+    'url = "https://felt.com/mcp"',
+    'mcp_servers.paper.command = "python3"',
+    "[mcp_servers.roam]",
+    'command = "npx"',
+    "[other.table]",
+    "x = 1",
+  ].join("\n"));
+  assert.deepEqual(names, ["Railway", "felt server", "paper"]);
 });
 
 test("tool approvals answer every question with the exact offered label", () => {
@@ -923,6 +987,9 @@ test("bridge exposes models, recent messages, and panel-only chat", async (t) =>
         },
       ];
     },
+    async listMcpServers() {
+      return ["felt", "paper"];
+    },
     async listThreadMessages(threadId) {
       assert.equal(threadId, "thread_12345678");
       return [{ role: "assistant", text: "Earlier reply" }];
@@ -957,6 +1024,7 @@ test("bridge exposes models, recent messages, and panel-only chat", async (t) =>
         effort: "medium",
         serviceTier: undefined,
         accessMode: "auto",
+        enabledServers: ["felt"],
       });
       onProgress({ kind: "summary", text: "Thinking" });
       onThread({ threadId: "thread_12345678" });
@@ -1037,6 +1105,24 @@ test("bridge exposes models, recent messages, and panel-only chat", async (t) =>
     name: "Readable graph title",
   });
 
+  const serversResponse = await fetch(`${base}/mcp-servers`, { headers });
+  assert.equal(serversResponse.status, 200);
+  assert.deepEqual(await serversResponse.json(), {
+    servers: ["felt", "paper"],
+  });
+
+  const badServersResponse = await fetch(`${base}/chat`, {
+    method: "POST",
+    headers: { ...headers, "content-type": "application/json" },
+    body: JSON.stringify({
+      graph: "maskys",
+      message: "Hello panel",
+      promptBlockUid: "prompt123",
+      enabledServers: ["ok", 7],
+    }),
+  });
+  assert.equal(badServersResponse.status, 400);
+
   const chatResponse = await fetch(`${base}/chat`, {
     method: "POST",
     headers: { ...headers, "content-type": "application/json" },
@@ -1046,6 +1132,7 @@ test("bridge exposes models, recent messages, and panel-only chat", async (t) =>
       promptBlockUid: "prompt123",
       model: "model-from-list",
       effort: "medium",
+      enabledServers: ["felt", "felt"],
     }),
   });
   const events = (await chatResponse.text())

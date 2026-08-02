@@ -27,6 +27,7 @@ const CHAT_TRANSCRIPT_MIN_HEIGHT = 140;
 const CHAT_TRANSCRIPT_MAX_HEIGHT = 640;
 const CHAT_SCROLL_BOTTOM_THRESHOLD = 24;
 const CHAT_ACCESS_MODES = new Set(["auto", "read-only", "manual"]);
+const ENABLED_MCP_SERVERS_SETTING = "enabled-mcp-servers";
 const NATIVE_WINDOW_HEADER_CLASS = "roam-codex-native-window-header";
 const NATIVE_COMPOSER_CLASS = "roam-codex-native-composer";
 let ACTIVE_CHAT_PANEL = null;
@@ -34,6 +35,7 @@ let SIDEBAR_CHAT_LAUNCHER = null;
 let CHAT_PANEL_OPEN_PROMISE = null;
 let CHAT_PANEL_CLOSE_PROMISE = null;
 let CHAT_TOGGLE_HOTKEY_DISPOSE = null;
+let EXTENSION_SETTINGS = null;
 const CHAT_TOGGLE_HOTKEY_KEY = "__roamCodexToggleHotkeyDispose";
 
 export const RUNNING_BLOCK_TEXT = "[[Codex/running]]";
@@ -54,6 +56,18 @@ function emptyChatState() {
     },
     conversations: {},
   };
+}
+
+function sanitizeEnabledMcpServers(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(
+    value.filter((name) =>
+      typeof name === "string" &&
+      name.trim() &&
+      name.length <= 64 &&
+      !/[\u0000-\u001f]/.test(name)
+    ),
+  )].slice(0, 32);
 }
 
 function validThreadId(value) {
@@ -330,6 +344,11 @@ export async function requestPanelModels(options = {}) {
   return Array.isArray(result.models) ? result.models : [];
 }
 
+export async function requestPanelMcpServers(options = {}) {
+  const result = await bridgeJson("/mcp-servers", options);
+  return sanitizeEnabledMcpServers(result.servers);
+}
+
 export async function requestPanelThreadSummaries(threadIds, {
   fetchImpl = window.fetch.bind(window),
   token = getToken(),
@@ -432,6 +451,7 @@ export async function requestPanelChat(message, {
   effort = null,
   serviceTier,
   accessMode = "auto",
+  enabledServers = [],
   onProgress = () => {},
   onStarted = () => {},
   onThread = () => {},
@@ -456,6 +476,8 @@ export async function requestPanelChat(message, {
   if (effort) body.effort = effort;
   if (serviceTier !== undefined) body.serviceTier = serviceTier;
   body.accessMode = CHAT_ACCESS_MODES.has(accessMode) ? accessMode : "auto";
+  const sanitizedServers = sanitizeEnabledMcpServers(enabledServers);
+  if (sanitizedServers.length) body.enabledServers = sanitizedServers;
 
   const response = await fetchImpl(`${BRIDGE_URL}/chat`, {
     method: "POST",
@@ -2200,6 +2222,11 @@ export function createChatPanel({
   rootBlockUid,
   requestChatImpl = requestPanelChat,
   requestModelsImpl = requestPanelModels,
+  requestMcpServersImpl = requestPanelMcpServers,
+  readEnabledMcpServersImpl = () =>
+    EXTENSION_SETTINGS?.get?.(ENABLED_MCP_SERVERS_SETTING),
+  writeEnabledMcpServersImpl = (servers) =>
+    EXTENSION_SETTINGS?.set?.(ENABLED_MCP_SERVERS_SETTING, servers),
   requestMessagesImpl = requestPanelMessages,
   requestHistoryImpl = requestPanelThreadSummaries,
   requestThreadNameImpl = requestPanelThreadName,
@@ -2250,6 +2277,10 @@ export function createChatPanel({
   let messages = [];
   let models = [];
   let modelsReady = false;
+  let mcpServers = [];
+  let enabledMcpServers = sanitizeEnabledMcpServers(
+    readEnabledMcpServersImpl(),
+  );
   let runId = null;
   let running = false;
   let runStartedAt = 0;
@@ -3130,6 +3161,61 @@ export function createChatPanel({
           description,
         );
       }
+      return;
+    }
+
+    if (pickerLevel === "tools") {
+      const addToggle = (label, active, onToggle, description = "") => {
+        const option = panelButton(
+          doc,
+          `roam-codex-chat-picker-option${active ? " is-active" : ""}`,
+          "",
+          description,
+        );
+        option.setAttribute("role", "menuitemcheckbox");
+        option.setAttribute("aria-checked", String(active));
+        option.appendChild(createPanelElement(
+          doc,
+          "span",
+          "roam-codex-chat-picker-option-label",
+          label,
+        ));
+        if (description) {
+          option.appendChild(createPanelElement(
+            doc,
+            "span",
+            "roam-codex-chat-picker-option-description",
+            description,
+          ));
+        }
+        if (onToggle) {
+          option.addEventListener("click", () => {
+            onToggle();
+            renderPickerMenu();
+          });
+        } else {
+          option.disabled = true;
+        }
+        pickerSubmenu.appendChild(option);
+        return option;
+      };
+
+      addToggle("Roam", true, null, "Graph tools are always available");
+      for (const name of mcpServers) {
+        const active = enabledMcpServers.includes(name);
+        addToggle(name, active, () => {
+          const previous = enabledMcpServers;
+          const next = new Set(enabledMcpServers);
+          if (active) next.delete(name);
+          else next.add(name);
+          enabledMcpServers = sanitizeEnabledMcpServers([...next]);
+          void Promise.resolve(writeEnabledMcpServersImpl(enabledMcpServers))
+            .catch(() => {
+              enabledMcpServers = previous;
+              if (pickerOpen) renderPickerMenu();
+            });
+        });
+      }
     }
   };
 
@@ -3153,6 +3239,16 @@ export function createChatPanel({
       rows.push(["Speed", currentTier?.name || currentTier?.id || "—", "speed"]);
     }
     rows.push(["Access", effortLabel(pickerAccess), "access"]);
+    if (mcpServers.length) {
+      const enabledCount = enabledMcpServers
+        .filter((name) => mcpServers.includes(name))
+        .length;
+      rows.push([
+        "Tools",
+        enabledCount ? `Roam + ${enabledCount}` : "Roam only",
+        "tools",
+      ]);
+    }
     for (const [label, value, level] of rows) {
       const row = panelButton(
         doc,
@@ -3631,6 +3727,7 @@ export function createChatPanel({
         effort: effortOverride,
         serviceTier: speedOverride,
         accessMode: pickerAccess,
+        enabledServers: enabledMcpServers,
         onStarted: ({ runId: startedRunId }) => {
           runId = startedRunId;
         },
@@ -3868,6 +3965,16 @@ export function createChatPanel({
       if (closed) return;
       pickerButton.textContent = "Models unavailable";
       setProgress(error.message, "error");
+    });
+
+  void requestMcpServersImpl()
+    .then((servers) => {
+      if (closed) return;
+      mcpServers = Array.isArray(servers) ? servers : [];
+      if (pickerOpen) renderPickerMenu();
+    })
+    .catch(() => {
+      // Without a server list the picker simply omits the Tools row.
     });
 
   const initialThreadId = state.activeThreadId;
@@ -4230,6 +4337,7 @@ export async function checkBridge({
 
 export default {
   onload: ({ extensionAPI }) => {
+    EXTENSION_SETTINGS = extensionAPI.settings;
     cleanupStaleChatUi();
     ACTIVE_CHAT_PANEL = null;
     CHAT_PANEL_OPEN_PROMISE = null;
@@ -4312,6 +4420,7 @@ export default {
     });
   },
   onunload: () => {
+    EXTENSION_SETTINGS = null;
     CHAT_TOGGLE_HOTKEY_DISPOSE?.();
     CHAT_TOGGLE_HOTKEY_DISPOSE = null;
     SIDEBAR_CHAT_LAUNCHER?.dispose?.();

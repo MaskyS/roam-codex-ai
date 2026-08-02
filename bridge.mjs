@@ -9,14 +9,23 @@ import {
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { EventEmitter } from "node:events";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
-export const DEFAULT_RUNTIME_CWD = resolve(tmpdir(), "roam-better-ai-runtime");
+export const RUNTIME_HOME = resolve(homedir(), ".roam-better-ai");
+const DEFAULT_GRAPH = "maskys";
+
+export function runtimeCwdForGraph(graph) {
+  const encoded = encodeURIComponent(String(graph || "graph"));
+  const safe = encoded === "." || encoded === ".." ? `_${encoded}` : encoded;
+  return resolve(RUNTIME_HOME, "graphs", safe);
+}
+
+export const DEFAULT_RUNTIME_CWD = runtimeCwdForGraph(DEFAULT_GRAPH);
 const DEFAULT_CODEX_HOME = resolve(
   process.env.CODEX_HOME || resolve(homedir(), ".codex"),
 );
@@ -30,7 +39,6 @@ const RUNTIME_WORK_INSTRUCTIONS = readFileSync(
 ).trim();
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 47321;
-const DEFAULT_GRAPH = "maskys";
 const MAX_BODY_BYTES = 16 * 1024;
 const MAX_PROGRESS_TEXT_LENGTH = 240;
 const MAX_CHAT_MESSAGE_LENGTH = 8_000;
@@ -71,16 +79,20 @@ const RUNTIME_CHAT_ROAM_TOOLS = [
   "file_upload",
   "file_delete",
 ];
-const RUNTIME_DISABLED_MCP_SERVERS = [
-  "Railway",
-  "computer-use",
-  "node_repl",
-  "paper_access_mock",
-  "railway",
-  "felt",
-  "paper",
-  "supabase",
-];
+export function scanConfigMcpServerNames(configToml) {
+  const names = new Set();
+  const patterns = [
+    /^\s*\[\[?\s*mcp_servers\s*\.\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_-]+))/gm,
+    /^\s*mcp_servers\s*\.\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_-]+))\s*[.=[]/gm,
+  ];
+  for (const pattern of patterns) {
+    for (const match of String(configToml).matchAll(pattern)) {
+      names.add(match[1] ?? match[2] ?? match[3]);
+    }
+  }
+  names.delete("roam");
+  return [...names].sort();
+}
 
 function missingThreadError(error) {
   return /not found|does not exist|no rollout/i.test(error?.message || "");
@@ -103,7 +115,15 @@ function threadSummary(thread) {
 
 export function runtimeAppServerArgs({
   roamHome = resolve(ROOT, ".dev", "roam-home"),
+  disableServers = [],
 } = {}) {
+  const disabledServers = [...new Set(disableServers)]
+    .filter((server) =>
+      typeof server === "string" &&
+      server !== "roam" &&
+      server.length > 0 &&
+      !/[\u0000-\u001f]/.test(server)
+    );
   return [
     "app-server",
     "--stdio",
@@ -118,17 +138,39 @@ export function runtimeAppServerArgs({
     "-c",
     "apps._default.enabled=false",
     "-c",
+    'mcp_servers.roam.command="npx"',
+    "-c",
+    'mcp_servers.roam.args=["--yes","@roam-research/roam-mcp"]',
+    "-c",
+    "mcp_servers.roam.enabled=true",
+    "-c",
     `mcp_servers.roam.env={HOME=${JSON.stringify(roamHome)}}`,
     "-c",
     `mcp_servers.roam.enabled_tools=${JSON.stringify(RUNTIME_CHAT_ROAM_TOOLS)}`,
-    ...RUNTIME_DISABLED_MCP_SERVERS.flatMap((server) => [
-      "-c",
-      `mcp_servers.${server}.enabled=false`,
-    ]),
+    ...(disabledServers.length
+      ? [
+          "-c",
+          `mcp_servers={${
+            disabledServers.map((server) =>
+              `${JSON.stringify(server)}={enabled=false}`
+            ).join(",")
+          }}`,
+        ]
+      : []),
   ];
 }
 
-export function runtimeThreadConfig(enabledTools) {
+export function runtimeThreadConfig(enabledTools, {
+  knownServers = [],
+  enabledServers = [],
+} = {}) {
+  const enabled = new Set(enabledServers);
+  const servers = {};
+  for (const name of knownServers) {
+    if (name === "roam") continue;
+    servers[name] = { enabled: enabled.has(name) };
+  }
+  servers.roam = { enabled: true, enabled_tools: enabledTools };
   return {
     features: {
       apps: false,
@@ -137,15 +179,7 @@ export function runtimeThreadConfig(enabledTools) {
       remote_plugin: false,
     },
     apps: { _default: { enabled: false } },
-    mcp_servers: {
-      ...Object.fromEntries(
-        RUNTIME_DISABLED_MCP_SERVERS.map((server) => [
-          server,
-          { enabled: false },
-        ]),
-      ),
-      roam: { enabled: true, enabled_tools: enabledTools },
-    },
+    mcp_servers: servers,
   };
 }
 
@@ -501,6 +535,7 @@ export class AppServerClient extends EventEmitter {
     this.nextId = 1;
     this.ready = false;
     this.modelsCache = null;
+    this.knownMcpServers = null;
   }
 
   async start() {
@@ -517,9 +552,17 @@ export class AppServerClient extends EventEmitter {
 
   async #startProcess() {
     await mkdir(this.runtimeCwd, { recursive: true, mode: 0o700 });
+    let scannedServers = [];
+    try {
+      scannedServers = scanConfigMcpServerNames(
+        await readFile(resolve(this.codexHome, "config.toml"), "utf8"),
+      );
+    } catch {
+      // A missing or unreadable config has no user MCP servers to disable.
+    }
     const child = this.spawnProcess(
       this.command,
-      runtimeAppServerArgs(),
+      runtimeAppServerArgs({ disableServers: scannedServers }),
       {
         cwd: this.runtimeCwd,
         env: process.env,
@@ -557,6 +600,15 @@ export class AppServerClient extends EventEmitter {
       30_000,
     );
     this.notify("initialized", {});
+    const configResult = await this.request("config/read", {}, 30_000);
+    const configuredServers = Object.keys(
+      configResult?.config?.mcp_servers || {},
+    );
+    this.knownMcpServers = [
+      ...new Set([...scannedServers, ...configuredServers]),
+    ]
+      .filter((name) => name !== "roam")
+      .sort();
     this.ready = true;
   }
 
@@ -626,6 +678,7 @@ export class AppServerClient extends EventEmitter {
     this.child = null;
     this.ready = false;
     this.modelsCache = null;
+    this.knownMcpServers = null;
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
       pending.reject(error);
@@ -739,6 +792,11 @@ export class AppServerClient extends EventEmitter {
     return { threads, missingThreadIds, unavailableThreadIds };
   }
 
+  async listMcpServers() {
+    await this.start();
+    return this.knownMcpServers || [];
+  }
+
   async setThreadName(threadId, name) {
     await this.start();
     await this.request("thread/name/set", { threadId, name });
@@ -791,6 +849,7 @@ export class AppServerClient extends EventEmitter {
     effort = null,
     serviceTier,
     accessMode = "auto",
+    enabledServers = [],
     onProgress = () => {},
     onThread = () => {},
     onStarted = () => {},
@@ -845,11 +904,18 @@ export class AppServerClient extends EventEmitter {
       ? RUNTIME_READ_ROAM_TOOLS
       : RUNTIME_CHAT_ROAM_TOOLS;
     const approvalPolicy = accessMode === "read-only" ? "never" : "on-request";
+    const knownServers = this.knownMcpServers || [];
+    const activeServers = accessMode === "read-only"
+      ? []
+      : enabledServers.filter((name) => knownServers.includes(name));
     const threadOptions = {
       cwd: this.runtimeCwd,
       approvalPolicy,
       sandbox: "read-only",
-      config: runtimeThreadConfig(enabledRoamTools),
+      config: runtimeThreadConfig(enabledRoamTools, {
+        knownServers,
+        enabledServers: activeServers,
+      }),
       developerInstructions: runtimeInstructions(
         `${RUNTIME_CHAT_INSTRUCTIONS}\n\n${chatAccessInstruction(accessMode)}`,
         graph,
@@ -1024,6 +1090,7 @@ export class AppServerClient extends EventEmitter {
     this.child = null;
     this.ready = false;
     this.modelsCache = null;
+    this.knownMcpServers = null;
     if (!child) return;
     child.stdin.end();
     child.kill("SIGTERM");
@@ -1041,7 +1108,9 @@ export class AppServerClient extends EventEmitter {
       cwd: this.runtimeCwd,
       approvalPolicy: "never",
       sandbox: "read-only",
-      config: runtimeThreadConfig(RUNTIME_READ_ROAM_TOOLS),
+      config: runtimeThreadConfig(RUNTIME_READ_ROAM_TOOLS, {
+        knownServers: this.knownMcpServers || [],
+      }),
       serviceName: "roam_codex_lab",
       ephemeral: true,
       developerInstructions: runtimeInstructions(
@@ -1590,6 +1659,25 @@ export function createBridgeServer({
       return;
     }
 
+    if (request.method === "GET" && request.url === "/mcp-servers") {
+      if (!bearerMatches(request.headers.authorization, token)) {
+        sendJson(response, 401, { error: "Invalid bridge token." }, origin);
+        return;
+      }
+      try {
+        const servers = await client.listMcpServers();
+        sendJson(response, 200, { servers }, origin);
+      } catch (error) {
+        sendJson(
+          response,
+          502,
+          { error: error.message || "Could not list Codex MCP servers." },
+          origin,
+        );
+      }
+      return;
+    }
+
     if (request.method === "POST" && request.url === "/threads/summaries") {
       if (!bearerMatches(request.headers.authorization, token)) {
         sendJson(response, 401, { error: "Invalid bridge token." }, origin);
@@ -1788,6 +1876,23 @@ export function createBridgeServer({
         sendJson(response, 400, { error: "Invalid accessMode." }, origin);
         return;
       }
+      const requestedServers = body.enabledServers === undefined
+        ? []
+        : body.enabledServers;
+      if (
+        !Array.isArray(requestedServers) ||
+        requestedServers.length > 32 ||
+        requestedServers.some((name) =>
+          typeof name !== "string" ||
+          !name.trim() ||
+          name.length > 64 ||
+          /[\u0000-\u001f]/.test(name)
+        )
+      ) {
+        sendJson(response, 400, { error: "Invalid enabledServers." }, origin);
+        return;
+      }
+      const enabledServers = [...new Set(requestedServers)];
       if (
         requestedThreadId &&
         activeRunsByThreadId.has(requestedThreadId)
@@ -1824,6 +1929,7 @@ export function createBridgeServer({
         threadId: requestedThreadId,
         promptBlockUid,
         messageLength: message.length,
+        ...(enabledServers.length ? { enabledServers } : {}),
       });
       startNdjson(response, origin);
       writeNdjson(response, { type: "started", runId });
@@ -1840,6 +1946,7 @@ export function createBridgeServer({
             ? body.serviceTier
             : undefined,
           accessMode,
+          enabledServers,
           onProgress: (progress) => {
             writeNdjson(response, { type: "progress", ...progress });
           },
@@ -2165,7 +2272,7 @@ async function main() {
   const host = process.env.ROAM_CODEX_HOST || DEFAULT_HOST;
   const port = Number(process.env.ROAM_CODEX_PORT || DEFAULT_PORT);
   const graph = process.env.ROAM_GRAPH || DEFAULT_GRAPH;
-  const client = new AppServerClient();
+  const client = new AppServerClient({ runtimeCwd: runtimeCwdForGraph(graph) });
   const server = createBridgeServer({ token, graph, client });
 
   await new Promise((resolveListen, rejectListen) => {
