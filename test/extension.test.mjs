@@ -18,6 +18,53 @@ globalThis.window = {
   },
 };
 
+const reactRoots = [];
+window.React = {
+  createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+};
+window.ReactDOM = {};
+window.ReactDOMClient = {
+  createRoot(container) {
+    const renderNode = (node) => {
+      if (node == null || node === false) return null;
+      if (Array.isArray(node)) return node.map(renderNode).filter(Boolean);
+      if (typeof node === "string" || typeof node === "number") return String(node);
+      if (typeof node.type === "function") {
+        return renderNode(node.type({ ...node.props, children: node.children }));
+      }
+      const element = container.ownerDocument.createElement(node.type);
+      for (const [name, value] of Object.entries(node.props)) {
+        if (name === "children" || name === "key" || value == null) continue;
+        if (name.startsWith("on") && typeof value === "function") {
+          element.addEventListener(name.slice(2).toLowerCase(), value);
+        } else if (name === "className") element.className = value;
+        else if (name === "data-state") element.dataset.state = value;
+        else if (name === "disabled") element.disabled = value;
+        else element.setAttribute(name, value);
+      }
+      for (const child of node.children.flat(Infinity)) {
+        const rendered = renderNode(child);
+        if (typeof rendered === "string") element.textContent += rendered;
+        else if (rendered) element.appendChild(rendered);
+      }
+      return element;
+    };
+    const root = {
+      unmounted: false,
+      render(node) {
+        const rendered = renderNode(node);
+        container.replaceChildren(...(Array.isArray(rendered) ? rendered : [rendered]).filter(Boolean));
+      },
+      unmount() {
+        this.unmounted = true;
+        container.replaceChildren();
+      },
+    };
+    reactRoots.push(root);
+    return root;
+  },
+};
+
 const {
   CHAT_COMPOSER_PLACEHOLDER,
   RUNNING_BLOCK_TEXT,
@@ -243,6 +290,7 @@ function createFakePanelDocument() {
     const classes = new Set();
     let ownText = "";
     const element = {
+      ownerDocument: null,
       tagName,
       children: [],
       listeners: {},
@@ -300,9 +348,10 @@ function createFakePanelDocument() {
         ownText = String(value);
       },
     };
+    element.ownerDocument = doc;
     return element;
   };
-  return {
+  const doc = {
     createElement: makeElement,
     listeners: documentListeners,
     addEventListener(name, handler) {
@@ -312,6 +361,7 @@ function createFakePanelDocument() {
       if (documentListeners[name] === handler) delete documentListeners[name];
     },
   };
+  return doc;
 }
 
 function panelElements(controller) {
@@ -3027,7 +3077,10 @@ test("the transcript offers a reduced-motion scroll-to-latest control", async ()
   transcript.listeners.scroll();
   assert.equal(scrollLatest.hidden, true);
 
+  const approvalRoot = reactRoots.at(-1);
+  assert.equal(approvalRoot.unmounted, false);
   await controller.close();
+  assert.equal(approvalRoot.unmounted, true);
   assert.equal(transcript.listeners.scroll, undefined);
 });
 

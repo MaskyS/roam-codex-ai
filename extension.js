@@ -1706,7 +1706,35 @@ function createPanelElement(doc, tag, className, text = "") {
   if (text) element.textContent = text;
   return element;
 }
-
+function ChatApprovalCards({ approvals, decide }) {
+  const h = window.React.createElement;
+  const button = (approvalId, state, decision, label) => h("button", {
+    type: "button",
+    className: `roam-codex-chat-approval-${decision}`,
+    title: `${label} this Roam change`,
+    disabled: state === "submitting",
+    onClick: () => decide(approvalId, decision),
+  }, label);
+  return approvals.map(({ approvalId, questions, state }) => h(
+    "section", {
+      key: approvalId,
+      className: "roam-codex-chat-approval",
+      "aria-label": "Roam change approval",
+      "data-state": state || undefined,
+    },
+    h("div", { className: "roam-codex-chat-approval-title" },
+      questions.find((question) => question?.header)?.header ||
+        "Allow Roam change?"),
+    ...questions.filter((question) => question?.question).map((question, index) =>
+      h("div", {
+        key: `${approvalId}-${index}`,
+        className: "roam-codex-chat-approval-question",
+      }, question.question)),
+    h("div", { className: "roam-codex-chat-approval-actions" },
+      button(approvalId, state, "reject", "Reject"),
+      button(approvalId, state, "accept", "Allow")),
+  ));
+}
 export function renderRoamMarkdown(
   element,
   string,
@@ -2718,9 +2746,12 @@ export function createChatPanel({
     "roam-codex-chat-approvals",
   );
   approvalContainer.hidden = true;
+  const createRoot = window.ReactDOMClient?.createRoot;
+  if (!window.React?.createElement || !createRoot)
+    throw new Error("Codex chat requires Roam's React 18 globals.");
+  const approvalRoot = createRoot(approvalContainer);
   transcript.appendChild(approvalContainer);
   transcript.appendChild(progress);
-
   const syncTranscriptStatus = ({ scroll = false } = {}) => {
     if (progress.parentNode !== transcript) transcript.appendChild(progress);
     transcript.hidden = !messages.length && progress.hidden &&
@@ -3134,77 +3165,40 @@ export function createChatPanel({
   const removeApprovalCard = (approvalId) => {
     if (!approvalCards.has(approvalId)) return;
     approvalCards.delete(approvalId);
-    approvalContainer.replaceChildren(...approvalCards.values());
     approvalContainer.hidden = approvalCards.size === 0;
+    renderApprovalCards();
   };
-
   const clearApprovalCards = () => {
     approvalCards.clear();
-    approvalContainer.replaceChildren();
     approvalContainer.hidden = true;
+    renderApprovalCards();
   };
-
+  const decideApproval = (approvalId, decision) => {
+    const approval = approvalCards.get(approvalId);
+    if (!runId || !approval || approval.state === "submitting") return;
+    approval.state = "submitting";
+    renderApprovalCards();
+    void approvalRequest(runId, approvalId, decision)
+      .then(() => {
+        removeApprovalCard(approvalId);
+        setProgress("Continuing", "activity");
+      })
+      .catch((error) => {
+        approval.state = "error";
+        renderApprovalCards();
+        setProgress(error.message || "Could not answer the approval.", "error");
+      });
+  };
+  const renderApprovalCards = () => approvalRoot.render(
+    window.React.createElement(ChatApprovalCards, {
+      approvals: [...approvalCards.values()],
+      decide: decideApproval,
+    }),
+  );
   const renderApproval = ({ approvalId, questions }) => {
     if (approvalCards.has(approvalId)) return;
-    const card = createPanelElement(doc, "section", "roam-codex-chat-approval");
-    card.setAttribute("aria-label", "Roam change approval");
-    const title = createPanelElement(
-      doc,
-      "div",
-      "roam-codex-chat-approval-title",
-      questions.find((question) => question?.header)?.header || "Allow Roam change?",
-    );
-    card.appendChild(title);
-    for (const question of questions) {
-      if (!question?.question) continue;
-      card.appendChild(createPanelElement(
-        doc,
-        "div",
-        "roam-codex-chat-approval-question",
-        question.question,
-      ));
-    }
-    const approvalActions = createPanelElement(
-      doc,
-      "div",
-      "roam-codex-chat-approval-actions",
-    );
-    const rejectButton = panelButton(
-      doc,
-      "roam-codex-chat-approval-reject",
-      "Reject",
-      "Reject this Roam change",
-    );
-    const acceptButton = panelButton(
-      doc,
-      "roam-codex-chat-approval-accept",
-      "Allow",
-      "Allow this Roam change",
-    );
-    const decide = (decision) => {
-      if (!runId) return;
-      rejectButton.disabled = true;
-      acceptButton.disabled = true;
-      card.dataset.state = "submitting";
-      void approvalRequest(runId, approvalId, decision)
-        .then(() => {
-          removeApprovalCard(approvalId);
-          setProgress("Continuing", "activity");
-        })
-        .catch((error) => {
-          card.dataset.state = "error";
-          rejectButton.disabled = false;
-          acceptButton.disabled = false;
-          setProgress(error.message || "Could not answer the approval.", "error");
-        });
-    };
-    rejectButton.addEventListener("click", () => decide("reject"));
-    acceptButton.addEventListener("click", () => decide("accept"));
-    approvalActions.appendChild(rejectButton);
-    approvalActions.appendChild(acceptButton);
-    card.appendChild(approvalActions);
-    approvalCards.set(approvalId, card);
-    approvalContainer.appendChild(card);
+    approvalCards.set(approvalId, { approvalId, questions, state: "" });
+    renderApprovalCards();
     approvalContainer.hidden = false;
     transcript.hidden = false;
     transcript.scrollTop = transcript.scrollHeight;
@@ -4249,6 +4243,7 @@ export function createChatPanel({
     for (const timer of copyFeedbackTimers.values()) clearTimeoutImpl(timer);
     copyFeedbackTimers.clear();
     disposeRenderedMessages();
+    approvalRoot.unmount();
     header.remove();
     panel.remove();
     controls.remove();
