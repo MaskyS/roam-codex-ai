@@ -448,6 +448,7 @@ function ChatPicker({ picker, levelLabel, onToggle, onOpenLevel, onPick }) {
           isOpen={picker.open && row.level === picker.level}
           minimal={true}
           modifiers={PICKER_POPOVER_MODIFIERS}
+          openOnTargetFocus={false}
           popoverClassName="roam-codex-chat-picker-popover roam-codex-chat-picker-submenu-popover"
           portalClassName="roam-codex-chat-picker-portal"
           position={Position.RIGHT_TOP}
@@ -465,7 +466,6 @@ function ChatPicker({ picker, levelLabel, onToggle, onOpenLevel, onPick }) {
             aria-expanded={String(row.level === picker.level)}
             data-level={row.level}
             onMouseEnter={() => openLevel(row.level)}
-            onFocus={() => openLevel(row.level)}
             onClick={() => openLevel(row.level)}
             onKeyDown={(event) => {
               if (!["ArrowRight", "Enter", " "].includes(event.key)) return;

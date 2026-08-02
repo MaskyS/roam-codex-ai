@@ -2814,6 +2814,7 @@ test("chat clears a scratch composer before requesting a reply", async () => {
     pickerMenuRows(pickerMenu).map((row) => row.children?.[1]?.textContent),
     ["GPT-5.6-Sol", "Low", "Auto"],
   );
+  assert.equal(pickerMenuRows(pickerMenu)[1].listeners.focus, undefined);
   pickerMenuRows(pickerMenu)[1].listeners.mouseenter();
   pickerSubmenu = panelElements(controller).find(
     (element) => element.className === "roam-codex-chat-picker-submenu",
@@ -2832,6 +2833,17 @@ test("chat clears a scratch composer before requesting a reply", async () => {
     pickerSubmenu.children
       .map((option) => option.className.includes("is-active")),
     [true, false, false],
+  );
+  pickerMenuRows(pickerMenu)[2].listeners.keydown({
+    key: "ArrowRight",
+    preventDefault() {},
+  });
+  pickerSubmenu = panelElements(controller).find(
+    (element) => element.className === "roam-codex-chat-picker-submenu",
+  );
+  assert.deepEqual(
+    pickerSubmenu.children.map((option) => option.children?.[0]?.textContent),
+    ["Auto", "Read only", "Manual"],
   );
   pickerButton.listeners.click();
   pickerMenu = panelElements(controller).find(
