@@ -37,6 +37,7 @@ const {
   openPromptBlockInSidebar,
   pairBridge,
   readChatState,
+  readProbeStream,
   readGraphThreadIndex,
   readFocusedPromptBlock,
   readPromptOutlineUids,
@@ -3948,6 +3949,37 @@ test("requestRunCancellation calls the authenticated run endpoint", async () => 
   assert.equal(captured.init.method, "POST");
   assert.equal(captured.init.headers.authorization, "Bearer local-token");
   assert.equal(result.status, "interrupting");
+});
+
+test("a streamed error keeps its Codex classification for the panel", async () => {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(
+        encoder.encode(
+          '{"type":"started","runId":"run-1"}\n' +
+            '{"type":"error","error":"Codex turn did not complete: usage limit hit.",' +
+            '"codexErrorInfo":"usageLimitExceeded",' +
+            '"additionalDetails":"Your limit resets at 9pm.",' +
+            '"httpStatusCode":429}\n',
+        ),
+      );
+      controller.close();
+    },
+  });
+
+  await assert.rejects(
+    () => readProbeStream(
+      new Response(stream, {
+        status: 200,
+        headers: { "content-type": "application/x-ndjson" },
+      }),
+    ),
+    (error) =>
+      error.codexErrorInfo === "usageLimitExceeded" &&
+      error.additionalDetails === "Your limit resets at 9pm." &&
+      error.httpStatusCode === 429,
+  );
 });
 
 test("requestRunSteer posts the message to the authenticated steer endpoint", async () => {

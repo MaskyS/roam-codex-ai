@@ -390,6 +390,9 @@ export async function readProbeStream(
       if (Number.isFinite(event.httpStatusCode)) {
         error.httpStatusCode = event.httpStatusCode;
       }
+      if (typeof event.additionalDetails === "string") {
+        error.additionalDetails = event.additionalDetails;
+      }
       throw error;
     }
   };
@@ -4047,7 +4050,10 @@ export function createChatPanel({
         );
         return null;
       }
-      const failureText = error.message || "Codex could not finish.";
+      const failureText = [
+        error.message || "Codex could not finish.",
+        error.additionalDetails,
+      ].filter(Boolean).join(" · ");
       setProgress(
         restoreFailed
           ? `${failureText} The submitted outline could not be restored.`

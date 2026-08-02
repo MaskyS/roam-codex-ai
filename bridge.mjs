@@ -1939,6 +1939,8 @@ export function createBridgeServer({
           durationMs: Date.now() - startedAt,
           error: error.message,
           code: error.code,
+          codexErrorInfo: error.codexErrorInfo || null,
+          additionalDetails: error.additionalDetails || null,
         });
         writeNdjson(response, {
           type: "error",
@@ -1950,6 +1952,9 @@ export function createBridgeServer({
             : {}),
           ...(Number.isFinite(error.httpStatusCode)
             ? { httpStatusCode: error.httpStatusCode }
+            : {}),
+          ...(error.additionalDetails
+            ? { additionalDetails: error.additionalDetails }
             : {}),
         });
       } finally {
@@ -2290,6 +2295,8 @@ export function createBridgeServer({
         durationMs: Date.now() - startedAt,
         error: error.message,
         code: error.code,
+        codexErrorInfo: error.codexErrorInfo || null,
+        additionalDetails: error.additionalDetails || null,
       });
       writeNdjson(response, {
         type: "error",
@@ -2301,6 +2308,9 @@ export function createBridgeServer({
           : {}),
         ...(Number.isFinite(error.httpStatusCode)
           ? { httpStatusCode: error.httpStatusCode }
+          : {}),
+        ...(error.additionalDetails
+          ? { additionalDetails: error.additionalDetails }
           : {}),
       });
     } finally {

@@ -1190,6 +1190,56 @@ test("the consent dialog reads Allow, Deny, and timeouts from osascript", async 
   );
 });
 
+test("a failed chat run streams the error classification to the client", async (t) => {
+  const traceEntries = [];
+  const client = {
+    ready: true,
+    async runChat() {
+      const error = new Error("Codex turn did not complete: usage limit hit.");
+      error.codexErrorInfo = "usageLimitExceeded";
+      error.additionalDetails = "Your limit resets at 9pm.";
+      error.httpStatusCode = 429;
+      throw error;
+    },
+  };
+  const server = createBridgeServer({
+    token: "secret-token",
+    graph: "maskys",
+    client,
+    trace: async (entry) => traceEntries.push(entry),
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const response = await fetch(`${base}/chat`, {
+    method: "POST",
+    headers: {
+      origin: "https://roamresearch.com",
+      authorization: "Bearer secret-token",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      graph: "maskys",
+      message: "Do the thing",
+      promptBlockUid: "prompt123",
+    }),
+  });
+  const events = (await response.text())
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  const failure = events.find((event) => event.type === "error");
+  assert.equal(failure.codexErrorInfo, "usageLimitExceeded");
+  assert.equal(failure.additionalDetails, "Your limit resets at 9pm.");
+  assert.equal(failure.httpStatusCode, 429);
+
+  const traced = traceEntries.find((entry) => entry.event === "chat.failed");
+  assert.equal(traced.codexErrorInfo, "usageLimitExceeded");
+  assert.equal(traced.additionalDetails, "Your limit resets at 9pm.");
+});
+
 test("a work run is a chat turn with the block prompt and work instructions", async () => {
   const client = new AppServerClient({ runtimeCwd: "/runtime/agent" });
   const requests = [];
