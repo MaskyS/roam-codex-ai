@@ -18,6 +18,7 @@ import {
   runtimeAppServerArgs,
   runtimeCwdForGraph,
   requestPairingConsent,
+  resolveWindowsCommandInvocation,
   runtimeThreadConfig,
   scanConfigMcpServerNames,
   toolApprovalResponse,
@@ -75,14 +76,16 @@ test("the LaunchAgent runs a private stable copy instead of the npx cache", asyn
       `fixture:${filename}\n`,
     );
   }
-  assert.equal(
-    (await stat(resolve(installed.installPath, "bin.mjs"))).mode & 0o777,
-    0o700,
-  );
-  assert.equal(
-    (await stat(resolve(installed.installPath, "bridge.mjs"))).mode & 0o777,
-    0o600,
-  );
+  if (process.platform !== "win32") {
+    assert.equal(
+      (await stat(resolve(installed.installPath, "bin.mjs"))).mode & 0o777,
+      0o700,
+    );
+    assert.equal(
+      (await stat(resolve(installed.installPath, "bridge.mjs"))).mode & 0o777,
+      0o600,
+    );
+  }
 
   const plist = plistXml({
     nodeBin: "/stable/node",
@@ -92,9 +95,9 @@ test("the LaunchAgent runs a private stable copy instead of the npx cache", asyn
   assert.match(plist, /<string>\/stable\/node<\/string>/);
   assert.match(
     plist,
-    /<string>.*\.roam-better-ai\/app\/9\.8\.7\/bin\.mjs<\/string>/,
+    /<string>.*\.roam-better-ai[\\/]app[\\/]9\.8\.7[\\/]bin\.mjs<\/string>/,
   );
-  assert.doesNotMatch(plist, /\.npm\/_npx/);
+  assert.doesNotMatch(plist, /\.npm[\\/]_npx/);
 });
 
 test("runtime threads use a stable per-graph working directory", () => {
@@ -103,14 +106,19 @@ test("runtime threads use a stable per-graph working directory", () => {
     DEFAULT_RUNTIME_CWD,
     resolve(homedir(), ".roam-better-ai", "graphs", "unconfigured"),
   );
-  assert.match(runtimeCwdForGraph("My Graph!"), /\/my-graph-[A-Za-z0-9_-]{16}$/);
-  assert.match(runtimeCwdForGraph(".."), /\/graph-[A-Za-z0-9_-]{16}$/);
+  assert.match(
+    runtimeCwdForGraph("My Graph!"),
+    /[\\/]my-graph-[A-Za-z0-9_-]{16}$/,
+  );
+  assert.match(runtimeCwdForGraph(".."), /[\\/]graph-[A-Za-z0-9_-]{16}$/);
   assert.notEqual(runtimeCwdForGraph("a/b"), runtimeCwdForGraph("a?b"));
   assert.notEqual(
     runtimeCwdForGraph("Graph").toLowerCase(),
     runtimeCwdForGraph("graph").toLowerCase(),
   );
-  assert.ok(runtimeCwdForGraph("🧠".repeat(200)).split("/").at(-1).length < 100);
+  assert.ok(
+    runtimeCwdForGraph("🧠".repeat(200)).split(/[\\/]/).at(-1).length < 100,
+  );
 });
 
 test("the bridge token lives outside the versioned install and migrates once", async (t) => {
@@ -1292,6 +1300,73 @@ test("runtime graph access is reused when already connected", async () => {
   });
   assert.equal(failed.connected, false);
   await rm(home, { recursive: true, force: true });
+});
+
+test("windows command resolution keeps non-Windows commands unchanged", async () => {
+  assert.deepEqual(
+    await resolveWindowsCommandInvocation({
+      command: "codex",
+      platform: "linux",
+    }),
+    { file: "codex", args: [] },
+  );
+});
+
+test("windows command resolution prefers the npm .cmd shim and its JS entry", async () => {
+  const home = resolve(tmpdir(), `roam-cmd-shim-${process.pid}`);
+  await mkdir(
+    resolve(home, "node_modules", "@openai", "codex", "bin"),
+    { recursive: true },
+  );
+  const shim = resolve(home, "codex.cmd");
+  const entry = resolve(
+    home,
+    "node_modules",
+    "@openai",
+    "codex",
+    "bin",
+    "codex.js",
+  );
+  await writeFile(
+    shim,
+    '@ECHO off\n"%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js" %*\n',
+  );
+  await writeFile(entry, "console.log('codex')\n");
+  const invocation = await resolveWindowsCommandInvocation({
+    command: "codex",
+    platform: "win32",
+    execFileImpl: async () => ({
+      stdout: `${shim}\r\nC:\\other\\codex.exe\r\n`,
+    }),
+  });
+  assert.equal(invocation.file, process.execPath);
+  assert.deepEqual(invocation.args, [entry]);
+  await rm(home, { recursive: true, force: true });
+});
+
+test("runtime graph access retries npx through its JS entry on Windows", async () => {
+  const calls = [];
+  let attempts = 0;
+  const result = await ensureRuntimeGraphAccess({
+    graph: "fresh-graph",
+    home: resolve(tmpdir(), `roam-tools-retry-${process.pid}`),
+    platform: "win32",
+    resolveInvocation: async () => ({
+      file: process.execPath,
+      args: ["C:\\npx-cli.js"],
+    }),
+    execFileImpl: async (command, args) => {
+      calls.push([command, ...args]);
+      attempts += 1;
+      if (attempts === 1) throw new Error("spawn npx ENOENT");
+      return { stdout: "" };
+    },
+  });
+  assert.deepEqual(result, { connected: true, alreadyConnected: false });
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0][0], "npx");
+  assert.equal(calls[1][0], process.execPath);
+  assert.equal(calls[1][1], "C:\\npx-cli.js");
 });
 
 test("a declined pairing dialog refuses to bind", async (t) => {
