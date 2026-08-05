@@ -1272,6 +1272,19 @@ export class AppServerClient extends EventEmitter {
     if (!/^[A-Za-z0-9_-]{6,64}$/.test(blockUid || "")) {
       throw rpcError("A valid Roam block UID is required.", "BLOCK_UID_INVALID");
     }
+    const models = await this.listModels();
+    const selectedModel = rest.model
+      ? models.find((entry) => entry.id === rest.model)
+      : models.find((entry) => entry.isDefault) || models[0];
+    const tierIds = Array.isArray(selectedModel?.serviceTiers)
+      ? selectedModel.serviceTiers.map((tier) => tier?.id)
+      : [];
+    const effectiveServiceTier = serviceTier && tierIds.includes(serviceTier)
+      ? serviceTier
+      : selectedModel?.defaultServiceTier &&
+          tierIds.includes(selectedModel.defaultServiceTier)
+        ? selectedModel.defaultServiceTier
+        : undefined;
     return this.runChat({
       ...rest,
       message: buildWorkPrompt({ graph, blockUid }),
@@ -1280,7 +1293,7 @@ export class AppServerClient extends EventEmitter {
       threadId: null,
       accessMode,
       enabledServers,
-      serviceTier,
+      serviceTier: effectiveServiceTier,
       instructions: RUNTIME_WORK_INSTRUCTIONS,
       ephemeral: true,
       serviceName: "roam_codex_work",

@@ -1660,6 +1660,84 @@ test("read-only access keeps write tools away from a work run", async () => {
   assert.equal(threadStart.params.approvalPolicy, "never");
 });
 
+test("a work run falls back to the model default service tier", async () => {
+  const client = new AppServerClient({ runtimeCwd: "/runtime/agent" });
+  const requests = [];
+  client.start = async () => {};
+  client.listModels = async () => [{
+    id: "default-model",
+    isDefault: true,
+    defaultServiceTier: "standard",
+    serviceTiers: [{ id: "standard" }],
+  }];
+  client.request = async (method, params) => {
+    requests.push({ method, params });
+    if (method === "thread/start") {
+      return { thread: { id: "thread-tier" }, instructionSources: [] };
+    }
+    if (method === "turn/start") {
+      queueMicrotask(() => {
+        client.emit("notification", {
+          method: "turn/completed",
+          params: {
+            threadId: "thread-tier",
+            turn: {
+              id: "turn-tier",
+              status: "completed",
+              items: [{ type: "agentMessage", phase: "final_answer", text: "Done." }],
+            },
+          },
+        });
+      });
+      return { turn: { id: "turn-tier" } };
+    }
+    return {};
+  };
+
+  await client.runWork({ graph: "maskys", blockUid: "abcdefghi" });
+  const turnStart = requests.find((entry) => entry.method === "turn/start");
+  assert.equal(turnStart.params.serviceTier, "standard");
+});
+
+test("a work run omits the service tier when the model has none", async () => {
+  const client = new AppServerClient({ runtimeCwd: "/runtime/agent" });
+  const requests = [];
+  client.start = async () => {};
+  client.listModels = async () => [{
+    id: "default-model",
+    isDefault: true,
+    defaultServiceTier: null,
+    serviceTiers: [],
+  }];
+  client.request = async (method, params) => {
+    requests.push({ method, params });
+    if (method === "thread/start") {
+      return { thread: { id: "thread-no-tier" }, instructionSources: [] };
+    }
+    if (method === "turn/start") {
+      queueMicrotask(() => {
+        client.emit("notification", {
+          method: "turn/completed",
+          params: {
+            threadId: "thread-no-tier",
+            turn: {
+              id: "turn-no-tier",
+              status: "completed",
+              items: [{ type: "agentMessage", phase: "final_answer", text: "Done." }],
+            },
+          },
+        });
+      });
+      return { turn: { id: "turn-no-tier" } };
+    }
+    return {};
+  };
+
+  await client.runWork({ graph: "maskys", blockUid: "abcdefghi" });
+  const turnStart = requests.find((entry) => entry.method === "turn/start");
+  assert.equal(Object.hasOwn(turnStart.params, "serviceTier"), false);
+});
+
 test("a failed turn keeps the Codex error classification", async () => {
   const usageLimited = turnFailureError({
     status: "failed",
