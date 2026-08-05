@@ -2644,6 +2644,21 @@ export function createChatPanel({
   copyTextImpl = copyRoamText,
   setTimeoutImpl = globalThis.setTimeout,
   clearTimeoutImpl = globalThis.clearTimeout,
+  settleComposerResetImpl = () =>
+    new Promise((resolve) => globalThis.setTimeout(resolve, 0)),
+  findComposerEditorImpl = () => {
+    const shell = doc.querySelector?.(".roam-codex-chat-composer-shell");
+    if (shell) {
+      return shell.querySelector?.(
+        '[contenteditable="true"], .block-editor, .rm-block-editor, .rm-block__self',
+      ) || null;
+    }
+    return doc.querySelector?.(
+      ".roam-codex-chat-window > .roam-codex-native-composer " +
+        '[contenteditable="true"]',
+    ) || null;
+  },
+  composerSettleTimeoutMs = 800,
   setIntervalImpl = globalThis.setInterval?.bind(globalThis),
   clearIntervalImpl = globalThis.clearInterval?.bind(globalThis),
   matchMediaImpl = globalThis.matchMedia?.bind(globalThis),
@@ -2745,6 +2760,19 @@ export function createChatPanel({
     ) {
       lastComposerBlockUid = focused["block-uid"];
     }
+  };
+
+  const prepareComposerEditorForSubmit = async () => {
+    const editor = findComposerEditorImpl();
+    if (!editor) return;
+    // The native block editor keeps a local draft for a mounted block.
+    // Blur it before the prompt is read so Roam commits the draft to the
+    // graph; otherwise the editor can overwrite the later reset with its
+    // own state. Both the mouse and Alt+Enter paths call send(), so this
+    // runs identically for both.
+    editor.blur?.();
+    await settleComposerResetImpl();
+    await settleComposerResetImpl();
   };
 
   const panel = createPanelElement(doc, "section", CHAT_PANEL_CLASS);
@@ -3915,21 +3943,95 @@ export function createChatPanel({
     }
     lastComposerBlockUid = resetBlockUid;
     resetPromptUids.add(resetBlockUid);
+    let refocus = true;
     try {
-      const sidebarWindow = findSidebarBlockWindow(rootBlockUid, { api });
-      if (sidebarWindow?.["window-id"]) {
-        await api.ui.setBlockFocusAndSelection({
-          location: {
-            "block-uid": resetBlockUid,
-            "window-id": sidebarWindow["window-id"],
-          },
-        });
+      // Roam applies the outline reset asynchronously and its editor only
+      // re-renders the placeholder while the block stays blurred. Wait for
+      // the visible editor to show the reset before refocusing; focusing too
+      // early resurrects the just-submitted text on the first message of a
+      // New Chat.
+      await settleComposerResetImpl();
+      const settled = await settleComposerEditorAfterReset(prompt.text);
+      if (settled.editorReady) {
+        const sidebarWindow = findSidebarBlockWindow(rootBlockUid, { api });
+        if (sidebarWindow?.["window-id"]) {
+          await api.ui.setBlockFocusAndSelection({
+            location: {
+              "block-uid": resetBlockUid,
+              "window-id": sidebarWindow["window-id"],
+            },
+          });
+        }
+      } else {
+        // Never edit the native editor DOM directly: that can crash Roam.
+        // Heal a late blur-commit that may have rewritten the placeholder,
+        // and leave the stale editor alone; the next click re-syncs it.
+        refocus = false;
+        await healResetPromptPlaceholder(resetBlockUid);
       }
     } catch {
       // The outline has already reset successfully. A focus failure should
       // not turn a valid send into a failed one.
     }
-    return { ok: true, composerCleared: true };
+    return { ok: true, composerCleared: true, refocus };
+  };
+
+  const composerEditorText = (element) =>
+    typeof element?.textContent === "string" ? element.textContent : "";
+
+  const composerEditorShowsSubmitted = (element, submittedText) => {
+    const visible = composerEditorText(element).replace(/\u00A0/g, " ").trim();
+    const submitted = String(submittedText || "").replace(/\u00A0/g, " ").trim();
+    return Boolean(submitted) && visible.includes(submitted);
+  };
+
+  const settleComposerEditorAfterReset = async (submittedText) => {
+    let editor = findComposerEditorImpl();
+    if (!editor || !composerEditorShowsSubmitted(editor, submittedText)) {
+      return { editorReady: true };
+    }
+    const deadline = now() + composerSettleTimeoutMs;
+    while (now() < deadline) {
+      await settleComposerResetImpl();
+      editor = findComposerEditorImpl();
+      if (!composerEditorShowsSubmitted(editor, submittedText)) {
+        return { editorReady: true };
+      }
+    }
+    return { editorReady: false };
+  };
+
+  const healResetPromptPlaceholder = async (blockUid) => {
+    try {
+      const pull = api.data?.async?.pull
+        ? await api.data.async.pull("[:block/string]", [":block/uid", blockUid])
+        : api.data?.pull?.("[:block/string]", [":block/uid", blockUid]);
+      if (pull?.[":block/string"] !== CHAT_COMPOSER_PLACEHOLDER) {
+        await api.data.block.update({
+          block: { uid: blockUid, string: CHAT_COMPOSER_PLACEHOLDER },
+        });
+      }
+    } catch {
+      // The outline is already usable; healing is best-effort.
+    }
+  };
+
+  const refocusClearedComposer = async (prompt) => {
+    const blockUid = scratchPrompt ? rootBlockUid : prompt.uid;
+    try {
+      const sidebarWindow = findSidebarBlockWindow(rootBlockUid, { api });
+      if (sidebarWindow?.["window-id"]) {
+        await api.ui.setBlockFocusAndSelection({
+          location: {
+            "block-uid": blockUid,
+            "window-id": sidebarWindow["window-id"],
+          },
+        });
+      }
+    } catch {
+      // The outline is already empty. A focus failure should not turn a
+      // valid send into a failed one.
+    }
   };
 
   const restoreSubmittedPrompt = async (prompt) => {
@@ -3957,6 +4059,7 @@ export function createChatPanel({
   const steerActiveTurn = async (steerRunId) => {
     let prompt;
     try {
+      await prepareComposerEditorForSubmit();
       prompt = await readPromptImpl({
         preferredBlockUid: lastComposerBlockUid,
       });
@@ -3977,6 +4080,9 @@ export function createChatPanel({
     };
     messages.push(bubble);
     renderMessages();
+    if (cleared.composerCleared && cleared.refocus !== false) {
+      await refocusClearedComposer(prompt);
+    }
     setProgress("Adding to the current turn", "activity");
     try {
       await steerRequest(steerRunId, prompt.text);
@@ -4044,6 +4150,7 @@ export function createChatPanel({
     }
     let prompt;
     try {
+      await prepareComposerEditorForSubmit();
       prompt = await readPromptImpl({
         preferredBlockUid: lastComposerBlockUid,
       });
@@ -4083,6 +4190,9 @@ export function createChatPanel({
       outline: prompt.outline,
     });
     renderMessages();
+    if (composerCleared && cleared.refocus !== false) {
+      await refocusClearedComposer(prompt);
+    }
     runId = null;
     setProgress("Starting", "activity");
 

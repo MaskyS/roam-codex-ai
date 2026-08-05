@@ -2915,6 +2915,175 @@ test("chat clears a scratch composer before requesting a reply", async () => {
   assert.equal(controller.controlsElement.removed, true);
 });
 
+test("first send waits for the native composer editor to render the reset before refocusing", async () => {
+  const editor = {
+    textContent: "Hello from a New Chat",
+    focused: false,
+    blurCalls: 0,
+    focus() {
+      this.focused = true;
+    },
+    blur() {
+      this.blurCalls += 1;
+      this.focused = false;
+    },
+    dispatchEvent() {},
+  };
+  const doc = createFakePanelDocument();
+  doc.querySelector = () => ({ querySelector: () => editor });
+  const focusCalls = [];
+  const lifecycle = [];
+  let focusedAtRead = null;
+  const controller = createChatPanel({
+    doc,
+    storage: { getItem: () => null, setItem: () => {} },
+    api: {
+      ui: {
+        rightSidebar: {
+          getWindows: () => [{
+            type: "block",
+            "block-uid": "root123",
+            "window-id": "sidebar-block-root123",
+          }],
+        },
+        setBlockFocusAndSelection: async ({ location }) => {
+          focusCalls.push({
+            uid: location["block-uid"],
+            editorText: editor.textContent,
+          });
+        },
+      },
+    },
+    rootBlockUid: "root123",
+    scratchPrompt: true,
+    protectedPromptUids: new Set(["root123"]),
+    readPromptImpl: async () => {
+      focusedAtRead = editor.focused;
+      return {
+        uid: "prompt123",
+        text: "Hello from a New Chat",
+      };
+    },
+    clearScratchPromptImpl: async () => {
+      lifecycle.push("clear");
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      editor.textContent = CHAT_COMPOSER_PLACEHOLDER;
+      return true;
+    },
+    requestChatImpl: async () => ({
+      threadId: "thread_settle_123",
+      turnId: "turn-settle",
+      reply: "Done",
+    }),
+    requestModelsImpl: async () => [],
+    requestMessagesImpl: async () => [],
+    requestHistoryImpl: async () => ({
+      threads: [],
+      missingThreadIds: [],
+      unavailableThreadIds: [],
+    }),
+    requestGraphIndexImpl: async () => ({ records: [], errors: [] }),
+    ensureGraphThreadImpl: async () => null,
+    probeConnectionImpl: async () => ({ state: "connected" }),
+    authRequest: async () => ({ auth: "authenticated" }),
+    composerSettleTimeoutMs: 300,
+  });
+
+  await controller.send();
+  assert.ok(editor.blurCalls >= 1);
+  assert.equal(focusedAtRead, false);
+  assert.ok(focusCalls.length >= 1);
+  for (const call of focusCalls) {
+    assert.equal(call.editorText, CHAT_COMPOSER_PLACEHOLDER);
+  }
+  await controller.close();
+});
+
+test("a stale native composer editor is left alone and the reset placeholder is healed", async () => {
+  const editor = {
+    textContent: "Stale New Chat text",
+    focused: false,
+    focus() {
+      this.focused = true;
+    },
+    blur() {
+      this.focused = false;
+    },
+    dispatchEvent() {},
+  };
+  const doc = createFakePanelDocument();
+  doc.querySelector = () => ({ querySelector: () => editor });
+  const execCommands = [];
+  doc.execCommand = (...args) => {
+    execCommands.push(args);
+    return true;
+  };
+  const updates = [];
+  const focusCalls = [];
+  const controller = createChatPanel({
+    doc,
+    storage: { getItem: () => null, setItem: () => {} },
+    api: {
+      ui: {
+        rightSidebar: {
+          getWindows: () => [{
+            type: "block",
+            "block-uid": "root123",
+            "window-id": "sidebar-block-root123",
+          }],
+        },
+        setBlockFocusAndSelection: async ({ location }) => {
+          focusCalls.push(location["block-uid"]);
+        },
+      },
+      data: {
+        async: {
+          pull: async () => ({ ":block/string": "Stale New Chat text" }),
+        },
+        block: {
+          update: async (input) => {
+            updates.push(input);
+          },
+        },
+      },
+    },
+    rootBlockUid: "root123",
+    scratchPrompt: true,
+    protectedPromptUids: new Set(["root123"]),
+    readPromptImpl: async () => ({
+      uid: "prompt123",
+      text: "Stale New Chat text",
+    }),
+    clearScratchPromptImpl: async () => true,
+    requestChatImpl: async () => ({
+      threadId: "thread_force_123",
+      turnId: "turn-force",
+      reply: "Done",
+    }),
+    requestModelsImpl: async () => [],
+    requestMessagesImpl: async () => [],
+    requestHistoryImpl: async () => ({
+      threads: [],
+      missingThreadIds: [],
+      unavailableThreadIds: [],
+    }),
+    requestGraphIndexImpl: async () => ({ records: [], errors: [] }),
+    ensureGraphThreadImpl: async () => null,
+    probeConnectionImpl: async () => ({ state: "connected" }),
+    authRequest: async () => ({ auth: "authenticated" }),
+    composerSettleTimeoutMs: 30,
+  });
+
+  await controller.send();
+  assert.deepEqual(execCommands, []);
+  assert.equal(editor.textContent, "Stale New Chat text");
+  assert.deepEqual(focusCalls, []);
+  assert.deepEqual(updates, [{
+    block: { uid: "root123", string: CHAT_COMPOSER_PLACEHOLDER },
+  }]);
+  await controller.close();
+});
+
 test("a failed or stopped turn restores the submitted outline after optimistic clear", async (t) => {
   for (const scenario of ["failure", "stop"]) {
     await t.test(scenario, async () => {
@@ -2977,7 +3146,7 @@ test("a failed or stopped turn restores the submitted outline after optimistic c
 
       assert.equal(await controller.send(), null);
       assert.deepEqual(lifecycle, ["clear", "request", "restore"]);
-      assert.deepEqual(focusedUids, ["prompt123", "prompt123"]);
+      assert.deepEqual(focusedUids, ["prompt123", "prompt123", "prompt123"]);
       await controller.close();
     });
   }
@@ -3434,6 +3603,9 @@ test("Send stays beside an accessible stop icon while a turn runs", async () => 
   assert.equal(progressMeta.hidden, true);
   assert.equal(progress.parentNode, transcript);
   assert.equal(stopButton.parentNode, actions);
+  // The Send button keeps the native block editor focused on mousedown so
+  // the mouse path enters send() in the same editor state as Alt+Enter;
+  // the send flow blurs the editor itself before reading the prompt.
   let preventedMouseFocus = 0;
   sendButton.listeners.mousedown({
     preventDefault: () => { preventedMouseFocus += 1; },
@@ -3664,6 +3836,7 @@ test("a rejected steer resends the intact draft once the turn settles", async ()
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   const steering = controller.send();
+  await new Promise((resolve) => setTimeout(resolve, 0));
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.deepEqual(lifecycle, [
     "clear:Start here",

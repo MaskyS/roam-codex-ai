@@ -557,8 +557,11 @@ export function ChatControls({
           <span className="roam-codex-chat-stop-icon" aria-hidden="true" />
         </button>
         {/* Remember the composer selection before a pointer click can move
-            browser focus. Keyboard and accessibility activation use the
-            panel's independently tracked composer UID. */}
+            browser focus. The send flow blurs the native editor itself, so
+            the button must not move focus first; that would put Roam's
+            editor into a different state than the Alt+Enter path and break
+            first-send clearing. Keyboard and accessibility activation use
+            the panel's independently tracked composer UID. */}
         <button
           type="button"
           className={`roam-codex-chat-send${steering ? " is-steering" : ""}`}
