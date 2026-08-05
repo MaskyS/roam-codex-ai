@@ -398,7 +398,14 @@ export function runtimeThreadConfig(enabledTools, {
     if (name === "roam") continue;
     servers[name] = { enabled: enabled.has(name) };
   }
-  servers.roam = { enabled: true, enabled_tools: enabledTools };
+  servers.roam = {
+    transport: "stdio",
+    command: "npx",
+    args: ["--yes", "@roam-research/roam-mcp"],
+    required: true,
+    enabled: true,
+    enabled_tools: enabledTools,
+  };
   return {
     features: {
       apps: false,
@@ -928,8 +935,9 @@ export class AppServerClient extends EventEmitter {
       includeToken: false,
       refreshToken: false,
     });
+    const requiresOpenaiAuth = result?.requiresOpenaiAuth !== false;
     return {
-      authenticated: Boolean(result?.authMethod),
+      authenticated: Boolean(result?.authMethod) || !requiresOpenaiAuth,
       method: result?.authMethod || null,
     };
   }

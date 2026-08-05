@@ -319,6 +319,13 @@ test("every runtime thread disables all known servers except roam and opt-ins", 
   assert.equal(config.mcp_servers.felt.enabled, true);
   assert.equal(Object.hasOwn(config.mcp_servers, "unknown"), false);
   assert.equal(config.mcp_servers.roam.enabled, true);
+  assert.equal(config.mcp_servers.roam.transport, "stdio");
+  assert.equal(config.mcp_servers.roam.command, "npx");
+  assert.equal(config.mcp_servers.roam.required, true);
+  assert.deepEqual(config.mcp_servers.roam.args, [
+    "--yes",
+    "@roam-research/roam-mcp",
+  ]);
   assert.deepEqual(
     config.mcp_servers.roam.enabled_tools,
     ["get_graph_guidelines", "get_block"],
@@ -1717,6 +1724,12 @@ test("auth status and browser sign-in flow through the app-server client", async
 
   client.request = async () => ({ authMethod: null });
   assert.equal((await client.readAuthStatus()).authenticated, false);
+
+  client.request = async () => ({
+    authMethod: null,
+    requiresOpenaiAuth: false,
+  });
+  assert.equal((await client.readAuthStatus()).authenticated, true);
 });
 
 test("bridge exposes health version plus auth state and sign-in endpoints", async (t) => {
