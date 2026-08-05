@@ -18,6 +18,7 @@ import {
   PAIRING_CODE_PATH,
   RUNTIME_HOME,
   readBridgeConfig,
+  resolveWindowsCommandInvocation,
   startBridge,
   writeBridgeConfig,
 } from "./bridge.mjs";
@@ -47,6 +48,24 @@ function say(message = "") {
 }
 
 async function which(command) {
+  if (process.platform === "win32") {
+    try {
+      const { stdout } = await execFileAsync("where.exe", [command], {
+        windowsHide: true,
+      });
+      const candidates = String(stdout)
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+      return (
+        candidates.find((candidate) => /\.(cmd|bat)$/i.test(candidate)) ||
+        candidates.find((candidate) => /\.exe$/i.test(candidate)) ||
+        null
+      );
+    } catch {
+      return null;
+    }
+  }
   try {
     const { stdout } = await execFileAsync("which", [command]);
     return stdout.trim() || null;
@@ -144,10 +163,25 @@ async function setup() {
     return;
   }
   let codexVersion = "";
+  const invocation = await resolveWindowsCommandInvocation({
+    command: codexBin,
+  });
   try {
-    ({ stdout: codexVersion } = await execFileAsync(codexBin, ["--version"]));
+    ({ stdout: codexVersion } = await execFileAsync(
+      invocation.file,
+      [...invocation.args, "--version"],
+    ));
   } catch {
-    // The version check below gives one clear update instruction.
+    if (process.platform === "win32") {
+      try {
+        ({ stdout: codexVersion } = await execFileAsync(
+          process.env.ComSpec || "cmd.exe",
+          ["/d", "/s", "/c", `${codexBin} --version`],
+        ));
+      } catch {
+        // The version check below gives one clear update instruction.
+      }
+    }
   }
   if (!codexVersionAtLeast(codexVersion)) {
     say(`Codex CLI ${MIN_CODEX_VERSION} or later is required.`);

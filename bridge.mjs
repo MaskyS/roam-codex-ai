@@ -60,10 +60,83 @@ export function validPairingGraphName(value) {
     !/[\u0000-\u001f]/.test(value);
 }
 
+function windowsCandidateLines(output) {
+  return String(output || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+async function findWindowsShimPath(command, execFileImpl) {
+  if (isAbsolute(command)) {
+    return command;
+  }
+  let stdout = "";
+  try {
+    const result = await execFileImpl("where.exe", [command], {
+      windowsHide: true,
+    });
+    stdout = result?.stdout ?? "";
+  } catch {
+    return null;
+  }
+  const candidates = windowsCandidateLines(stdout);
+  return (
+    candidates.find((candidate) => /\.(cmd|bat)$/i.test(candidate)) ||
+    candidates.find((candidate) => /\.exe$/i.test(candidate)) ||
+    null
+  );
+}
+
+async function windowsShimJavaScriptEntry(shimPath) {
+  let content;
+  try {
+    content = await readFile(shimPath, "utf8");
+  } catch {
+    return null;
+  }
+  const quoted = String(content).match(/"([^"]*node_modules[^"]*\.js)"/i);
+  if (!quoted) return null;
+  const entry = resolve(
+    dirname(shimPath),
+    quoted[1]
+      .replace(/%(?:~?dp0)%?/gi, dirname(shimPath))
+      // Shims are written with Windows separators. Normalizing them keeps
+      // resolution correct when this runs on a POSIX host, which is where
+      // the suite exercises it.
+      .replace(/\\/g, "/"),
+  );
+  try {
+    await readFile(entry);
+    return entry;
+  } catch {
+    return null;
+  }
+}
+
+export async function resolveWindowsCommandInvocation({
+  command,
+  platform = process.platform,
+  execFileImpl = execFileAsync,
+  nodeBin = process.execPath,
+} = {}) {
+  if (platform !== "win32" || !command) {
+    return { file: command, args: [] };
+  }
+  const shimPath = await findWindowsShimPath(command, execFileImpl);
+  if (!shimPath) return { file: command, args: [] };
+  const entry = await windowsShimJavaScriptEntry(shimPath);
+  return entry
+    ? { file: nodeBin, args: [entry] }
+    : { file: shimPath, args: [] };
+}
+
 export async function ensureRuntimeGraphAccess({
   graph,
   home = homedir(),
   execFileImpl = execFileAsync,
+  platform = process.platform,
+  resolveInvocation = resolveWindowsCommandInvocation,
 } = {}) {
   try {
     const store = JSON.parse(
@@ -77,25 +150,47 @@ export async function ensureRuntimeGraphAccess({
     // No store yet: fall through to the connect attempt.
   }
 
-  try {
-    await execFileImpl(
-      "npx",
-      [
-        "-y",
-        "@roam-research/roam-mcp",
-        "connect",
-        "--graph",
-        graph,
-        "--nickname",
-        graph,
-        "--access-level",
-        "full",
-      ],
-      { timeout: 120_000 },
-    );
+  const npxArgs = [
+    "-y",
+    "@roam-research/roam-mcp",
+    "connect",
+    "--graph",
+    graph,
+    "--nickname",
+    graph,
+    "--access-level",
+    "full",
+  ];
+  const runConnect = async (command, args) => {
+    await execFileImpl(command, args, { timeout: 120_000 });
     return { connected: true, alreadyConnected: false };
-  } catch (error) {
-    return { connected: false, error: error?.message || "connect failed" };
+  };
+  try {
+    return await runConnect("npx", npxArgs);
+  } catch (firstError) {
+    if (platform !== "win32") {
+      return {
+        connected: false,
+        error: firstError?.message || "connect failed",
+      };
+    }
+    try {
+      const invocation = await resolveInvocation({
+        command: "npx",
+        execFileImpl,
+        platform,
+      });
+      if (!invocation.args.length) throw firstError;
+      return await runConnect(invocation.file, [
+        ...invocation.args,
+        ...npxArgs,
+      ]);
+    } catch {
+      return {
+        connected: false,
+        error: firstError?.message || "connect failed",
+      };
+    }
   }
 }
 
@@ -570,15 +665,27 @@ export class AppServerClient extends EventEmitter {
     } catch {
       // A missing or unreadable config has no user MCP servers to disable.
     }
-    const child = this.spawnProcess(
-      this.command,
-      runtimeAppServerArgs({ disableServers: scannedServers }),
-      {
-        cwd: this.runtimeCwd,
-        env: process.env,
-        stdio: ["pipe", "pipe", "pipe"],
-      },
-    );
+    const args = runtimeAppServerArgs({ disableServers: scannedServers });
+    const spawnOptions = {
+      cwd: this.runtimeCwd,
+      env: process.env,
+      stdio: ["pipe", "pipe", "pipe"],
+    };
+    let child;
+    try {
+      child = this.spawnProcess(this.command, args, spawnOptions);
+    } catch (error) {
+      if (process.platform !== "win32") throw error;
+      const invocation = await resolveWindowsCommandInvocation({
+        command: this.command,
+      });
+      if (!invocation.args.length) throw error;
+      child = this.spawnProcess(
+        invocation.file,
+        [...invocation.args, ...args],
+        spawnOptions,
+      );
+    }
     this.child = child;
 
     const stdout = createInterface({ input: child.stdout });

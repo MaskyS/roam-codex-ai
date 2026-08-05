@@ -55,6 +55,14 @@ runs from a private versioned copy under `~/.roam-better-ai/app/`, rather than
 depending on npm's temporary `npx` cache. You do not need to keep the terminal
 open, and you never need to run it again until you choose to update.
 
+On macOS this installs the background service. On Windows and Linux, `setup`
+validates the Codex CLI and then asks you to keep the bridge running in a
+terminal instead:
+
+```bash
+npx roam-codex-bridge run
+```
+
 If the Codex CLI is missing, the command tells you how to install it:
 
 ```bash
