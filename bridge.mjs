@@ -346,6 +346,14 @@ function threadSummary(thread) {
   };
 }
 
+// App Server folds process CLI overrides and a thread's config overrides into
+// one ordered session layer. The thread sends `mcp_servers` as a whole-table
+// override, so its Roam entry must repeat the transport from the process layer.
+const RUNTIME_ROAM_TRANSPORT = Object.freeze({
+  command: "npx",
+  args: Object.freeze(["--yes", "@roam-research/roam-mcp"]),
+});
+
 export function runtimeAppServerArgs({ disableServers = [] } = {}) {
   const disabledServers = [...new Set(disableServers)]
     .filter((server) =>
@@ -367,14 +375,6 @@ export function runtimeAppServerArgs({ disableServers = [] } = {}) {
     "features.remote_plugin=false",
     "-c",
     "apps._default.enabled=false",
-    "-c",
-    'mcp_servers.roam.command="npx"',
-    "-c",
-    'mcp_servers.roam.args=["--yes","@roam-research/roam-mcp"]',
-    "-c",
-    "mcp_servers.roam.enabled=true",
-    "-c",
-    `mcp_servers.roam.enabled_tools=${JSON.stringify(RUNTIME_CHAT_ROAM_TOOLS)}`,
     ...(disabledServers.length
       ? [
           "-c",
@@ -385,6 +385,16 @@ export function runtimeAppServerArgs({ disableServers = [] } = {}) {
           }}`,
         ]
       : []),
+    // Whole-table overrides above replace earlier writes in the same session
+    // layer, so define the complete Roam entry after them.
+    "-c",
+    `mcp_servers.roam.command=${JSON.stringify(RUNTIME_ROAM_TRANSPORT.command)}`,
+    "-c",
+    `mcp_servers.roam.args=${JSON.stringify(RUNTIME_ROAM_TRANSPORT.args)}`,
+    "-c",
+    "mcp_servers.roam.enabled=true",
+    "-c",
+    `mcp_servers.roam.enabled_tools=${JSON.stringify(RUNTIME_CHAT_ROAM_TOOLS)}`,
   ];
 }
 
@@ -398,7 +408,12 @@ export function runtimeThreadConfig(enabledTools, {
     if (name === "roam") continue;
     servers[name] = { enabled: enabled.has(name) };
   }
-  servers.roam = { enabled: true, enabled_tools: enabledTools };
+  servers.roam = {
+    ...RUNTIME_ROAM_TRANSPORT,
+    args: [...RUNTIME_ROAM_TRANSPORT.args],
+    enabled: true,
+    enabled_tools: enabledTools,
+  };
   return {
     features: {
       apps: false,

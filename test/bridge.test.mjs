@@ -305,6 +305,11 @@ test("runtime app-server exposes direct graph tools to persistent chat", () => {
     args.filter((arg) => arg.includes('"node_repl"={enabled=false}')).length,
     1,
   );
+  assert.ok(
+    args.findIndex((arg) => arg.startsWith("mcp_servers={")) <
+      args.findIndex((arg) => arg.startsWith("mcp_servers.roam.command=")),
+    "the complete Roam entry must follow the whole-table override",
+  );
 });
 
 test("every runtime thread disables all known servers except roam and opt-ins", () => {
@@ -322,6 +327,12 @@ test("every runtime thread disables all known servers except roam and opt-ins", 
   assert.deepEqual(
     config.mcp_servers.roam.enabled_tools,
     ["get_graph_guidelines", "get_block"],
+  );
+  // This whole-table thread override must carry a complete Roam transport.
+  assert.equal(config.mcp_servers.roam.command, "npx");
+  assert.deepEqual(
+    config.mcp_servers.roam.args,
+    ["--yes", "@roam-research/roam-mcp"],
   );
 });
 
