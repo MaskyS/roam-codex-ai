@@ -40,11 +40,10 @@ and the runtime never executes inside this builder repository.
 
 ## Chat ownership and lifecycle
 
-`Codex: Open chat` uses a focused ordinary block when possible. Otherwise it
-creates a visually empty scratch block on the current page or Daily Note and
-opens that block with Roam's supported right-sidebar API. Roam's native Block
-Outline remains the editor, preserving page references, block references,
-autocomplete, keyboard behavior, and nested outlines.
+`Codex: Open chat` creates a visually empty scratch block on the current page
+or Daily Note and opens that block with Roam's supported right-sidebar API.
+Roam's native Block Outline remains the editor, preserving page references,
+block references, autocomplete, keyboard behavior, and nested outlines.
 
 The extension snapshots the submitted outline before clearing an
 extension-owned composer. A successful send keeps the composer empty. Failure,
@@ -52,6 +51,13 @@ Stop, or a rejected steer restores the submitted UIDs, hierarchy, and order
 unless the user has already written a newer draft. Existing source blocks are
 protected and are never cleared or deleted. Closing chat removes only an
 untouched extension-created placeholder.
+
+Before taking that snapshot, Send and Alt+Enter blur the exact active native
+editor so Roam can commit its local draft. After the graph reset, the extension
+waits for that same editor to become empty or be replaced before it restores
+focus once. A newer input event cancels clearing, refocusing, or failure
+restoration as appropriate. The extension never rewrites Roam's editor DOM and
+does not guess which nested editor is active from CSS order.
 
 The first message starts a persistent App Server thread; later messages resume
 it. During an active turn, Send becomes Steer and calls `turn/steer` with the

@@ -107,6 +107,9 @@ Roam's right-sidebar toggle, or press `Cmd-J` on macOS (`Ctrl-J` elsewhere).
 Write in the native composer and select **Send**. Its picker contains the model,
 reasoning effort, graph access, and optional tools. During a turn, another
 composer message can **Steer** it, while **Stop** interrupts it.
+After an accepted send, the submitted outline clears from the composer. A new
+draft you begin while Codex is working is preserved if that turn stops or
+fails.
 
 ![An active Codex turn with the Steer and Stop controls](./docs/images/roam-codex-steering.webp)
 

@@ -2418,6 +2418,7 @@ export async function clearScratchPromptBlock(
     protectedPromptUids = null,
     rootBlockUid = null,
     scratchPrompt = false,
+    canContinue = () => true,
   } = {},
 ) {
   const resetPrompt = resetChatPromptSnapshot(prompt, {
@@ -2450,6 +2451,7 @@ export async function clearScratchPromptBlock(
   ) {
     return false;
   }
+  if (!canContinue()) return false;
 
   // Mark the root as the empty composer before removing its submitted
   // descendants. If a later delete fails, restoration can distinguish this
@@ -2459,6 +2461,13 @@ export async function clearScratchPromptBlock(
   });
   for (const child of currentOutline.children) {
     if (outlineContainsProtectedUid(child, protectedPromptUids)) continue;
+    if (!canContinue()) {
+      const error = new Error(
+        "The composer changed while it was being cleared. Review it and try again.",
+      );
+      error.code = "COMPOSER_CHANGED_DURING_CLEAR";
+      throw error;
+    }
     await api.data.block.delete({ block: { uid: child.uid } });
   }
   return true;
@@ -2487,14 +2496,28 @@ function outlineIsOrderedSubset(currentChildren, submittedChildren) {
   return true;
 }
 
-async function createChatPromptOutline(outline, parentUid, order, api) {
+async function createChatPromptOutline(
+  outline,
+  parentUid,
+  order,
+  api,
+  canContinue,
+) {
+  if (!canContinue()) return false;
   await api.data.block.create({
     location: { "parent-uid": parentUid, order },
     block: { uid: outline.uid, string: outline.string },
   });
   for (const [childOrder, child] of outline.children.entries()) {
-    await createChatPromptOutline(child, outline.uid, childOrder, api);
+    if (!await createChatPromptOutline(
+      child,
+      outline.uid,
+      childOrder,
+      api,
+      canContinue,
+    )) return false;
   }
+  return true;
 }
 
 export async function restoreClearedChatPromptBlock(
@@ -2503,6 +2526,7 @@ export async function restoreClearedChatPromptBlock(
     api = getRoamApi(),
     rootBlockUid = null,
     scratchPrompt = false,
+    canContinue = () => true,
   } = {},
 ) {
   const resetPrompt = resetChatPromptSnapshot(prompt, {
@@ -2536,14 +2560,22 @@ export async function restoreClearedChatPromptBlock(
   )) {
     return false;
   }
+  if (!canContinue()) return false;
 
   const currentChildUids = new Set(
     currentOutline.children.map((child) => child.uid),
   );
   for (const [order, child] of resetPrompt.outline.children.entries()) {
     if (currentChildUids.has(child.uid)) continue;
-    await createChatPromptOutline(child, resetPrompt.uid, order, api);
+    if (!await createChatPromptOutline(
+      child,
+      resetPrompt.uid,
+      order,
+      api,
+      canContinue,
+    )) return false;
   }
+  if (!canContinue()) return false;
   await api.data.block.update({
     block: {
       uid: resetPrompt.uid,
@@ -2644,24 +2676,30 @@ export function createChatPanel({
   copyTextImpl = copyRoamText,
   setTimeoutImpl = globalThis.setTimeout,
   clearTimeoutImpl = globalThis.clearTimeout,
+  settleComposerEditorImpl = (delay = 0) =>
+    new Promise((resolve) => globalThis.setTimeout(resolve, delay)),
+  composerSettleTimeoutMs = 800,
+  composerSettlePollMs = 25,
   setIntervalImpl = globalThis.setInterval?.bind(globalThis),
   clearIntervalImpl = globalThis.clearInterval?.bind(globalThis),
   matchMediaImpl = globalThis.matchMedia?.bind(globalThis),
   navigatorImpl = globalThis.navigator,
   readPromptImpl = ({ preferredBlockUid = null } = {}) =>
     readFocusedPromptBlock(rootBlockUid, { api, preferredBlockUid }),
-  clearScratchPromptImpl = (prompt) =>
+  clearScratchPromptImpl = (prompt, options = {}) =>
     clearScratchPromptBlock(prompt, {
       api,
       protectedPromptUids,
       rootBlockUid,
       scratchPrompt,
+      canContinue: options.canContinue,
     }),
-  restorePromptImpl = (prompt) =>
+  restorePromptImpl = (prompt, options = {}) =>
     restoreClearedChatPromptBlock(prompt, {
       api,
       rootBlockUid,
       scratchPrompt,
+      canContinue: options.canContinue,
     }),
   cancelRequest = requestRunCancellation,
   steerRequest = requestRunSteer,
@@ -2731,6 +2769,7 @@ export function createChatPanel({
   let pickerLevel = null;
   let stopDisabled = false;
   let lastComposerBlockUid = rootBlockUid;
+  let composerEditVersion = 0;
   const copyFeedbackTimers = new Map();
   const copyStates = new Map();
   const approvalCards = new Map();
@@ -2745,6 +2784,64 @@ export function createChatPanel({
     ) {
       lastComposerBlockUid = focused["block-uid"];
     }
+  };
+
+  const findComposerShellContaining = (element) => {
+    const closest = element?.closest?.(".roam-codex-chat-composer-shell");
+    if (closest) return closest;
+    for (const shell of doc.querySelectorAll?.(
+      ".roam-codex-chat-composer-shell",
+    ) || []) {
+      if (shell.contains?.(element)) return shell;
+    }
+    const shell = doc.querySelector?.(".roam-codex-chat-composer-shell");
+    return shell?.contains?.(element) ? shell : null;
+  };
+
+  const findActiveComposerEditor = () => {
+    const active = doc.activeElement;
+    if (!findComposerShellContaining(active)) return null;
+    const contentEditable = active?.isContentEditable === true ||
+      active?.getAttribute?.("contenteditable") === "true";
+    return contentEditable ? active : null;
+  };
+
+  const recordComposerEdit = (event) => {
+    if (!findComposerShellContaining(event?.target)) return;
+    composerEditVersion += 1;
+    rememberComposerFocus();
+  };
+
+  const prepareComposerEditorForSubmit = async () => {
+    rememberComposerFocus();
+    const editor = findActiveComposerEditor();
+    if (!editor) {
+      return {
+        editor: null,
+        canObserveReset: false,
+        editVersion: composerEditVersion,
+      };
+    }
+
+    // Roam's mounted editor owns an uncommitted local draft. Blur the exact
+    // active contenteditable before reading through the Alpha API so pointer
+    // and keyboard sends snapshot the same committed graph state.
+    editor.blur?.();
+    await settleComposerEditorImpl(0);
+    await settleComposerEditorImpl(0);
+    if (findActiveComposerEditor() === editor) {
+      throw new Error(
+        "Roam's composer is still finishing the current edit. Try again.",
+      );
+    }
+
+    return {
+      editor,
+      canObserveReset:
+        editor.isConnected !== false &&
+        Boolean(normalizeChatPromptText(editor.textContent)),
+      editVersion: composerEditVersion,
+    };
   };
 
   const panel = createPanelElement(doc, "section", CHAT_PANEL_CLASS);
@@ -3885,22 +3982,60 @@ export function createChatPanel({
     if (historyOpen) renderHistory();
   };
 
-  const clearComposerForSubmit = async (prompt) => {
+  const observedEditorHasReset = (submission) => {
+    if (!submission?.canObserveReset) return false;
+    return submission.editor?.isConnected === false ||
+      !normalizeChatPromptText(submission.editor?.textContent);
+  };
+
+  const waitForObservedEditorReset = async (submission) => {
+    if (!submission?.canObserveReset) return false;
+    const pollMs = Math.max(1, Number(composerSettlePollMs) || 1);
+    const timeoutMs = Math.max(0, Number(composerSettleTimeoutMs) || 0);
+    const attempts = Math.ceil(timeoutMs / pollMs);
+    for (let attempt = 0; attempt <= attempts; attempt += 1) {
+      if (
+        composerEditVersion !== submission.editVersion ||
+        findActiveComposerEditor()
+      ) return false;
+      if (observedEditorHasReset(submission)) return true;
+      if (attempt === attempts) break;
+      await settleComposerEditorImpl(pollMs);
+    }
+    return false;
+  };
+
+  const clearComposerForSubmit = async (prompt, submission) => {
     const shouldClearPrompt = shouldClearChatPrompt(prompt.uid, {
       scratchPrompt,
       protectedPromptUids,
     });
-    if (!shouldClearPrompt) return { ok: true, composerCleared: false };
+    const editVersion = submission?.editVersion ?? composerEditVersion;
+    if (composerEditVersion !== editVersion) {
+      return {
+        ok: false,
+        error:
+          "The composer changed before it could be sent. Review it and try again.",
+      };
+    }
+    if (!shouldClearPrompt) {
+      return { ok: true, composerCleared: false, editVersion };
+    }
     const resetBlockUid = scratchPrompt ? rootBlockUid : prompt.uid;
     let composerCleared = false;
+    const editIsCurrent = () => composerEditVersion === editVersion;
     try {
-      composerCleared = await clearScratchPromptImpl(prompt);
+      composerCleared = await clearScratchPromptImpl(prompt, {
+        canContinue: editIsCurrent,
+      });
     } catch (error) {
-      try {
-        await restorePromptImpl(prompt);
-      } catch {
-        // The original reset error is more useful than a secondary recovery
-        // error. The composer remains visible for manual recovery.
+      if (editIsCurrent()) {
+        try {
+          await restorePromptImpl(prompt, { canContinue: editIsCurrent });
+        } catch {
+          // The original reset error is more useful than a secondary recovery
+          // error. The composer remains visible for manual recovery.
+        }
       }
       return {
         ok: false,
@@ -3915,27 +4050,54 @@ export function createChatPanel({
     }
     lastComposerBlockUid = resetBlockUid;
     resetPromptUids.add(resetBlockUid);
-    try {
-      const sidebarWindow = findSidebarBlockWindow(rootBlockUid, { api });
-      if (sidebarWindow?.["window-id"]) {
-        await api.ui.setBlockFocusAndSelection({
-          location: {
-            "block-uid": resetBlockUid,
-            "window-id": sidebarWindow["window-id"],
-          },
-        });
-      }
-    } catch {
-      // The outline has already reset successfully. A focus failure should
-      // not turn a valid send into a failed one.
-    }
-    return { ok: true, composerCleared: true };
+    const refocusReady = editIsCurrent() &&
+      await waitForObservedEditorReset(submission);
+    return {
+      ok: true,
+      composerCleared: true,
+      editVersion,
+      refocusReady,
+      resetBlockUid,
+      submission,
+    };
   };
 
-  const restoreSubmittedPrompt = async (prompt) => {
+  const refocusClearedComposer = async (cleared) => {
+    if (!cleared?.refocusReady) return false;
+    await settleComposerEditorImpl(0);
+    if (
+      composerEditVersion !== cleared.editVersion ||
+      findActiveComposerEditor() ||
+      !observedEditorHasReset(cleared.submission)
+    ) return false;
     try {
-      const restored = await restorePromptImpl(prompt);
-      if (restored) {
+      const sidebarWindow = findSidebarBlockWindow(rootBlockUid, { api });
+      if (!sidebarWindow?.["window-id"]) return false;
+      await api.ui.setBlockFocusAndSelection({
+        location: {
+          "block-uid": cleared.resetBlockUid,
+          "window-id": sidebarWindow["window-id"],
+        },
+      });
+      return true;
+    } catch {
+      // The outline is already empty. A focus failure should not turn a
+      // valid send into a failed one.
+      return false;
+    }
+  };
+
+  const restoreSubmittedPrompt = async (prompt, cleared) => {
+    const editVersion = cleared?.editVersion ?? composerEditVersion;
+    const editIsCurrent = () => composerEditVersion === editVersion;
+    if (!editIsCurrent()) {
+      return { restored: false, restoreFailed: false, newerDraft: true };
+    }
+    try {
+      const restored = await restorePromptImpl(prompt, {
+        canContinue: editIsCurrent,
+      });
+      if (restored && editIsCurrent()) {
         const focusUid = prompt.focusUid || prompt.uid;
         lastComposerBlockUid = focusUid;
         const sidebarWindow = findSidebarBlockWindow(rootBlockUid, { api });
@@ -3948,15 +4110,25 @@ export function createChatPanel({
           });
         }
       }
-      return { restored, restoreFailed: false };
+      return {
+        restored: restored && editIsCurrent(),
+        restoreFailed: false,
+        newerDraft: !editIsCurrent(),
+      };
     } catch {
-      return { restored: false, restoreFailed: true };
+      return {
+        restored: false,
+        restoreFailed: editIsCurrent(),
+        newerDraft: !editIsCurrent(),
+      };
     }
   };
 
   const steerActiveTurn = async (steerRunId) => {
     let prompt;
+    let submission;
     try {
+      submission = await prepareComposerEditorForSubmit();
       prompt = await readPromptImpl({
         preferredBlockUid: lastComposerBlockUid,
       });
@@ -3965,7 +4137,7 @@ export function createChatPanel({
       setProgress(error.message || "Write a message in the chat composer.", "error");
       return null;
     }
-    const cleared = await clearComposerForSubmit(prompt);
+    const cleared = await clearComposerForSubmit(prompt, submission);
     if (!cleared.ok) {
       setProgress(cleared.error, "error");
       return null;
@@ -3977,6 +4149,7 @@ export function createChatPanel({
     };
     messages.push(bubble);
     renderMessages();
+    await refocusClearedComposer(cleared);
     setProgress("Adding to the current turn", "activity");
     try {
       await steerRequest(steerRunId, prompt.text);
@@ -3989,8 +4162,10 @@ export function createChatPanel({
       }
       let restored = false;
       let restoreFailed = false;
+      let newerDraft = false;
       if (cleared.composerCleared) {
-        ({ restored, restoreFailed } = await restoreSubmittedPrompt(prompt));
+        ({ restored, restoreFailed, newerDraft } =
+          await restoreSubmittedPrompt(prompt, cleared));
       }
       if (["NOT_PAIRED", "BRIDGE_UNREACHABLE"].includes(error.code)) {
         setProgress("", "");
@@ -4008,7 +4183,9 @@ export function createChatPanel({
           ? `${failureText} The submitted outline could not be restored.`
           : restored
             ? `${failureText} · Draft restored.`
-            : failureText,
+            : newerDraft
+              ? `${failureText} · Current draft preserved.`
+              : failureText,
         "error",
       );
       return null;
@@ -4043,7 +4220,9 @@ export function createChatPanel({
       }
     }
     let prompt;
+    let submission;
     try {
+      submission = await prepareComposerEditorForSubmit();
       prompt = await readPromptImpl({
         preferredBlockUid: lastComposerBlockUid,
       });
@@ -4069,7 +4248,7 @@ export function createChatPanel({
       // the official MCP fallback instead of blocking the user's turn.
     }
 
-    const cleared = await clearComposerForSubmit(prompt);
+    const cleared = await clearComposerForSubmit(prompt, submission);
     if (!cleared.ok) {
       setProgress(cleared.error, "error");
       setRunning(false);
@@ -4083,6 +4262,7 @@ export function createChatPanel({
       outline: prompt.outline,
     });
     renderMessages();
+    await refocusClearedComposer(cleared);
     runId = null;
     setProgress("Starting", "activity");
 
@@ -4143,8 +4323,10 @@ export function createChatPanel({
     } catch (error) {
       let restored = false;
       let restoreFailed = false;
+      let newerDraft = false;
       if (composerCleared) {
-        ({ restored, restoreFailed } = await restoreSubmittedPrompt(prompt));
+        ({ restored, restoreFailed, newerDraft } =
+          await restoreSubmittedPrompt(prompt, cleared));
       }
       if (["NOT_PAIRED", "BRIDGE_UNREACHABLE"].includes(error.code)) {
         setProgress("", "");
@@ -4157,9 +4339,11 @@ export function createChatPanel({
             ? "Stopped · submitted outline could not be restored"
             : restored
               ? "Stopped · draft restored"
-              : composerCleared
+              : newerDraft
                 ? "Stopped · current draft preserved"
-                : "Stopped",
+                : composerCleared
+                  ? "Stopped · current draft preserved"
+                  : "Stopped",
           restoreFailed ? "error" : "stopped",
         );
         return null;
@@ -4173,9 +4357,11 @@ export function createChatPanel({
           ? `${failureText} The submitted outline could not be restored.`
           : restored
             ? `${failureText} · Draft restored.`
-            : composerCleared
+            : newerDraft
               ? `${failureText} · The current draft was preserved.`
-              : failureText,
+              : composerCleared
+                ? `${failureText} · The current draft was preserved.`
+                : failureText,
         "error",
       );
       void refreshConnection();
@@ -4248,6 +4434,7 @@ export function createChatPanel({
     doc.removeEventListener?.("keydown", handleSendShortcut, true);
     doc.removeEventListener?.("focusin", rememberComposerFocus, true);
     doc.removeEventListener?.("selectionchange", rememberComposerFocus, true);
+    doc.removeEventListener?.("input", recordComposerEdit, true);
     doc.removeEventListener?.("click", handleDocumentClick, true);
     doc.removeEventListener?.("visibilitychange", handleVisibilityChange);
     doc.defaultView?.removeEventListener?.("focus", handleWindowFocus);
@@ -4297,6 +4484,7 @@ export function createChatPanel({
   doc.addEventListener?.("keydown", handleSendShortcut, true);
   doc.addEventListener?.("focusin", rememberComposerFocus, true);
   doc.addEventListener?.("selectionchange", rememberComposerFocus, true);
+  doc.addEventListener?.("input", recordComposerEdit, true);
   doc.addEventListener?.("click", handleDocumentClick, true);
   doc.addEventListener?.("visibilitychange", handleVisibilityChange);
   doc.defaultView?.addEventListener?.("focus", handleWindowFocus);

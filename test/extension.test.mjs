@@ -556,6 +556,29 @@ function createFakePanelDocument() {
   return doc;
 }
 
+function fakeComposerEditor(doc, text) {
+  return {
+    isContentEditable: true,
+    isConnected: true,
+    textContent: text,
+    blurCalls: 0,
+    blur() {
+      this.blurCalls += 1;
+      if (doc.activeElement === this) doc.activeElement = null;
+    },
+  };
+}
+
+function attachFakeComposerShell(doc, editors, activeEditor) {
+  const shell = {
+    contains: (target) => editors.includes(target),
+  };
+  doc.querySelector = (selector) =>
+    selector === ".roam-codex-chat-composer-shell" ? shell : null;
+  doc.activeElement = activeEditor;
+  return shell;
+}
+
 function panelElements(controller) {
   const elements = [];
   const visit = (element) => {
@@ -1600,6 +1623,54 @@ test("composer reset clears the unchanged submitted outline but keeps its root U
   assert.equal(updates.length, 1);
 });
 
+test("composer reset stops before deleting descendants after a concurrent edit", async () => {
+  const updates = [];
+  const deletions = [];
+  let continuationChecks = 0;
+  const prompt = {
+    uid: "scratch123",
+    text: "Submitted draft",
+    outline: {
+      uid: "scratch123",
+      string: "Submitted draft",
+      children: [{ uid: "child123", string: "Context", children: [] }],
+    },
+  };
+  const api = {
+    data: {
+      async: {
+        pull: async () => ({
+          ":block/uid": "scratch123",
+          ":block/string": "Submitted draft",
+          ":block/children": [{
+            ":block/uid": "child123",
+            ":block/string": "Context",
+          }],
+        }),
+      },
+      block: {
+        update: async (input) => updates.push(input),
+        delete: async (input) => deletions.push(input),
+      },
+    },
+  };
+
+  await assert.rejects(
+    clearScratchPromptBlock(prompt, {
+      api,
+      canContinue: () => {
+        continuationChecks += 1;
+        return continuationChecks === 1;
+      },
+    }),
+    (error) => error.code === "COMPOSER_CHANGED_DURING_CLEAR",
+  );
+  assert.deepEqual(updates, [{
+    block: { uid: "scratch123", string: CHAT_COMPOSER_PLACEHOLDER },
+  }]);
+  assert.deepEqual(deletions, []);
+});
+
 test("failed send restoration recreates the exact submitted outline", async () => {
   const creates = [];
   const updates = [];
@@ -1656,6 +1727,40 @@ test("failed send restoration recreates the exact submitted outline", async () =
   assert.deepEqual(updates, [{
     block: { uid: "scratchRoot", string: "Planning question" },
   }]);
+});
+
+test("failure restoration rechecks for a newer edit after its graph read", async () => {
+  const writes = [];
+  const prompt = {
+    uid: "prompt123",
+    text: "Submitted draft",
+    outline: {
+      uid: "prompt123",
+      string: "Submitted draft",
+      children: [],
+    },
+  };
+  const api = {
+    data: {
+      async: {
+        pull: async () => ({
+          ":block/uid": "prompt123",
+          ":block/string": CHAT_COMPOSER_PLACEHOLDER,
+          ":block/children": [],
+        }),
+      },
+      block: {
+        create: async (input) => writes.push(input),
+        update: async (input) => writes.push(input),
+      },
+    },
+  };
+
+  assert.equal(await restoreClearedChatPromptBlock(prompt, {
+    api,
+    canContinue: () => false,
+  }), false);
+  assert.deepEqual(writes, []);
 });
 
 test("failed send restoration never overwrites a newer composer draft", async () => {
@@ -2862,12 +2967,9 @@ test("chat clears a scratch composer before requesting a reply", async () => {
   assert.equal(chatRequests, 1);
   assert.deepEqual(lifecycle, ["clear", "request"]);
   assert.deepEqual(clearedPrompts, [{ uid: "prompt123", text: "Hello" }]);
-  assert.deepEqual(focusAfterClear, {
-    location: {
-      "block-uid": "root123",
-      "window-id": "sidebar-block-root123",
-    },
-  });
+  // With no observable active native editor, the graph reset still succeeds
+  // but focus is left alone rather than being restored on a timer.
+  assert.equal(focusAfterClear, undefined);
 
   await new Promise((resolve) => setImmediate(resolve));
   const conversationButton = allElements.find(
@@ -2913,6 +3015,517 @@ test("chat clears a scratch composer before requesting a reply", async () => {
   assert.deepEqual([...resetPromptUidsAtClose], ["root123"]);
   assert.equal(controller.element.removed, true);
   assert.equal(controller.controlsElement.removed, true);
+});
+
+test("first send waits for the active editor's post-promise reset and refocuses once", async () => {
+  const doc = createFakePanelDocument();
+  const editor = fakeComposerEditor(doc, "Hello from a New Chat");
+  attachFakeComposerShell(doc, [editor], editor);
+  const lifecycle = [];
+  const focusCalls = [];
+  let resetQueued = false;
+  const controller = createChatPanel({
+    doc,
+    storage: { getItem: () => null, setItem: () => {} },
+    api: {
+      ui: {
+        getFocusedBlock: () => ({
+          "block-uid": "root123",
+          "window-id": "sidebar-block-root123",
+        }),
+        rightSidebar: {
+          getWindows: () => [{
+            type: "block",
+            "block-uid": "root123",
+            "window-id": "sidebar-block-root123",
+          }],
+        },
+        setBlockFocusAndSelection: async ({ location }) => {
+          lifecycle.push("focus");
+          focusCalls.push({
+            location,
+            editorText: editor.textContent,
+          });
+        },
+      },
+    },
+    rootBlockUid: "root123",
+    scratchPrompt: true,
+    protectedPromptUids: new Set(["root123"]),
+    readPromptImpl: async () => {
+      lifecycle.push("read");
+      assert.equal(doc.activeElement, null);
+      return {
+        uid: "root123",
+        focusUid: "root123",
+        text: "Hello from a New Chat",
+        outline: {
+          uid: "root123",
+          string: "Hello from a New Chat",
+          children: [],
+        },
+        rootOutline: {
+          uid: "root123",
+          string: "Hello from a New Chat",
+          children: [],
+        },
+      };
+    },
+    clearScratchPromptImpl: async () => {
+      lifecycle.push("clear-resolved");
+      resetQueued = true;
+      return true;
+    },
+    settleComposerEditorImpl: async (delay) => {
+      lifecycle.push(`settle:${delay}`);
+      if (resetQueued) {
+        resetQueued = false;
+        editor.textContent = CHAT_COMPOSER_PLACEHOLDER;
+        lifecycle.push("editor-reset-rendered");
+      }
+    },
+    composerSettleTimeoutMs: 50,
+    composerSettlePollMs: 25,
+    requestChatImpl: async () => {
+      lifecycle.push("request");
+      return {
+        threadId: "thread_reset_123",
+        turnId: "turn-reset",
+        reply: "Done",
+      };
+    },
+    requestModelsImpl: async () => [],
+    requestMessagesImpl: async () => [],
+    requestHistoryImpl: async () => ({
+      threads: [],
+      missingThreadIds: [],
+      unavailableThreadIds: [],
+    }),
+    requestGraphIndexImpl: async () => ({ records: [], errors: [] }),
+    ensureGraphThreadImpl: async () => null,
+  });
+
+  await controller.send();
+
+  assert.equal(editor.blurCalls, 1);
+  assert.deepEqual(focusCalls, [{
+    location: {
+      "block-uid": "root123",
+      "window-id": "sidebar-block-root123",
+    },
+    editorText: CHAT_COMPOSER_PLACEHOLDER,
+  }]);
+  assert.ok(lifecycle.indexOf("clear-resolved") <
+    lifecycle.indexOf("editor-reset-rendered"));
+  assert.ok(lifecycle.indexOf("editor-reset-rendered") <
+    lifecycle.indexOf("focus"));
+  assert.ok(lifecycle.indexOf("focus") < lifecycle.indexOf("request"));
+  await controller.close();
+  assert.equal(doc.listeners.input, undefined);
+});
+
+test("mouse Send and Option+Enter share the state-safe composer reset", async (t) => {
+  for (const dispatch of ["mouse Send", "Option+Enter"]) {
+    await t.test(dispatch, async () => {
+      const doc = createFakePanelDocument();
+      const editor = fakeComposerEditor(doc, `${dispatch} draft`);
+      attachFakeComposerShell(doc, [editor], editor);
+      const lifecycle = [];
+      const focusCalls = [];
+      let resetQueued = false;
+      let requestObserved;
+      const requestStarted = new Promise((resolve) => {
+        requestObserved = resolve;
+      });
+      const controller = createChatPanel({
+        doc,
+        storage: { getItem: () => null, setItem: () => {} },
+        api: {
+          ui: {
+            getFocusedBlock: () => ({
+              "block-uid": "root123",
+              "window-id": "sidebar-block-root123",
+            }),
+            rightSidebar: {
+              getWindows: () => [{
+                type: "block",
+                "block-uid": "root123",
+                "window-id": "sidebar-block-root123",
+              }],
+            },
+            setBlockFocusAndSelection: async ({ location }) => {
+              focusCalls.push(location);
+            },
+          },
+        },
+        rootBlockUid: "root123",
+        scratchPrompt: true,
+        readPromptImpl: async () => ({
+          uid: "root123",
+          focusUid: "root123",
+          text: `${dispatch} draft`,
+          outline: {
+            uid: "root123",
+            string: `${dispatch} draft`,
+            children: [],
+          },
+          rootOutline: {
+            uid: "root123",
+            string: `${dispatch} draft`,
+            children: [],
+          },
+        }),
+        clearScratchPromptImpl: async (_prompt, { canContinue }) => {
+          assert.equal(canContinue(), true);
+          lifecycle.push("clear");
+          resetQueued = true;
+          return true;
+        },
+        settleComposerEditorImpl: async () => {
+          if (!resetQueued) return;
+          resetQueued = false;
+          editor.textContent = CHAT_COMPOSER_PLACEHOLDER;
+        },
+        composerSettleTimeoutMs: 50,
+        composerSettlePollMs: 25,
+        requestChatImpl: async () => {
+          lifecycle.push("request");
+          requestObserved();
+          return {
+            threadId: `thread_${dispatch === "mouse Send" ? "mouse" : "option"}`,
+            turnId: "turn-dispatch",
+            reply: "Done",
+          };
+        },
+        requestModelsImpl: async () => [],
+        requestMessagesImpl: async () => [],
+        requestHistoryImpl: async () => ({
+          threads: [],
+          missingThreadIds: [],
+          unavailableThreadIds: [],
+        }),
+        requestGraphIndexImpl: async () => ({ records: [], errors: [] }),
+        ensureGraphThreadImpl: async () => null,
+      });
+      await Promise.resolve();
+
+      if (dispatch === "mouse Send") {
+        const sendButton = panelElements(controller).find(
+          (element) => element.className === "roam-codex-chat-send",
+        );
+        let preventedMouseFocus = 0;
+        sendButton.listeners.mousedown({
+          preventDefault: () => { preventedMouseFocus += 1; },
+        });
+        sendButton.listeners.click();
+        assert.equal(preventedMouseFocus, 1);
+      } else {
+        let prevented = 0;
+        let stopped = 0;
+        doc.listeners.keydown({
+          key: "Enter",
+          altKey: true,
+          metaKey: false,
+          ctrlKey: false,
+          defaultPrevented: false,
+          preventDefault: () => { prevented += 1; },
+          stopPropagation: () => { stopped += 1; },
+        });
+        assert.equal(prevented, 1);
+        assert.equal(stopped, 1);
+      }
+
+      await requestStarted;
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(editor.blurCalls, 1);
+      assert.equal(editor.textContent, CHAT_COMPOSER_PLACEHOLDER);
+      assert.deepEqual(lifecycle, ["clear", "request"]);
+      assert.deepEqual(focusCalls, [{
+        "block-uid": "root123",
+        "window-id": "sidebar-block-root123",
+      }]);
+      await controller.close();
+    });
+  }
+});
+
+test("structured prompts observe the active nested editor rather than the first editor", async () => {
+  const doc = createFakePanelDocument();
+  const rootEditor = fakeComposerEditor(doc, "Root question");
+  const childEditor = fakeComposerEditor(doc, "Nested context");
+  const composerShell = attachFakeComposerShell(
+    doc,
+    [rootEditor, childEditor],
+    childEditor,
+  );
+  const staleShell = { contains: () => false };
+  doc.querySelector = () => staleShell;
+  doc.querySelectorAll = () => [staleShell, composerShell];
+  const focusCalls = [];
+  let resetQueued = false;
+  const controller = createChatPanel({
+    doc,
+    storage: { getItem: () => null, setItem: () => {} },
+    api: {
+      ui: {
+        getFocusedBlock: () => ({
+          "block-uid": "child123",
+          "window-id": "sidebar-block-root123",
+        }),
+        rightSidebar: {
+          getWindows: () => [{
+            type: "block",
+            "block-uid": "root123",
+            "window-id": "sidebar-block-root123",
+          }],
+        },
+        setBlockFocusAndSelection: async ({ location }) => {
+          focusCalls.push(location["block-uid"]);
+        },
+      },
+    },
+    rootBlockUid: "root123",
+    scratchPrompt: true,
+    readPromptImpl: async () => ({
+      uid: "root123",
+      focusUid: "child123",
+      text: "Root question\n- Nested context",
+      outline: {
+        uid: "root123",
+        string: "Root question",
+        children: [{
+          uid: "child123",
+          string: "Nested context",
+          children: [],
+        }],
+      },
+      rootOutline: {
+        uid: "root123",
+        string: "Root question",
+        children: [{
+          uid: "child123",
+          string: "Nested context",
+          children: [],
+        }],
+      },
+    }),
+    clearScratchPromptImpl: async () => {
+      resetQueued = true;
+      return true;
+    },
+    settleComposerEditorImpl: async () => {
+      if (resetQueued) {
+        resetQueued = false;
+        childEditor.isConnected = false;
+      }
+    },
+    composerSettleTimeoutMs: 50,
+    composerSettlePollMs: 25,
+    requestChatImpl: async () => ({
+      threadId: "thread_nested_123",
+      turnId: "turn-nested",
+      reply: "Done",
+    }),
+    requestModelsImpl: async () => [],
+    requestMessagesImpl: async () => [],
+    requestHistoryImpl: async () => ({
+      threads: [],
+      missingThreadIds: [],
+      unavailableThreadIds: [],
+    }),
+    requestGraphIndexImpl: async () => ({ records: [], errors: [] }),
+    ensureGraphThreadImpl: async () => null,
+  });
+
+  await controller.send();
+
+  assert.equal(rootEditor.blurCalls, 0);
+  assert.equal(childEditor.blurCalls, 1);
+  assert.equal(rootEditor.textContent, "Root question");
+  assert.deepEqual(focusCalls, ["root123"]);
+  await controller.close();
+});
+
+test("a stale native editor is neither rewritten nor refocused on timeout", async () => {
+  const doc = createFakePanelDocument();
+  const editor = fakeComposerEditor(doc, "Stale submitted text");
+  attachFakeComposerShell(doc, [editor], editor);
+  const focusCalls = [];
+  const execCommands = [];
+  doc.execCommand = (...args) => execCommands.push(args);
+  const controller = createChatPanel({
+    doc,
+    storage: { getItem: () => null, setItem: () => {} },
+    api: {
+      ui: {
+        rightSidebar: {
+          getWindows: () => [{
+            type: "block",
+            "block-uid": "root123",
+            "window-id": "sidebar-block-root123",
+          }],
+        },
+        setBlockFocusAndSelection: async ({ location }) => {
+          focusCalls.push(location);
+        },
+      },
+      data: {
+        block: {
+          update: async () => assert.fail("timeout must not heal graph text"),
+        },
+      },
+    },
+    rootBlockUid: "root123",
+    scratchPrompt: true,
+    readPromptImpl: async () => ({
+      uid: "root123",
+      text: "Stale submitted text",
+    }),
+    clearScratchPromptImpl: async () => true,
+    settleComposerEditorImpl: async () => {},
+    composerSettleTimeoutMs: 25,
+    composerSettlePollMs: 25,
+    requestChatImpl: async () => ({
+      threadId: "thread_stale_123",
+      turnId: "turn-stale",
+      reply: "Done",
+    }),
+    requestModelsImpl: async () => [],
+    requestMessagesImpl: async () => [],
+    requestHistoryImpl: async () => ({
+      threads: [],
+      missingThreadIds: [],
+      unavailableThreadIds: [],
+    }),
+    requestGraphIndexImpl: async () => ({ records: [], errors: [] }),
+    ensureGraphThreadImpl: async () => null,
+  });
+
+  await controller.send();
+
+  assert.equal(editor.textContent, "Stale submitted text");
+  assert.deepEqual(execCommands, []);
+  assert.deepEqual(focusCalls, []);
+  await controller.close();
+});
+
+test("a newer local draft cancels refocus and failure restoration", async () => {
+  const doc = createFakePanelDocument();
+  const editor = fakeComposerEditor(doc, "Submitted draft");
+  attachFakeComposerShell(doc, [editor], editor);
+  let resetQueued = false;
+  let restoreCalls = 0;
+  let focusCalls = 0;
+  const controller = createChatPanel({
+    doc,
+    storage: { getItem: () => null, setItem: () => {} },
+    api: {
+      ui: {
+        rightSidebar: {
+          getWindows: () => [{
+            type: "block",
+            "block-uid": "root123",
+            "window-id": "sidebar-block-root123",
+          }],
+        },
+        setBlockFocusAndSelection: async () => {
+          focusCalls += 1;
+        },
+      },
+    },
+    rootBlockUid: "root123",
+    scratchPrompt: true,
+    readPromptImpl: async () => ({
+      uid: "root123",
+      text: "Submitted draft",
+      outline: {
+        uid: "root123",
+        string: "Submitted draft",
+        children: [],
+      },
+      rootOutline: {
+        uid: "root123",
+        string: "Submitted draft",
+        children: [],
+      },
+    }),
+    clearScratchPromptImpl: async () => {
+      resetQueued = true;
+      return true;
+    },
+    restorePromptImpl: async () => {
+      restoreCalls += 1;
+      return true;
+    },
+    settleComposerEditorImpl: async () => {
+      if (!resetQueued) return;
+      resetQueued = false;
+      doc.activeElement = editor;
+      editor.textContent = "Newer local draft";
+      doc.listeners.input?.({ target: editor });
+    },
+    composerSettleTimeoutMs: 50,
+    composerSettlePollMs: 25,
+    requestChatImpl: async () => {
+      throw new Error("Bridge unavailable");
+    },
+    requestModelsImpl: async () => [],
+    requestMessagesImpl: async () => [],
+    requestHistoryImpl: async () => ({
+      threads: [],
+      missingThreadIds: [],
+      unavailableThreadIds: [],
+    }),
+    requestGraphIndexImpl: async () => ({ records: [], errors: [] }),
+  });
+
+  assert.equal(await controller.send(), null);
+  assert.equal(editor.textContent, "Newer local draft");
+  assert.equal(restoreCalls, 0);
+  assert.equal(focusCalls, 0);
+  await controller.close();
+});
+
+test("an edit after prompt read aborts before clear or request", async () => {
+  const doc = createFakePanelDocument();
+  const editor = fakeComposerEditor(doc, "Submitted draft");
+  attachFakeComposerShell(doc, [editor], editor);
+  const lifecycle = [];
+  const controller = createChatPanel({
+    doc,
+    storage: { getItem: () => null, setItem: () => {} },
+    api: { ui: { rightSidebar: { getWindows: () => [] } } },
+    rootBlockUid: "root123",
+    scratchPrompt: true,
+    settleComposerEditorImpl: async () => {},
+    readPromptImpl: async () => {
+      lifecycle.push("read");
+      doc.activeElement = editor;
+      editor.textContent = "Newer draft before clear";
+      doc.listeners.input?.({ target: editor });
+      return { uid: "root123", text: "Submitted draft" };
+    },
+    clearScratchPromptImpl: async () => {
+      lifecycle.push("clear");
+      return true;
+    },
+    requestChatImpl: async () => {
+      lifecycle.push("request");
+      return null;
+    },
+    requestModelsImpl: async () => [],
+    requestMessagesImpl: async () => [],
+    requestHistoryImpl: async () => ({
+      threads: [],
+      missingThreadIds: [],
+      unavailableThreadIds: [],
+    }),
+  });
+
+  assert.equal(await controller.send(), null);
+  assert.deepEqual(lifecycle, ["read"]);
+  assert.equal(editor.textContent, "Newer draft before clear");
+  await controller.close();
 });
 
 test("a failed or stopped turn restores the submitted outline after optimistic clear", async (t) => {
@@ -2977,7 +3590,7 @@ test("a failed or stopped turn restores the submitted outline after optimistic c
 
       assert.equal(await controller.send(), null);
       assert.deepEqual(lifecycle, ["clear", "request", "restore"]);
-      assert.deepEqual(focusedUids, ["prompt123", "prompt123"]);
+      assert.deepEqual(focusedUids, ["prompt123"]);
       await controller.close();
     });
   }
