@@ -1734,7 +1734,12 @@ test("auth status and browser sign-in flow through the app-server client", async
   const calls = [];
   client.request = async (method, params) => {
     calls.push({ method, params });
-    if (method === "getAuthStatus") return { authMethod: "chatgpt" };
+    if (method === "account/read") {
+      return {
+        account: { type: "chatgpt", email: null, planType: "plus" },
+        requiresOpenaiAuth: true,
+      };
+    }
     if (method === "account/login/start") {
       return { type: "chatgpt", loginId: "login-1", authUrl: "https://auth.example/start" };
     }
@@ -1750,19 +1755,41 @@ test("auth status and browser sign-in flow through the app-server client", async
     authUrl: "https://auth.example/start",
   });
   assert.deepEqual(calls.map((call) => call.method), [
-    "getAuthStatus",
+    "account/read",
     "account/login/start",
   ]);
+  assert.deepEqual(calls[0].params, { refreshToken: false });
 
   for (const [result, expected] of [
-    [{ authMethod: "apikey", requiresOpenaiAuth: true }, true],
-    [{ authMethod: null, requiresOpenaiAuth: false }, true],
-    [{ authMethod: null, requiresOpenaiAuth: true }, false],
-    [{ authMethod: null, requiresOpenaiAuth: null }, false],
-    [{ authMethod: null }, false],
+    [
+      { account: { type: "apiKey" }, requiresOpenaiAuth: true },
+      { authenticated: true, method: "apiKey" },
+    ],
+    [
+      {
+        account: {
+          type: "amazonBedrock",
+          usesCodexManagedCredentials: false,
+        },
+        requiresOpenaiAuth: false,
+      },
+      { authenticated: true, method: "amazonBedrock" },
+    ],
+    [
+      { account: null, requiresOpenaiAuth: false },
+      { authenticated: true, method: null },
+    ],
+    [
+      { account: null, requiresOpenaiAuth: true },
+      { authenticated: false, method: null },
+    ],
+    [
+      { account: null },
+      { authenticated: false, method: null },
+    ],
   ]) {
     client.request = async () => result;
-    assert.equal((await client.readAuthStatus()).authenticated, expected);
+    assert.deepEqual(await client.readAuthStatus(), expected);
   }
 });
 

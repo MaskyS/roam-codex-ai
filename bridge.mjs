@@ -940,14 +940,16 @@ export class AppServerClient extends EventEmitter {
 
   async readAuthStatus() {
     await this.start();
-    const result = await this.request("getAuthStatus", {
-      includeToken: false,
+    const result = await this.request("account/read", {
       refreshToken: false,
     });
+    const accountType = typeof result?.account?.type === "string"
+      ? result.account.type
+      : null;
     return {
-      authenticated: Boolean(result?.authMethod) ||
+      authenticated: Boolean(accountType) ||
         result?.requiresOpenaiAuth === false,
-      method: result?.authMethod || null,
+      method: accountType,
     };
   }
 
