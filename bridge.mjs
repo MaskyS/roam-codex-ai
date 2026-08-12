@@ -411,6 +411,7 @@ export function runtimeThreadConfig(enabledTools, {
   servers.roam = {
     ...RUNTIME_ROAM_TRANSPORT,
     args: [...RUNTIME_ROAM_TRANSPORT.args],
+    required: true,
     enabled: true,
     enabled_tools: enabledTools,
   };
@@ -944,7 +945,8 @@ export class AppServerClient extends EventEmitter {
       refreshToken: false,
     });
     return {
-      authenticated: Boolean(result?.authMethod),
+      authenticated: Boolean(result?.authMethod) ||
+        result?.requiresOpenaiAuth === false,
       method: result?.authMethod || null,
     };
   }

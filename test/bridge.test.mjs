@@ -334,6 +334,8 @@ test("every runtime thread disables all known servers except roam and opt-ins", 
     config.mcp_servers.roam.args,
     ["--yes", "@roam-research/roam-mcp"],
   );
+  assert.equal(config.mcp_servers.roam.required, true);
+  assert.equal(Object.hasOwn(config.mcp_servers.roam, "transport"), false);
 });
 
 test("config scanner finds MCP server names in headers and dotted keys", () => {
@@ -532,6 +534,8 @@ test("app-server chat starts and resumes a persistent panel conversation", async
     threadStart.params.config.mcp_servers.roam.enabled_tools,
     threadResume.params.config.mcp_servers.roam.enabled_tools,
   );
+  assert.equal(threadStart.params.config.mcp_servers.roam.required, true);
+  assert.equal(threadResume.params.config.mcp_servers.roam.required, true);
   assert.ok(
     threadStart.params.config.mcp_servers.roam.enabled_tools.includes(
       "update_block",
@@ -1726,8 +1730,16 @@ test("auth status and browser sign-in flow through the app-server client", async
     "account/login/start",
   ]);
 
-  client.request = async () => ({ authMethod: null });
-  assert.equal((await client.readAuthStatus()).authenticated, false);
+  for (const [result, expected] of [
+    [{ authMethod: "apikey", requiresOpenaiAuth: true }, true],
+    [{ authMethod: null, requiresOpenaiAuth: false }, true],
+    [{ authMethod: null, requiresOpenaiAuth: true }, false],
+    [{ authMethod: null, requiresOpenaiAuth: null }, false],
+    [{ authMethod: null }, false],
+  ]) {
+    client.request = async () => result;
+    assert.equal((await client.readAuthStatus()).authenticated, expected);
+  }
 });
 
 test("bridge exposes health version plus auth state and sign-in endpoints", async (t) => {
