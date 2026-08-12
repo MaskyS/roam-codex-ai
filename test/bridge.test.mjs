@@ -1629,6 +1629,30 @@ test("a work run is a chat turn with the block prompt and work instructions", as
   );
 });
 
+test("a work run omits its implicit priority tier when unsupported", async () => {
+  const client = new AppServerClient({ runtimeCwd: "/runtime/agent" });
+  client.listModels = async () => [{
+    id: "default-model",
+    isDefault: true,
+    defaultServiceTier: "standard",
+    serviceTiers: [{ id: "standard" }],
+  }];
+  client.runChat = async (options) => options;
+
+  const options = await client.runWork({
+    graph: "maskys",
+    blockUid: "abcdefghi",
+  });
+  assert.equal(options.serviceTier, undefined);
+
+  const explicit = await client.runWork({
+    graph: "maskys",
+    blockUid: "abcdefghi",
+    serviceTier: "priority",
+  });
+  assert.equal(explicit.serviceTier, "priority");
+});
+
 test("read-only access keeps write tools away from a work run", async () => {
   const client = new AppServerClient({ runtimeCwd: "/runtime/agent" });
   const requests = [];
