@@ -411,6 +411,7 @@ export function runtimeThreadConfig(enabledTools, {
   servers.roam = {
     ...RUNTIME_ROAM_TRANSPORT,
     args: [...RUNTIME_ROAM_TRANSPORT.args],
+    required: true,
     enabled: true,
     enabled_tools: enabledTools,
   };
@@ -939,13 +940,16 @@ export class AppServerClient extends EventEmitter {
 
   async readAuthStatus() {
     await this.start();
-    const result = await this.request("getAuthStatus", {
-      includeToken: false,
+    const result = await this.request("account/read", {
       refreshToken: false,
     });
+    const accountType = typeof result?.account?.type === "string"
+      ? result.account.type
+      : null;
     return {
-      authenticated: Boolean(result?.authMethod),
-      method: result?.authMethod || null,
+      authenticated: Boolean(accountType) ||
+        result?.requiresOpenaiAuth === false,
+      method: accountType,
     };
   }
 
@@ -1281,11 +1285,24 @@ export class AppServerClient extends EventEmitter {
     blockUid,
     accessMode = "auto",
     enabledServers = [],
-    serviceTier = "priority",
+    serviceTier,
     ...rest
   }) {
     if (!/^[A-Za-z0-9_-]{6,64}$/.test(blockUid || "")) {
       throw rpcError("A valid Roam block UID is required.", "BLOCK_UID_INVALID");
+    }
+    let effectiveServiceTier = serviceTier;
+    if (serviceTier === undefined) {
+      const models = await this.listModels();
+      const selectedModel = rest.model
+        ? models.find((entry) => entry.id === rest.model)
+        : models.find((entry) => entry.isDefault) || models[0];
+      const tierIds = Array.isArray(selectedModel?.serviceTiers)
+        ? selectedModel.serviceTiers.map((tier) => tier?.id)
+        : [];
+      effectiveServiceTier = tierIds.includes("priority")
+        ? "priority"
+        : undefined;
     }
     return this.runChat({
       ...rest,
@@ -1295,7 +1312,7 @@ export class AppServerClient extends EventEmitter {
       threadId: null,
       accessMode,
       enabledServers,
-      serviceTier,
+      serviceTier: effectiveServiceTier,
       instructions: RUNTIME_WORK_INSTRUCTIONS,
       ephemeral: true,
       serviceName: "roam_codex_work",
