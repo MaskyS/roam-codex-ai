@@ -1,6 +1,6 @@
 {
   "name": "roam-codex-bridge",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "private": false,
   "type": "module",
   "description": "Local bridge that connects the Roam Codex extension to the Codex App Server.",
